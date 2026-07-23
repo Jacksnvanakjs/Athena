@@ -1,5 +1,5 @@
 app = "athena-fund"
-primary_region = "hkg"
+primary_region = "sin"
 
 [build]
 
