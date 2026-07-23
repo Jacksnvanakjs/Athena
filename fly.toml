@@ -2,6 +2,7 @@ app = "athena-fund"
 primary_region = "sin"
 
 [build]
+  dockerfile = "deploy/Dockerfile"
 
 [env]
   PORT = "8000"

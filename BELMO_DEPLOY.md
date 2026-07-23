@@ -30,19 +30,16 @@ Belmo 免费版：**不需绑卡、不需国内实名、24 小时不休眠**，�
 
 > `SCRAPE_SECRET` 可用终端生成：`openssl rand -hex 16`
 
-## 第四步：启动命令（如自动检测失败）
+## 第四步：启动命令（重要）
 
-Belmo 通常会自动识别 FastAPI。若需手动填写：
+Belmo 必须识别为 **Python**，不能是 Node.js。若显示 Node.js，请在控制台改为 Python，并设置：
 
-- **Build command**：（留空，自动检测）
 - **Start command**：
   ```
   python run.py
   ```
-  或
-  ```
-  uvicorn app.main:app --host 0.0.0.0 --port $PORT
-  ```
+
+项目根目录已包含 `Procfile`、`belmo.yml`、`runtime.txt`，推送代码后 Belmo 通常会自动识别为 Python/FastAPI。
 
 ## 第五步：点击 Deploy
 

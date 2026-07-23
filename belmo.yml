@@ -1,0 +1,10 @@
+runtime: python
+
+build:
+  command: pip install -r requirements.txt
+
+start:
+  command: python run.py
+
+healthCheck:
+  path: /api/status
