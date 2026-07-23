@@ -16,13 +16,15 @@ echo "==> 创建持久化存储卷..."
 $FLY volumes list -a athena-fund 2>/dev/null | grep -q athena_data || \
   $FLY volumes create athena_data --region sin --size 1 -a athena-fund
 
-echo ""
-echo "请设置 Server酱 SendKey（推送通知必需）："
-read -r -p "SERVERCHAN_SENDKEY: " SENDKEY
+if [ -z "${SERVERCHAN_SENDKEY:-}" ]; then
+  echo ""
+  echo "请设置 Server酱 SendKey（推送通知必需）："
+  read -r -p "SERVERCHAN_SENDKEY: " SERVERCHAN_SENDKEY
+fi
 
 echo "==> 配置环境变量..."
 $FLY secrets set \
-  SERVERCHAN_SENDKEY="$SENDKEY" \
+  SERVERCHAN_SENDKEY="$SERVERCHAN_SENDKEY" \
   SCRAPE_SECRET="$SCRAPE_SECRET" \
   TIMEZONE="Asia/Shanghai" \
   ENABLE_SCHEDULER="true" \
