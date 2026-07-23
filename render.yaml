@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: athena-fund
+    runtime: docker
+    plan: free
+    region: singapore
+    healthCheckPath: /api/status
+    envVars:
+      - key: TIMEZONE
+        value: Asia/Shanghai
+      - key: ENABLE_SCHEDULER
+        value: false
+      - key: SERVERCHAN_SENDKEY
+        sync: false
+      - key: SCRAPE_SECRET
+        sync: false
+    disk:
+      name: athena-data
+      mountPath: /app/data
+      sizeGB: 1
