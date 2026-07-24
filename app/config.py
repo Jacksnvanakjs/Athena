@@ -27,9 +27,25 @@ def _writable_data_dir() -> Path:
 
 DATA_DIR = _writable_data_dir()
 
+
+def _resolve_database_url() -> str:
+    explicit = os.getenv("DATABASE_URL")
+    if explicit and explicit.startswith("sqlite:///"):
+        db_path = Path(explicit.replace("sqlite:///", ""))
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            probe = db_path.parent / ".write_test"
+            probe.write_text("ok")
+            probe.unlink()
+            return explicit
+        except OSError:
+            pass
+    return f"sqlite:///{DATA_DIR}/funds.db"
+
+
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 SERVERCHAN_SENDKEY = os.getenv("SERVERCHAN_SENDKEY", "")
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR}/funds.db")
+DATABASE_URL = _resolve_database_url()
 FUNDS_SOURCE_FILE = os.getenv("FUNDS_SOURCE_FILE", str(BASE_DIR / "额度数据来源.txt"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Shanghai")
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"

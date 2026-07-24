@@ -36,8 +36,11 @@ SessionLocal = sessionmaker(bind=engine)
 
 
 def init_db():
-    db_path = DATABASE_URL.replace("sqlite:///", "")
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    db_path = Path(DATABASE_URL.replace("sqlite:///", ""))
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"无法创建数据库目录: {db_path.parent}") from e
     Base.metadata.create_all(bind=engine)
 
 

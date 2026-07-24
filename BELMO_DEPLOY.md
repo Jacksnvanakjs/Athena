@@ -25,8 +25,14 @@ Belmo 免费版：**不需绑卡、不需国内实名、24 小时不休眠**，�
 | `SCRAPE_SECRET` | 随机字符串 | 防止他人滥用抓取接口 |
 | `TIMEZONE` | `Asia/Shanghai` | 北京时间 |
 | `ENABLE_SCHEDULER` | `true` | 启用内置 9:00 / 18:00 定时抓取 |
-| `DATABASE_URL` | `sqlite:////app/data/funds.db` | 数据库路径 |
-| `FUNDS_SOURCE_FILE` | `额度数据来源.txt` | 基金列表文件 |
+
+> **不要**设置 `DATABASE_URL=sqlite:////app/data/funds.db`，Belmo 上 `/app` 只读，程序会自动使用 `/tmp/athena-data/`。
+
+在 Belmo **Settings** 里把 **Health Check Path** 设为：
+
+```
+/health
+```
 
 > `SCRAPE_SECRET` 可用终端生成：`openssl rand -hex 16`
 

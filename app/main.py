@@ -33,6 +33,11 @@ if static_dir.is_dir():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
