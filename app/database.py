@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
@@ -35,8 +36,6 @@ SessionLocal = sessionmaker(bind=engine)
 
 
 def init_db():
-    from pathlib import Path
-
     db_path = DATABASE_URL.replace("sqlite:///", "")
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)

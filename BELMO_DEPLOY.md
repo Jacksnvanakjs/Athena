@@ -73,6 +73,9 @@ https://athena-fund.app.belmo.io
 
 ## 常见问题
 
+**Q: 日志报 `/bin/bash: -c: option requires an argument`？**  
+说明启动命令为空，或误识别为 Node.js。在 Belmo 控制台将运行时改为 **Python**，Start command 填 `python run.py`，然后重新部署。
+
 **Q: 部署失败怎么办？**  
 查看 Belmo 控制台的 Build logs，确认 Python 3.13 和依赖安装成功。
 
