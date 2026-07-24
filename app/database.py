@@ -36,7 +36,9 @@ SessionLocal = sessionmaker(bind=engine)
 
 
 def init_db():
-    db_path = Path(DATABASE_URL.replace("sqlite:///", ""))
+    from app.config import DATABASE_URL as resolved_url
+
+    db_path = Path(resolved_url.replace("sqlite:///", ""))
     try:
         db_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:

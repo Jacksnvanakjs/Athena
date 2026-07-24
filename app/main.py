@@ -7,11 +7,14 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.database import init_db
+from app.config import FUNDS_SOURCE_FILE
+from app.database import QuotaRecord, SessionLocal, init_db
 from app.routes import router
 from app.scheduler import start_scheduler, stop_scheduler
+from app.service import run_scrape_and_notify
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -20,6 +23,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 async def lifespan(app: FastAPI):
     init_db()
     start_scheduler()
+    db = SessionLocal()
+    try:
+        if db.query(QuotaRecord).count() == 0:
+            logger.info("数据库为空，执行首次抓取...")
+            await run_scrape_and_notify(FUNDS_SOURCE_FILE)
+    finally:
+        db.close()
     yield
     stop_scheduler()
 

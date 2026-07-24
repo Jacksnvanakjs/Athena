@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
@@ -91,8 +91,8 @@ def all_history(
 
 
 @router.post("/scrape")
-async def trigger_scrape(x_scrape_secret: str | None = Header(default=None)):
-    _check_scrape_secret(x_scrape_secret)
+async def trigger_scrape():
+    """网页「立即抓取」按钮调用，无需密钥"""
     result = await run_scrape_and_notify(FUNDS_SOURCE_FILE)
     return result
 
