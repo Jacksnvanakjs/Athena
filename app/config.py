@@ -28,6 +28,17 @@ def _writable_data_dir() -> Path:
 DATA_DIR = _writable_data_dir()
 
 
+def _normalize_turso_url(url: str) -> str:
+    url = url.strip()
+    if url.startswith("https://"):
+        return "libsql://" + url[len("https://") :]
+    if url.startswith("http://"):
+        return "libsql://" + url[len("http://") :]
+    if url.startswith("libsql://"):
+        return url
+    return f"libsql://{url}"
+
+
 def _resolve_database_url() -> str:
     explicit = os.getenv("DATABASE_URL")
     if explicit and explicit.startswith("sqlite:///"):
@@ -45,6 +56,9 @@ def _resolve_database_url() -> str:
 
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
 SERVERCHAN_SENDKEY = os.getenv("SERVERCHAN_SENDKEY", "")
+TURSO_DATABASE_URL = _normalize_turso_url(os.getenv("TURSO_DATABASE_URL", "")) if os.getenv("TURSO_DATABASE_URL") else ""
+TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
+USE_TURSO = bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)
 DATABASE_URL = _resolve_database_url()
 FUNDS_SOURCE_FILE = os.getenv("FUNDS_SOURCE_FILE", str(BASE_DIR / "额度数据来源.txt"))
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Shanghai")

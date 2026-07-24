@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.config import FUNDS_SOURCE_FILE, SCRAPE_HOURS, SCRAPE_SECRET, TIMEZONE
+from app.config import FUNDS_SOURCE_FILE, SCRAPE_HOURS, SCRAPE_SECRET, TIMEZONE, USE_TURSO
 from app.database import Fund, QuotaRecord, get_db
 from app.service import run_scrape_and_notify
 from app.utils import is_trading_day
@@ -113,5 +113,6 @@ def system_status():
         "is_trading_day": is_trading_day(),
         "scrape_hours": SCRAPE_HOURS,
         "timezone": TIMEZONE,
+        "database": "turso" if USE_TURSO else "sqlite",
         "now": datetime.now().isoformat(),
     }

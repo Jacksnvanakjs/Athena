@@ -4,7 +4,7 @@ from pathlib import Path
 from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-from app.config import DATABASE_URL
+from app.config import DATABASE_URL, TURSO_AUTH_TOKEN, TURSO_DATABASE_URL, USE_TURSO
 
 
 class Base(DeclarativeBase):
@@ -31,18 +31,30 @@ class QuotaRecord(Base):
     scraped_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
 
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+def _create_engine():
+    if USE_TURSO:
+        import sqlalchemy_libsql  # noqa: F401 — registers sqlite+libsql dialect
+
+        return create_engine(
+            f"sqlite+{TURSO_DATABASE_URL}?secure=true",
+            connect_args={"auth_token": TURSO_AUTH_TOKEN},
+        )
+    return create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
+
+engine = _create_engine()
 SessionLocal = sessionmaker(bind=engine)
 
 
 def init_db():
-    from app.config import DATABASE_URL as resolved_url
+    if not USE_TURSO:
+        from app.config import DATABASE_URL as resolved_url
 
-    db_path = Path(resolved_url.replace("sqlite:///", ""))
-    try:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise RuntimeError(f"无法创建数据库目录: {db_path.parent}") from e
+        db_path = Path(resolved_url.replace("sqlite:///", ""))
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise RuntimeError(f"无法创建数据库目录: {db_path.parent}") from e
     Base.metadata.create_all(bind=engine)
 
 
