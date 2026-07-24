@@ -7,15 +7,16 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <style>
     :root {
-      --bg: #0f1117;
-      --surface: #1a1d27;
-      --border: #2a2d3a;
-      --text: #e4e6ed;
-      --text-muted: #8b8fa3;
-      --accent: #4f8cff;
-      --green: #34d399;
-      --red: #f87171;
-      --orange: #fbbf24;
+      --bg: #f5f7fa;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --accent: #2563eb;
+      --green: #059669;
+      --red: #dc2626;
+      --orange: #d97706;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -47,8 +48,8 @@
       font-size: 0.8rem;
       font-weight: 500;
     }
-    .badge-trading { background: #064e3b; color: var(--green); }
-    .badge-holiday { background: #451a03; color: var(--orange); }
+    .badge-trading { background: #d1fae5; color: #065f46; }
+    .badge-holiday { background: #fef3c7; color: #92400e; }
     .btn {
       padding: 8px 18px;
       border: none;
@@ -68,16 +69,45 @@
       margin-bottom: 28px;
     }
     .card {
+      position: relative;
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 18px;
-      transition: border-color 0.2s;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      box-shadow: var(--shadow);
     }
-    .card:hover { border-color: var(--accent); }
+    .card:hover { border-color: var(--accent); box-shadow: 0 4px 12px rgba(37, 99, 235, 0.12); }
+    .card-changed {
+      border: 2px solid #f59e0b;
+      background: #fffbeb;
+      box-shadow: 0 4px 14px rgba(245, 158, 11, 0.22);
+    }
+    .card-changed:hover { border-color: #d97706; box-shadow: 0 6px 18px rgba(245, 158, 11, 0.28); }
+    .card-changed .card-quota { color: #b45309; }
+    .card-change-badge {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      background: #f59e0b;
+      color: #fff;
+      font-size: 0.68rem;
+      padding: 3px 8px;
+      border-radius: 10px;
+      font-weight: 600;
+    }
     .card-name { font-size: 0.9rem; font-weight: 500; margin-bottom: 6px; }
     .card-code { font-size: 0.75rem; color: var(--text-muted); margin-bottom: 12px; }
     .card-quota { font-size: 1.6rem; font-weight: 700; }
+    .card-prev {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .card-prev strong { color: var(--text); font-weight: 500; }
     .card-status {
       display: inline-block;
       margin-top: 8px;
@@ -85,15 +115,16 @@
       border-radius: 6px;
       font-size: 0.75rem;
     }
-    .status-limited { background: #1e3a5f; color: var(--accent); }
-    .status-suspended { background: #4a1c1c; color: var(--red); }
-    .status-unknown { background: #333; color: var(--text-muted); }
+    .status-limited { background: #dbeafe; color: #1d4ed8; }
+    .status-suspended { background: #fee2e2; color: #b91c1c; }
+    .status-unknown { background: #f1f5f9; color: #64748b; }
     .chart-section {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 12px;
       padding: 20px;
       margin-bottom: 28px;
+      box-shadow: var(--shadow);
     }
     .chart-header {
       display: flex;
@@ -105,7 +136,7 @@
     }
     .chart-header h2 { font-size: 1.1rem; font-weight: 600; }
     select {
-      background: var(--bg);
+      background: var(--surface);
       color: var(--text);
       border: 1px solid var(--border);
       border-radius: 8px;
@@ -113,17 +144,6 @@
       font-size: 0.85rem;
     }
     .chart-wrap { position: relative; height: 380px; }
-    .table-section {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 20px;
-      overflow-x: auto;
-    }
-    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-    th, td { padding: 10px 14px; text-align: left; border-bottom: 1px solid var(--border); }
-    th { color: var(--text-muted); font-weight: 500; }
-    tr:hover td { background: rgba(79, 140, 255, 0.05); }
     .loading { text-align: center; padding: 40px; color: var(--text-muted); }
     .toast {
       position: fixed;
@@ -133,6 +153,8 @@
       border-radius: 8px;
       background: var(--surface);
       border: 1px solid var(--border);
+      color: var(--text);
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
       font-size: 0.85rem;
       opacity: 0;
       transition: opacity 0.3s;
@@ -161,31 +183,17 @@
         <div>
           <select id="fundSelect" onchange="updateChart()"></select>
           <select id="daysSelect" onchange="updateChart()" style="margin-left:8px">
-            <option value="7">近7天</option>
-            <option value="30" selected>近30天</option>
-            <option value="90">近90天</option>
+            <option value="30">近1月</option>
+            <option value="90">近3月</option>
+            <option value="180">近6月</option>
+            <option value="365" selected>近1年</option>
+            <option value="730">近2年</option>
           </select>
         </div>
       </div>
       <div class="chart-wrap">
         <canvas id="quotaChart"></canvas>
       </div>
-    </div>
-
-    <div class="table-section">
-      <h2 style="font-size:1.1rem;margin-bottom:14px">历史记录</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>基金</th>
-            <th>代码</th>
-            <th>状态</th>
-            <th>额度</th>
-            <th>抓取时间</th>
-          </tr>
-        </thead>
-        <tbody id="historyBody"></tbody>
-      </table>
     </div>
   </div>
 
@@ -194,6 +202,12 @@
   <script>
     let funds = [];
     let chart = null;
+    const chartTheme = {
+      accent: '#2563eb',
+      fill: 'rgba(37, 99, 235, 0.08)',
+      muted: '#64748b',
+      grid: '#e2e8f0',
+    };
 
     function showToast(msg) {
       const t = document.getElementById('toast');
@@ -207,10 +221,20 @@
       return q.toLocaleString('zh-CN', {minimumFractionDigits: 2}) + ' 元';
     }
 
+    function formatQuotaCard(q) {
+      if (q === 0 || q === null) return '0 元';
+      return q.toLocaleString('zh-CN', { maximumFractionDigits: 0 }) + ' 元';
+    }
+
     function statusClass(s) {
       if (s === '限大额') return 'status-limited';
       if (s === '暂停申购') return 'status-suspended';
       return 'status-unknown';
+    }
+
+    function hasChanged(f) {
+      if (f.previous_quota == null) return false;
+      return f.previous_quota !== f.quota || f.previous_status !== f.status;
     }
 
     async function loadStatus() {
@@ -220,46 +244,39 @@
       const badge = data.is_trading_day
         ? '<span class="badge badge-trading">交易日</span>'
         : '<span class="badge badge-holiday">非交易日</span>';
-      bar.innerHTML = badge + `<span>抓取时间: 每日 ${data.scrape_hours.join(':00 / ')}:00</span>`;
+      bar.innerHTML = badge + `<span>抓取时间: 每日 ${data.scrape_times.join(' / ')}</span>`;
     }
 
     async function loadFunds() {
       const res = await fetch('/api/funds');
       funds = await res.json();
+      funds.sort((a, b) => (b.quota ?? -1) - (a.quota ?? -1));
       const cards = document.getElementById('fundCards');
       if (!funds.length) {
         cards.innerHTML = '<div class="loading">暂无数据，请点击"立即抓取"</div>';
         return;
       }
-      cards.innerHTML = funds.map(f => `
-        <div class="card">
+      cards.innerHTML = funds.map(f => {
+        const changed = hasChanged(f);
+        const prevBlock = changed
+          ? `<div class="card-prev">上次：<strong>${formatQuotaCard(f.previous_quota)}</strong> · <span class="card-status ${statusClass(f.previous_status)}">${f.previous_status}</span></div>`
+          : '';
+        return `
+        <div class="card${changed ? ' card-changed' : ''}">
+          ${changed ? '<span class="card-change-badge">额度变化</span>' : ''}
           <div class="card-name">${f.name}</div>
           <div class="card-code">${f.code}</div>
-          <div class="card-quota">${formatQuota(f.quota)}</div>
+          <div class="card-quota">${formatQuotaCard(f.quota)}</div>
           <span class="card-status ${statusClass(f.status)}">${f.status || '未知'}</span>
+          ${prevBlock}
         </div>
-      `).join('');
+      `;
+      }).join('');
 
       const sel = document.getElementById('fundSelect');
       sel.innerHTML = funds.map(f =>
         `<option value="${f.code}">${f.name} (${f.code})</option>`
       ).join('');
-    }
-
-    async function loadHistory() {
-      const res = await fetch('/api/history?days=30');
-      const data = await res.json();
-      const tbody = document.getElementById('historyBody');
-      const sorted = data.sort((a, b) => new Date(b.scraped_at) - new Date(a.scraped_at));
-      tbody.innerHTML = sorted.slice(0, 50).map(r => `
-        <tr>
-          <td>${r.fund_name}</td>
-          <td>${r.fund_code}</td>
-          <td><span class="card-status ${statusClass(r.status)}">${r.status}</span></td>
-          <td>${formatQuota(r.quota)}</td>
-          <td>${new Date(r.scraped_at).toLocaleString('zh-CN')}</td>
-        </tr>
-      `).join('');
     }
 
     async function updateChart() {
@@ -285,8 +302,8 @@
           datasets: [{
             label: '单日累计购买上限 (元)',
             data: values,
-            borderColor: '#4f8cff',
-            backgroundColor: 'rgba(79,140,255,0.1)',
+            borderColor: chartTheme.accent,
+            backgroundColor: chartTheme.fill,
             fill: true,
             tension: 0.3,
             pointRadius: 3,
@@ -297,7 +314,7 @@
           responsive: true,
           maintainAspectRatio: false,
           plugins: {
-            legend: { labels: { color: '#8b8fa3' } },
+            legend: { labels: { color: chartTheme.muted } },
             tooltip: {
               callbacks: {
                 label: ctx => formatQuota(ctx.parsed.y)
@@ -305,8 +322,8 @@
             }
           },
           scales: {
-            x: { ticks: { color: '#8b8fa3', maxRotation: 45 }, grid: { color: '#2a2d3a' } },
-            y: { ticks: { color: '#8b8fa3' }, grid: { color: '#2a2d3a' }, beginAtZero: true }
+            x: { ticks: { color: chartTheme.muted, maxRotation: 45 }, grid: { color: chartTheme.grid } },
+            y: { ticks: { color: chartTheme.muted }, grid: { color: chartTheme.grid }, beginAtZero: true }
           }
         }
       });
@@ -338,14 +355,12 @@
 
     async function refresh() {
       await loadFunds();
-      await loadHistory();
       await updateChart();
     }
 
     async function init() {
       await loadStatus();
       await loadFunds();
-      await loadHistory();
       if (funds.length) await updateChart();
     }
 

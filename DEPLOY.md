@@ -103,8 +103,8 @@ git push -u origin main
 
 | 时间 | Cron 表达式 | URL |
 |------|-------------|-----|
-| 每天 9:00（北京时间） | `0 1 * * *`（UTC） | `https://你的app.onrender.com/api/cron/scrape?secret=你的SCRAPE_SECRET` |
-| 每天 18:00（北京时间） | `0 10 * * *`（UTC） | 同上 |
+| 每天 11:05（北京时间） | `5 3 * * *`（UTC） | `https://你的app.onrender.com/api/cron/scrape?secret=你的SCRAPE_SECRET` |
+| 每天 14:35（北京时间） | `35 6 * * *`（UTC） | 同上 |
 
 > cron-job.org 注册后，创建两个定时任务，时区选 UTC，填入上表中的表达式和 URL。
 

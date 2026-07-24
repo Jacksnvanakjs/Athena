@@ -66,6 +66,6 @@ ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"
 SCRAPE_SECRET = os.getenv("SCRAPE_SECRET", "")
 PORT = int(os.getenv("PORT", "8000"))
 
-SCRAPE_HOURS = [9, 18]
+SCRAPE_TIMES = [(11, 5), (14, 35)]
 RANDOM_DELAY_MIN = 1.0
 RANDOM_DELAY_MAX = 3.0

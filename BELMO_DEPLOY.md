@@ -47,7 +47,7 @@ turso db tokens create athena # 得到 TURSO_AUTH_TOKEN
 | `SERVERCHAN_SENDKEY` | 你的 SendKey | Server酱 推送密钥（必填） |
 | `SCRAPE_SECRET` | 随机字符串 | 保护 `/api/cron/scrape` 接口 |
 | `TIMEZONE` | `Asia/Shanghai` | 北京时间 |
-| `ENABLE_SCHEDULER` | `true` | 启用内置 9:00 / 18:00 定时抓取 |
+| `ENABLE_SCHEDULER` | `true` | 启用内置 11:05 / 14:35 定时抓取 |
 
 > 配置 Turso 后**不要**再设 `DATABASE_URL`，程序会自动使用 Turso。  
 > 未配置 Turso 时，程序回退到 `/tmp/athena-data/` 本地 SQLite（重新部署会丢历史）。

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.config import FUNDS_SOURCE_FILE, SCRAPE_HOURS, SCRAPE_SECRET, TIMEZONE, USE_TURSO
+from app.config import FUNDS_SOURCE_FILE, SCRAPE_SECRET, SCRAPE_TIMES, TIMEZONE, USE_TURSO
 from app.database import Fund, QuotaRecord, get_db
 from app.service import run_scrape_and_notify
 from app.utils import is_trading_day
@@ -21,14 +21,17 @@ def _check_scrape_secret(secret: str | None):
 def list_funds(db: Session = Depends(get_db)):
     funds = db.query(Fund).all()
     latest = {}
+    previous = {}
     for fund in funds:
-        record = (
+        records = (
             db.query(QuotaRecord)
             .filter(QuotaRecord.fund_code == fund.code)
             .order_by(desc(QuotaRecord.scraped_at))
-            .first()
+            .limit(2)
+            .all()
         )
-        latest[fund.code] = record
+        latest[fund.code] = records[0] if records else None
+        previous[fund.code] = records[1] if len(records) > 1 else None
 
     return [
         {
@@ -38,6 +41,8 @@ def list_funds(db: Session = Depends(get_db)):
             "status": latest[f.code].status if latest[f.code] else None,
             "quota": latest[f.code].quota if latest[f.code] else None,
             "scraped_at": latest[f.code].scraped_at.isoformat() if latest[f.code] else None,
+            "previous_status": previous[f.code].status if previous[f.code] else None,
+            "previous_quota": previous[f.code].quota if previous[f.code] else None,
         }
         for f in funds
     ]
@@ -46,7 +51,7 @@ def list_funds(db: Session = Depends(get_db)):
 @router.get("/history/{fund_code}")
 def fund_history(
     fund_code: str,
-    days: int = Query(default=30, ge=1, le=365),
+    days: int = Query(default=30, ge=1, le=730),
     db: Session = Depends(get_db),
 ):
     since = datetime.now() - timedelta(days=days)
@@ -68,7 +73,7 @@ def fund_history(
 
 @router.get("/history")
 def all_history(
-    days: int = Query(default=30, ge=1, le=365),
+    days: int = Query(default=30, ge=1, le=730),
     db: Session = Depends(get_db),
 ):
     since = datetime.now() - timedelta(days=days)
@@ -99,7 +104,7 @@ async def trigger_scrape():
 
 @router.get("/cron/scrape")
 async def cron_scrape(secret: str = Query(...)):
-    """供外部 cron 服务调用（如 cron-job.org），北京时间 9:00 / 18:00 触发"""
+    """供外部 cron 服务调用（如 cron-job.org），北京时间 11:05 / 14:35 触发"""
     _check_scrape_secret(secret)
     if not is_trading_day():
         return {"success": True, "skipped": True, "reason": "非交易日"}
@@ -111,7 +116,7 @@ async def cron_scrape(secret: str = Query(...)):
 def system_status():
     return {
         "is_trading_day": is_trading_day(),
-        "scrape_hours": SCRAPE_HOURS,
+        "scrape_times": [f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES],
         "timezone": TIMEZONE,
         "database": "turso" if USE_TURSO else "sqlite",
         "now": datetime.now().isoformat(),
