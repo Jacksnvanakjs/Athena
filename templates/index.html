@@ -244,7 +244,7 @@
       const badge = data.is_trading_day
         ? '<span class="badge badge-trading">交易日</span>'
         : '<span class="badge badge-holiday">非交易日</span>';
-      bar.innerHTML = badge + `<span>抓取时间: 每日 ${data.scrape_times.join(' / ')}</span>`;
+      bar.innerHTML = badge + `<span>抓取时间: 每日 ${data.scrape_times.join(' / ')}（北京时间）</span>`;
     }
 
     async function loadFunds() {

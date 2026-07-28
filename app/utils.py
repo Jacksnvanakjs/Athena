@@ -1,9 +1,14 @@
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import holidays
+
+from app.config import TIMEZONE
+
+_TZ = ZoneInfo(TIMEZONE)
 
 
 @dataclass
@@ -11,6 +16,15 @@ class FundInfo:
     name: str
     code: str
     url: str
+
+
+def now_beijing() -> datetime:
+    """返回无时区信息的北京时间，便于写入 SQLite/Turso 并按中国时间展示。"""
+    return datetime.now(_TZ).replace(tzinfo=None)
+
+
+def today_beijing() -> date:
+    return datetime.now(_TZ).date()
 
 
 def load_funds(source_file: str) -> list[FundInfo]:
@@ -30,7 +44,7 @@ def load_funds(source_file: str) -> list[FundInfo]:
 
 
 def is_trading_day(check_date: date | None = None) -> bool:
-    check_date = check_date or date.today()
+    check_date = check_date or today_beijing()
     if check_date.weekday() >= 5:
         return False
 

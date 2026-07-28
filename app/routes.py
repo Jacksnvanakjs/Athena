@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc
@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from app.config import FUNDS_SOURCE_FILE, SCRAPE_SECRET, SCRAPE_TIMES, TIMEZONE, USE_TURSO
 from app.database import Fund, QuotaRecord, get_db
 from app.service import run_scrape_and_notify
-from app.utils import is_trading_day
+from app.utils import is_trading_day, now_beijing
 
 router = APIRouter(prefix="/api")
 
@@ -54,7 +54,7 @@ def fund_history(
     days: int = Query(default=30, ge=1, le=730),
     db: Session = Depends(get_db),
 ):
-    since = datetime.now() - timedelta(days=days)
+    since = now_beijing() - timedelta(days=days)
     records = (
         db.query(QuotaRecord)
         .filter(QuotaRecord.fund_code == fund_code, QuotaRecord.scraped_at >= since)
@@ -76,7 +76,7 @@ def all_history(
     days: int = Query(default=30, ge=1, le=730),
     db: Session = Depends(get_db),
 ):
-    since = datetime.now() - timedelta(days=days)
+    since = now_beijing() - timedelta(days=days)
     records = (
         db.query(QuotaRecord)
         .filter(QuotaRecord.scraped_at >= since)
@@ -119,5 +119,5 @@ def system_status():
         "scrape_times": [f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES],
         "timezone": TIMEZONE,
         "database": "turso" if USE_TURSO else "sqlite",
-        "now": datetime.now().isoformat(),
+        "now": now_beijing().isoformat(timespec="seconds"),
     }

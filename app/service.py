@@ -1,12 +1,10 @@
-from datetime import datetime
-
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.database import Fund, QuotaRecord, SessionLocal
 from app.notifier import build_change_message, build_collective_change_message, notify
 from app.scraper import scrape_all_funds
-from app.utils import FundInfo, load_funds
+from app.utils import FundInfo, load_funds, now_beijing
 
 
 def sync_funds_to_db(db: Session, funds: list[FundInfo]):
@@ -45,7 +43,7 @@ async def run_scrape_and_notify(source_file: str) -> dict:
         sync_funds_to_db(db, funds)
         previous = get_latest_quotas(db)
         results = await scrape_all_funds(funds)
-        now = datetime.now()
+        now = now_beijing()
         changes = []
 
         for r in results:

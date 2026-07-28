@@ -1,10 +1,10 @@
-from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import DATABASE_URL, TURSO_AUTH_TOKEN, TURSO_DATABASE_URL, USE_TURSO
+from app.utils import now_beijing
 
 
 class Base(DeclarativeBase):
@@ -28,7 +28,7 @@ class QuotaRecord(Base):
     fund_name = Column(String(100), nullable=False)
     status = Column(String(20), nullable=False)
     quota = Column(Float, nullable=False)
-    scraped_at = Column(DateTime, nullable=False, default=datetime.now, index=True)
+    scraped_at = Column(DateTime, nullable=False, default=now_beijing, index=True)
 
 
 def _create_engine():
