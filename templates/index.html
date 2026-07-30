@@ -248,10 +248,18 @@
     }
 
     async function loadFunds() {
-      const res = await fetch('/api/funds');
-      funds = await res.json();
-      funds.sort((a, b) => (b.quota ?? -1) - (a.quota ?? -1));
       const cards = document.getElementById('fundCards');
+      try {
+        const res = await fetch('/api/funds');
+        if (!res.ok) {
+          throw new Error(`加载失败 (${res.status})`);
+        }
+        funds = await res.json();
+      } catch (e) {
+        cards.innerHTML = `<div class="loading">数据加载失败，请稍后刷新。${e.message}</div>`;
+        return;
+      }
+      funds.sort((a, b) => (b.quota ?? -1) - (a.quota ?? -1));
       if (!funds.length) {
         cards.innerHTML = '<div class="loading">暂无数据，请点击"立即抓取"</div>';
         return;

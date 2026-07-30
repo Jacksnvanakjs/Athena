@@ -1,11 +1,11 @@
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.config import FUNDS_SOURCE_FILE, SCRAPE_SECRET, SCRAPE_TIMES, TIMEZONE, USE_TURSO
-from app.database import Fund, QuotaRecord, get_db
+from app.database import Fund, QuotaRecord, run_with_db_retry
 from app.service import run_scrape_and_notify
 from app.utils import is_trading_day, now_beijing
 
@@ -17,8 +17,7 @@ def _check_scrape_secret(secret: str | None):
         raise HTTPException(status_code=403, detail="无效的密钥")
 
 
-@router.get("/funds")
-def list_funds(db: Session = Depends(get_db)):
+def _list_funds(db: Session):
     funds = db.query(Fund).all()
     latest = {}
     previous = {}
@@ -48,51 +47,62 @@ def list_funds(db: Session = Depends(get_db)):
     ]
 
 
+@router.get("/funds")
+def list_funds():
+    return run_with_db_retry(_list_funds)
+
+
 @router.get("/history/{fund_code}")
 def fund_history(
     fund_code: str,
     days: int = Query(default=30, ge=1, le=730),
-    db: Session = Depends(get_db),
 ):
     since = now_beijing() - timedelta(days=days)
-    records = (
-        db.query(QuotaRecord)
-        .filter(QuotaRecord.fund_code == fund_code, QuotaRecord.scraped_at >= since)
-        .order_by(QuotaRecord.scraped_at)
-        .all()
-    )
-    return [
-        {
-            "quota": r.quota,
-            "status": r.status,
-            "scraped_at": r.scraped_at.isoformat(),
-        }
-        for r in records
-    ]
+
+    def _query(db: Session):
+        records = (
+            db.query(QuotaRecord)
+            .filter(QuotaRecord.fund_code == fund_code, QuotaRecord.scraped_at >= since)
+            .order_by(QuotaRecord.scraped_at)
+            .all()
+        )
+        return [
+            {
+                "quota": r.quota,
+                "status": r.status,
+                "scraped_at": r.scraped_at.isoformat(),
+            }
+            for r in records
+        ]
+
+    return run_with_db_retry(_query)
 
 
 @router.get("/history")
 def all_history(
     days: int = Query(default=30, ge=1, le=730),
-    db: Session = Depends(get_db),
 ):
     since = now_beijing() - timedelta(days=days)
-    records = (
-        db.query(QuotaRecord)
-        .filter(QuotaRecord.scraped_at >= since)
-        .order_by(QuotaRecord.scraped_at)
-        .all()
-    )
-    return [
-        {
-            "fund_code": r.fund_code,
-            "fund_name": r.fund_name,
-            "quota": r.quota,
-            "status": r.status,
-            "scraped_at": r.scraped_at.isoformat(),
-        }
-        for r in records
-    ]
+
+    def _query(db: Session):
+        records = (
+            db.query(QuotaRecord)
+            .filter(QuotaRecord.scraped_at >= since)
+            .order_by(QuotaRecord.scraped_at)
+            .all()
+        )
+        return [
+            {
+                "fund_code": r.fund_code,
+                "fund_name": r.fund_name,
+                "quota": r.quota,
+                "status": r.status,
+                "scraped_at": r.scraped_at.isoformat(),
+            }
+            for r in records
+        ]
+
+    return run_with_db_retry(_query)
 
 
 @router.post("/scrape")
