@@ -170,7 +170,10 @@
         <h1>基金额度监测</h1>
         <div class="status-bar" id="statusBar"></div>
       </div>
-      <button class="btn btn-primary" id="scrapeBtn" onclick="triggerScrape()">立即抓取</button>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <a href="/heatmap" class="btn" style="background:#0f172a;color:#fff;text-decoration:none">美股热力图</a>
+        <button class="btn btn-primary" id="scrapeBtn" onclick="triggerScrape()">立即抓取</button>
+      </div>
     </header>
 
     <div class="cards" id="fundCards">

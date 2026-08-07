@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine, text
+from sqlalchemy import Column, Date, DateTime, Float, Integer, String, UniqueConstraint, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import DATABASE_URL, TURSO_AUTH_TOKEN, TURSO_DATABASE_URL, USE_TURSO
@@ -41,6 +41,30 @@ class QuotaRecord(Base):
     status = Column(String(20), nullable=False)
     quota = Column(Float, nullable=False)
     scraped_at = Column(DateTime, nullable=False, default=now_beijing, index=True)
+
+
+class HeatmapSnapshot(Base):
+    """美股热力图每日收盘快照（按美东交易日存一条）。"""
+
+    __tablename__ = "heatmap_snapshots"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "kind", "symbol", name="uq_heatmap_day_kind_symbol"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    kind = Column(String(20), nullable=False, index=True)  # sector | company
+    symbol = Column(String(20), nullable=False, index=True)
+    name = Column(String(100), nullable=False, default="")
+    cn_name = Column(String(100), nullable=False, default="")
+    sector_key = Column(String(40), nullable=False, default="", index=True)
+    sector_name = Column(String(40), nullable=False, default="")
+    price = Column(Float, nullable=False, default=0.0)
+    change_pct = Column(Float, nullable=False, default=0.0)
+    volume = Column(Float, nullable=False, default=0.0)
+    dollar_volume = Column(Float, nullable=False, default=0.0)
+    flow_score = Column(Float, nullable=False, default=0.0)
+    created_at = Column(DateTime, nullable=False, default=now_beijing)
 
 
 def is_turso_stream_error(exc: BaseException) -> bool:

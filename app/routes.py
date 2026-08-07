@@ -131,3 +131,29 @@ def system_status():
         "database": "turso" if USE_TURSO else "sqlite",
         "now": now_beijing().isoformat(timespec="seconds"),
     }
+
+
+@router.get("/heatmap")
+async def heatmap_data(force: bool = Query(default=False)):
+    """美股板块/个股热力图数据（缓存约 3 分钟）"""
+    from app.heatmap import get_heatmap_data
+
+    return await get_heatmap_data(force=force)
+
+
+@router.get("/heatmap/stats")
+def heatmap_stats(period: str = Query(default="1w")):
+    """多周期资金变化统计：1d / 1w / 15d / 1m / 2m / 3m"""
+    from app.heatmap import PERIODS, get_period_stats
+
+    if period not in PERIODS:
+        raise HTTPException(status_code=400, detail=f"period 支持: {', '.join(PERIODS)}")
+    return get_period_stats(period)
+
+
+@router.post("/heatmap/snapshot")
+async def heatmap_snapshot(force: bool = Query(default=True)):
+    """手动保存今日美股热力图快照（用于补数据或本地测试）"""
+    from app.heatmap import save_daily_snapshot
+
+    return await save_daily_snapshot(force=force)

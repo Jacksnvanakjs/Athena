@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>美股资金热力图</title>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --accent: #2563eb;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .container { max-width: 1280px; margin: 0 auto; padding: 24px 20px; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    h1 { font-size: 1.5rem; font-weight: 600; }
+    .sub { color: var(--text-muted); font-size: 0.85rem; margin-top: 4px; }
+    .btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      text-decoration: none;
+      display: inline-block;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-dark { background: #0f172a; color: #fff; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr 300px;
+      gap: 16px;
+    }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 16px;
+    }
+    .panel h2 { font-size: 1rem; margin-bottom: 12px; }
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+    }
+    .toolbar select {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 6px 12px;
+      font-size: 0.85rem;
+    }
+    .legend {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .legend-bar {
+      width: 140px;
+      height: 10px;
+      border-radius: 4px;
+      background: linear-gradient(90deg, #15803d, #86efac, #64748b, #fca5a5, #dc2626);
+    }
+    #treemap {
+      width: 100%;
+      height: 620px;
+      border-radius: 8px;
+      overflow: hidden;
+      background: #0f172a;
+    }
+    .small-labels {
+      margin-top: 10px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .small-chip {
+      font-size: 0.72rem;
+      padding: 3px 8px;
+      border-radius: 6px;
+      color: #fff;
+      font-weight: 600;
+      cursor: default;
+    }
+    .loading { text-align: center; padding: 60px 20px; color: var(--text-muted); }
+    .rank-list { list-style: none; }
+    .rank-list li {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+    }
+    .rank-list li:last-child { border-bottom: none; }
+    /* A股习惯：红涨绿跌 */
+    .up { color: #dc2626; font-weight: 600; }
+    .down { color: #15803d; font-weight: 600; }
+    .muted { color: var(--text-muted); }
+    .note {
+      margin-top: 14px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      line-height: 1.5;
+    }
+    .breadcrumb {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .breadcrumb a { color: var(--accent); cursor: pointer; text-decoration: none; }
+    .info-box {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      font-size: 0.84rem;
+      line-height: 1.65;
+      color: var(--text);
+    }
+    .info-box h3 {
+      font-size: 0.95rem;
+      margin-bottom: 8px;
+    }
+    .info-box ul { margin: 6px 0 10px 1.1em; color: var(--text-muted); }
+    .info-box li { margin: 2px 0; }
+    .info-box .muted { font-size: 0.8rem; }
+    .help {
+      display: inline-block;
+      margin-left: 4px;
+      width: 16px;
+      height: 16px;
+      line-height: 16px;
+      text-align: center;
+      border-radius: 50%;
+      background: #e2e8f0;
+      color: #475569;
+      font-size: 0.7rem;
+      font-weight: 700;
+      cursor: help;
+      vertical-align: middle;
+    }
+    .tip {
+      cursor: help;
+      border-bottom: 1px dotted currentColor;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>美股资金热力图</h1>
+        <div class="sub" id="metaLine">加载中...</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <a class="btn btn-dark" href="/">基金监测</a>
+        <button class="btn btn-dark" id="snapBtn" onclick="saveSnapshot()">存今日快照</button>
+        <button class="btn btn-primary" id="refreshBtn" onclick="reloadAll(true)">刷新</button>
+      </div>
+    </header>
+
+    <div class="info-box">
+      <h3>与一般网站不同：按「资金流入/流出」着色，不是股价涨跌</h3>
+      <p class="muted" style="margin-bottom:10px">
+        多数热力图用<strong>股价涨跌</strong>定红绿；本站用<strong>资金流代理</strong>（涨跌幅×成交额）：
+        <strong class="up">红=流入</strong>，<strong class="down">绿=流出</strong>。
+      </p>
+      <p class="muted" style="margin-bottom:10px">
+        <strong>% 怎么读（例：科技 +56.88%）：</strong>
+        不是股价涨了 56%，也不是「全市场有 56% 的钱进了科技」。
+        含义是：在本站监控的这些<strong>主要板块</strong>里，科技的资金活跃度约占合计的 56.88%，正数偏流入、负数偏流出。
+        <strong>分母（总量）只含本站约 11 个主要板块及其龙头股样本</strong>，不是美股全部板块/全部股票。股价涨跌可悬停查看。
+      </p>
+      <h3>数据说明（CNBC）</h3>
+      <p><strong>优势：</strong></p>
+      <ul>
+        <li>免费、可批量拉取美股/ETF 报价，适合自动存每日快照</li>
+        <li>龙头股与行业 ETF（如 XLK）价格、涨跌幅、成交量更新及时</li>
+        <li>便于做「涨跌 × 成交额」这类资金活跃度代理指标</li>
+      </ul>
+      <p><strong>局限：</strong></p>
+      <ul>
+        <li>不是交易所 Level2 真实资金流向（没有主动买卖单拆分）</li>
+        <li>每个板块只覆盖约 5～8 只龙头 + 1 只行业 ETF，不能代表板块全部成分股</li>
+        <li>与 Finviz Groups 等全样本板块涨跌榜数值会不一致，属样本与算法不同</li>
+      </ul>
+    </div>
+
+    <div class="layout">
+      <div class="panel">
+        <div class="toolbar">
+          <select id="viewMode" onchange="render()">
+            <option value="sector">板块视图</option>
+            <option value="company">公司视图</option>
+          </select>
+          <select id="periodSelect" onchange="loadStats()">
+            <option value="live" selected>今日实时</option>
+            <option value="1d">每天</option>
+            <option value="1w">每周</option>
+            <option value="15d">每半月</option>
+            <option value="1m">每月</option>
+            <option value="2m">每2个月</option>
+            <option value="3m">每3个月</option>
+          </select>
+          <div class="legend">
+            <span class="down">流出</span>
+            <div class="legend-bar"></div>
+            <span class="up">流入</span>
+          </div>
+        </div>
+        <div class="breadcrumb" id="breadcrumb"></div>
+        <div id="treemap"><div class="loading">正在拉取美股数据...</div></div>
+        <div class="small-labels" id="smallLabels"></div>
+        <p class="note" id="note"></p>
+      </div>
+
+      <div>
+        <div class="panel" style="margin-bottom:16px">
+          <h2><span id="rankTitle1">资金流入最多板块</span> <span class="help" title="右侧%：该板块资金活跃度占本站监控的主要板块合计的比重（正=流入）。不是股价涨跌，也不是全市场资金占比。总量=本站约11个主要板块，非美股全部板块。">?</span></h2>
+          <ul class="rank-list" id="topSectors"></ul>
+        </div>
+        <div class="panel" style="margin-bottom:16px">
+          <h2><span id="rankTitleOutSectors">资金流出最多板块</span> <span class="help" title="右侧%：该板块资金活跃度占本站主要板块合计的比重（负=流出）。总量仅含本站监控板块，非全市场。">?</span></h2>
+          <ul class="rank-list" id="bottomSectors"></ul>
+        </div>
+        <div class="panel" style="margin-bottom:16px">
+          <h2><span id="rankTitle2">资金流入最多公司</span> <span class="help" title="右侧%：该公司资金活跃度占本站监控龙头股合计的比重（正=流入）。总量=本站样本公司，非美股全部股票。">?</span></h2>
+          <ul class="rank-list" id="topCompanies"></ul>
+        </div>
+        <div class="panel">
+          <h2><span id="rankTitle3">资金流出最多公司</span> <span class="help" title="右侧%：该公司资金活跃度占本站监控龙头股合计的比重（负=流出）。总量=本站样本公司，非美股全部股票。">?</span></h2>
+          <ul class="rank-list" id="bottomCompanies"></ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let liveData = null;
+    let statsData = null;
+    let focusSector = null;
+
+    function currentPeriod() {
+      return document.getElementById('periodSelect').value;
+    }
+
+    function usingLive() {
+      return currentPeriod() === 'live';
+    }
+
+    function fmtPct(v) {
+      const n = Number(v || 0);
+      const sign = n > 0 ? '+' : '';
+      return sign + n.toFixed(2) + '%';
+    }
+
+    function fmtMoney(v) {
+      const n = Number(v || 0);
+      if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+      if (Math.abs(n) >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+      return n.toFixed(0);
+    }
+
+    function absFlowTotal(items, key) {
+      const k = key || 'flow_score';
+      return (items || []).reduce((s, i) => s + Math.abs(Number(i[k] || 0)), 0) || 1;
+    }
+
+    function flowSharePct(flow, totalAbs) {
+      return Number(flow || 0) / (totalAbs || 1) * 100;
+    }
+
+    function colorForFlow(flowPct) {
+      // 按资金流占比着色：红=流入，绿=流出（A股习惯）
+      const t = Math.max(-25, Math.min(25, Number(flowPct || 0))) / 25;
+      if (Math.abs(t) < 0.02) return '#475569';
+      if (t > 0) {
+        const intensity = 0.35 + 0.65 * t;
+        return `rgb(${Math.round(180 + 75 * intensity)}, ${Math.round(40 * (1 - intensity))}, ${Math.round(40 * (1 - intensity))})`;
+      }
+      const intensity = 0.35 + 0.65 * Math.abs(t);
+      return `rgb(${Math.round(30 * (1 - intensity))}, ${Math.round(120 + 80 * intensity)}, ${Math.round(60 * (1 - intensity))})`;
+    }
+
+    function pctClass(v) {
+      return Number(v || 0) >= 0 ? 'up' : 'down';
+    }
+
+    function escAttr(s) {
+      return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/\n/g, ' ');
+    }
+
+    function tipFlowShare(flowPct, flow, pricePct) {
+      return escAttr(
+        '例读法：' + fmtPct(flowPct) +
+        ' = 该标的资金活跃度占本站监控样本合计的比重（正流入/负流出）。' +
+        '不是股价涨跌，也不是全市场资金占比。总量仅含本站主要板块/龙头股。' +
+        (pricePct != null ? ' 股价涨跌 ' + fmtPct(pricePct) + '。' : '')
+      );
+    }
+
+    function renderSidebar() {
+      const topS = document.getElementById('topSectors');
+      const botS = document.getElementById('bottomSectors');
+      const topC = document.getElementById('topCompanies');
+      const botC = document.getElementById('bottomCompanies');
+      const periodLabel = usingLive() ? '今日' : ((statsData && statsData.label) || '');
+
+      document.getElementById('rankTitle1').textContent = periodLabel + '资金流入最多板块';
+      document.getElementById('rankTitleOutSectors').textContent = periodLabel + '资金流出最多板块';
+      document.getElementById('rankTitle2').textContent = periodLabel + '资金流入最多公司';
+      document.getElementById('rankTitle3').textContent = periodLabel + '资金流出最多公司';
+
+      if (usingLive()) {
+        if (!liveData) return;
+        const secTotal = absFlowTotal(liveData.sectors, 'flow_score');
+        const allCos = (liveData.sectors || []).flatMap(s => s.companies || []);
+        const cosTotal = absFlowTotal(allCos, 'flow_score');
+        topS.innerHTML = (liveData.top_inflow_sectors || []).map(s => {
+          const fp = flowSharePct(s.flow_score, secTotal);
+          return `
+          <li>
+            <span><a href="#" onclick="focusSector='${s.key}';document.getElementById('viewMode').value='company';render();return false">${s.name}</a></span>
+            <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, s.flow_score, s.change_pct)}">${fmtPct(fp)}</span>
+          </li>`;
+        }).join('') || '<li class="muted">暂无</li>';
+        botS.innerHTML = (liveData.top_outflow_sectors || []).map(s => {
+          const fp = flowSharePct(s.flow_score, secTotal);
+          return `
+          <li>
+            <span><a href="#" onclick="focusSector='${s.key}';document.getElementById('viewMode').value='company';render();return false">${s.name}</a></span>
+            <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, s.flow_score, s.change_pct)}">${fmtPct(fp)}</span>
+          </li>`;
+        }).join('') || '<li class="muted">暂无</li>';
+        topC.innerHTML = (liveData.top_inflow_companies || []).map(c => {
+          const fp = flowSharePct(c.flow_score, cosTotal);
+          return `
+          <li><span>${c.cn_name || c.name} <span class="muted">${c.symbol}</span></span>
+          <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, c.flow_score, c.change_pct)}">${fmtPct(fp)}</span></li>`;
+        }).join('') || '<li class="muted">暂无</li>';
+        botC.innerHTML = (liveData.top_outflow_companies || []).map(c => {
+          const fp = flowSharePct(c.flow_score, cosTotal);
+          return `
+          <li><span>${c.cn_name || c.name} <span class="muted">${c.symbol}</span></span>
+          <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, c.flow_score, c.change_pct)}">${fmtPct(fp)}</span></li>`;
+        }).join('') || '<li class="muted">暂无</li>';
+        return;
+      }
+
+      if (!statsData) {
+        topS.innerHTML = botS.innerHTML = topC.innerHTML = botC.innerHTML = '<li class="muted">加载中...</li>';
+        return;
+      }
+      if (!statsData.sufficient) {
+        const tip = `<li class="muted">${statsData.note || '数据还不足'}</li>`;
+        topS.innerHTML = tip;
+        botS.innerHTML = topC.innerHTML = botC.innerHTML = '<li class="muted">暂无数据</li>';
+        return;
+      }
+
+      const secTotal = absFlowTotal(statsData.sectors, 'flow_score_sum');
+      const cosTotal = absFlowTotal(statsData.companies, 'flow_score_sum');
+      topS.innerHTML = (statsData.top_inflow_sectors || []).map(s => {
+        const fp = flowSharePct(s.flow_score_sum, secTotal);
+        return `
+        <li>
+          <span><a href="#" onclick="focusSector='${s.sector_key}';document.getElementById('viewMode').value='company';render();return false">${s.cn_name || s.name}</a></span>
+          <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, s.flow_score_sum, s.period_change_pct)}">${fmtPct(fp)}</span>
+        </li>`;
+      }).join('') || '<li class="muted">暂无</li>';
+      botS.innerHTML = (statsData.top_outflow_sectors || []).map(s => {
+        const fp = flowSharePct(s.flow_score_sum, secTotal);
+        return `
+        <li>
+          <span><a href="#" onclick="focusSector='${s.sector_key}';document.getElementById('viewMode').value='company';render();return false">${s.cn_name || s.name}</a></span>
+          <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, s.flow_score_sum, s.period_change_pct)}">${fmtPct(fp)}</span>
+        </li>`;
+      }).join('') || '<li class="muted">暂无</li>';
+      topC.innerHTML = (statsData.top_inflow_companies || []).map(c => {
+        const fp = flowSharePct(c.flow_score_sum, cosTotal);
+        return `
+        <li><span>${c.cn_name || c.name} <span class="muted">${c.symbol}</span></span>
+        <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, c.flow_score_sum, c.period_change_pct)}">${fmtPct(fp)}</span></li>`;
+      }).join('') || '<li class="muted">暂无</li>';
+      botC.innerHTML = (statsData.top_outflow_companies || []).map(c => {
+        const fp = flowSharePct(c.flow_score_sum, cosTotal);
+        return `
+        <li><span>${c.cn_name || c.name} <span class="muted">${c.symbol}</span></span>
+        <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, c.flow_score_sum, c.period_change_pct)}">${fmtPct(fp)}</span></li>`;
+      }).join('') || '<li class="muted">暂无</li>';
+    }
+
+    function buildHierarchyFromLive() {
+      const mode = document.getElementById('viewMode').value;
+      if (mode === 'sector') {
+        return {
+          name: 'root',
+          children: liveData.sectors.map(s => ({
+            name: s.name,
+            key: s.key,
+            change_pct: s.change_pct,
+            dollar_volume: Math.max(s.dollar_volume, 1),
+            flow_score: s.flow_score,
+            value: Math.max(Math.abs(s.flow_score) * 1e9, s.dollar_volume * 0.05, 1),
+          }))
+        };
+      }
+      const sectors = focusSector
+        ? liveData.sectors.filter(s => s.key === focusSector)
+        : liveData.sectors;
+      return {
+        name: 'root',
+        children: sectors.map(s => ({
+          name: s.name,
+          children: s.companies.map(c => ({
+            name: c.cn_name || c.symbol,
+            symbol: c.symbol,
+            change_pct: c.change_pct,
+            dollar_volume: Math.max(c.dollar_volume, 1),
+            flow_score: c.flow_score,
+            value: Math.max(c.dollar_volume, 1),
+          }))
+        }))
+      };
+    }
+
+    function buildHierarchyFromStats() {
+      const mode = document.getElementById('viewMode').value;
+      if (mode === 'sector') {
+        return {
+          name: 'root',
+          children: (statsData.sectors || []).map(s => ({
+            name: s.cn_name || s.name,
+            key: s.sector_key,
+            change_pct: s.period_change_pct,
+            dollar_volume: Math.max(s.dollar_volume_sum, 1),
+            flow_score: s.flow_score_sum,
+            value: Math.max(Math.abs(s.flow_score_sum) * 1e9, s.dollar_volume_sum * 0.05, 1),
+          }))
+        };
+      }
+      const companies = focusSector
+        ? (statsData.companies || []).filter(c => c.sector_key === focusSector)
+        : (statsData.companies || []);
+      const bySector = {};
+      companies.forEach(c => {
+        const key = c.sector_key || 'other';
+        if (!bySector[key]) bySector[key] = { name: c.sector_name || key, children: [] };
+        bySector[key].children.push({
+          name: c.cn_name || c.symbol,
+          symbol: c.symbol,
+          change_pct: c.period_change_pct,
+          dollar_volume: Math.max(c.dollar_volume_sum, 1),
+          flow_score: c.flow_score_sum,
+          value: Math.max(c.dollar_volume_sum, 1),
+        });
+      });
+      return { name: 'root', children: Object.values(bySector) };
+    }
+
+    function render() {
+      const mode = document.getElementById('viewMode').value;
+      const crumb = document.getElementById('breadcrumb');
+      const hierarchy = usingLive()
+        ? (liveData ? buildHierarchyFromLive() : null)
+        : (statsData && statsData.sufficient ? buildHierarchyFromStats() : null);
+
+      if (!hierarchy || !hierarchy.children || !hierarchy.children.length) {
+        const msg = usingLive()
+          ? '暂无行情数据'
+          : ((statsData && statsData.note) || '该周期数据还不足，请先积累交易日快照');
+        document.getElementById('treemap').innerHTML = `<div class="loading">${msg}</div>`;
+        document.getElementById('smallLabels').innerHTML = '';
+        return;
+      }
+
+      if (mode === 'company' && focusSector) {
+        crumb.innerHTML = `<a onclick="focusSector=null;render()">全部板块</a> / ${focusSector}`;
+      } else if (usingLive()) {
+        crumb.textContent = '今日实时：方块大小≈资金流强度；颜色与% = 占本站主要板块/龙头样本的资金活跃度比重（红流入绿流出，非股价、非全市场）';
+      } else {
+        crumb.textContent = `${statsData.label}：颜色与% = 占本站样本的资金活跃度比重（红流入绿流出；共 ${statsData.snapshot_count} 个交易日快照）`;
+      }
+
+      const el = document.getElementById('treemap');
+      el.innerHTML = '';
+      const width = el.clientWidth || 800;
+      const height = 620;
+      const root = d3.hierarchy(hierarchy)
+        .sum(d => d.value || 0)
+        .sort((a, b) => (b.value || 0) - (a.value || 0));
+
+      const leaves = root.leaves();
+      const leafAbsTotal = leaves.reduce((s, d) => s + Math.abs(Number(d.data.flow_score || 0)), 0) || 1;
+      leaves.forEach(d => {
+        d.data.flow_share_pct = flowSharePct(d.data.flow_score, leafAbsTotal);
+      });
+
+      d3.treemap().size([width, height]).paddingInner(3).paddingTop(mode === 'company' ? 22 : 3).round(true)(root);
+      const svg = d3.select('#treemap').append('svg').attr('width', width).attr('height', height);
+
+      if (mode === 'company') {
+        svg.selectAll('g.sector-label').data(root.children || []).enter().append('text')
+          .attr('x', d => d.x0 + 4).attr('y', d => d.y0 + 14)
+          .attr('fill', '#e2e8f0').attr('font-size', 12).attr('font-weight', 600).text(d => d.data.name);
+      }
+
+      const smallItems = [];
+      const nodes = svg.selectAll('g.node').data(leaves).enter().append('g')
+        .attr('transform', d => `translate(${d.x0},${d.y0})`)
+        .style('cursor', 'pointer')
+        .on('click', (_, d) => {
+          if (mode === 'sector' && d.data.key) {
+            focusSector = d.data.key;
+            document.getElementById('viewMode').value = 'company';
+            render();
+          }
+        });
+
+      nodes.append('rect')
+        .attr('width', d => Math.max(0, d.x1 - d.x0))
+        .attr('height', d => Math.max(0, d.y1 - d.y0))
+        .attr('fill', d => colorForFlow(d.data.flow_share_pct))
+        .attr('stroke', '#0f172a')
+        .attr('stroke-width', 1)
+        .attr('rx', 3);
+      nodes.append('title').text(d => {
+        const name = d.data.symbol ? `${d.data.name} (${d.data.symbol})` : d.data.name;
+        return `${name}\n资金流占比: ${fmtPct(d.data.flow_share_pct)}\n资金流: ${Number(d.data.flow_score || 0).toFixed(2)}\n股价涨跌: ${fmtPct(d.data.change_pct)}\n成交额: $${fmtMoney(d.data.dollar_volume)}`;
+      });
+
+      nodes.each(function(d) {
+        const w = d.x1 - d.x0, h = d.y1 - d.y0;
+        const label = d.data.symbol || d.data.name || '';
+        const pct = fmtPct(d.data.flow_share_pct);
+        const fill = '#fff';
+        const g = d3.select(this);
+
+        // 够大：内部显示代码 + 资金流占比
+        if (w >= 56 && h >= 36) {
+          const fs = Math.min(14, Math.max(10, w / 7));
+          g.append('text').attr('x', 6).attr('y', 16).attr('fill', fill)
+            .attr('font-size', fs).attr('font-weight', 700)
+            .text(label.length > 10 ? label.slice(0, 9) + '…' : label);
+          if (h >= 48) {
+            g.append('text').attr('x', 6).attr('y', 32).attr('fill', fill)
+              .attr('font-size', 11).attr('font-weight', 600).text(pct);
+          }
+          return;
+        }
+        // 中等：只显示代码
+        if (w >= 36 && h >= 22) {
+          g.append('text').attr('x', 4).attr('y', Math.min(14, h - 4)).attr('fill', fill)
+            .attr('font-size', 10).attr('font-weight', 700)
+            .text(label.length > 6 ? label.slice(0, 5) + '…' : label);
+          return;
+        }
+        // 太小：放到图下方色块标签
+        smallItems.push({
+          label,
+          pct,
+          flow_share_pct: d.data.flow_share_pct,
+          name: d.data.name,
+        });
+      });
+
+      const chipBox = document.getElementById('smallLabels');
+      if (smallItems.length) {
+        chipBox.innerHTML = '<span class="muted" style="width:100%;font-size:0.75rem;margin-bottom:2px">区块过小未标在图内（% = 资金流占比）：</span>' +
+          smallItems.map(item =>
+            `<span class="small-chip" style="background:${colorForFlow(item.flow_share_pct)}" title="${item.name || item.label}">${item.label} ${item.pct}</span>`
+          ).join('');
+      } else {
+        chipBox.innerHTML = '';
+      }
+    }
+
+    async function loadLive(force = false) {
+      const res = await fetch('/api/heatmap' + (force ? '?force=true' : ''));
+      if (!res.ok) throw new Error('行情 HTTP ' + res.status);
+      liveData = await res.json();
+      document.getElementById('metaLine').textContent =
+        `更新时间 ${liveData.updated_at} · 数据源 CNBC · 美股收盘后自动存快照（美东 16:30）`;
+      if (usingLive()) document.getElementById('note').textContent = liveData.note || '';
+    }
+
+    async function loadStats() {
+      const period = currentPeriod();
+      const treemap = document.getElementById('treemap');
+      const meta = document.getElementById('metaLine');
+      const note = document.getElementById('note');
+
+      if (usingLive()) {
+        meta.textContent = liveData
+          ? `今日实时 · 更新时间 ${liveData.updated_at} · 数据源 CNBC`
+          : '今日实时加载中...';
+        note.textContent = (liveData && liveData.note) || '';
+        renderSidebar();
+        render();
+        return;
+      }
+
+      treemap.innerHTML = '<div class="loading">正在加载周期统计...</div>';
+      document.getElementById('topSectors').innerHTML = '<li class="muted">加载中...</li>';
+      document.getElementById('bottomSectors').innerHTML = '<li class="muted">加载中...</li>';
+      document.getElementById('topCompanies').innerHTML = '<li class="muted">加载中...</li>';
+      document.getElementById('bottomCompanies').innerHTML = '<li class="muted">加载中...</li>';
+      meta.textContent = `切换到「${document.getElementById('periodSelect').selectedOptions[0].text}」...`;
+
+      try {
+        const res = await fetch('/api/heatmap/stats?period=' + encodeURIComponent(period) + '&_=' + Date.now());
+        if (!res.ok) throw new Error('统计 HTTP ' + res.status);
+        statsData = await res.json();
+
+        const label = statsData.label || period;
+        if (!statsData.sufficient) {
+          meta.textContent =
+            `周期：${label} · 数据还不足（${statsData.snapshot_count || 0}/${statsData.min_snapshots || '?'} 天）`;
+          note.textContent = statsData.note || '数据还不足';
+          document.getElementById('topSectors').innerHTML =
+            `<li class="muted">${statsData.note || '数据还不足'}</li>`;
+          document.getElementById('bottomSectors').innerHTML = '<li class="muted">暂无数据</li>';
+          document.getElementById('topCompanies').innerHTML = '<li class="muted">暂无数据</li>';
+          document.getElementById('bottomCompanies').innerHTML = '<li class="muted">暂无数据</li>';
+          treemap.innerHTML = `<div class="loading">${statsData.note || '该周期数据还不足'}</div>`;
+          document.getElementById('smallLabels').innerHTML = '';
+          return;
+        }
+
+        meta.textContent =
+          `周期：${label} · 已有 ${statsData.snapshot_count} 个交易日快照` +
+          (statsData.latest_trade_date ? ` · 最新 ${statsData.latest_trade_date}` : '');
+        note.textContent = statsData.note || '';
+        renderSidebar();
+        render();
+      } catch (e) {
+        meta.textContent = '周期统计加载失败';
+        note.textContent = String(e.message || e);
+        treemap.innerHTML = `<div class="loading">加载失败：${e.message}</div>`;
+        document.getElementById('smallLabels').innerHTML = '';
+        document.getElementById('topSectors').innerHTML = '<li class="muted">加载失败</li>';
+        document.getElementById('bottomSectors').innerHTML = '<li class="muted">加载失败</li>';
+        document.getElementById('topCompanies').innerHTML = '<li class="muted">加载失败</li>';
+        document.getElementById('bottomCompanies').innerHTML = '<li class="muted">加载失败</li>';
+      }
+    }
+
+    async function reloadAll(force = false) {
+      const btn = document.getElementById('refreshBtn');
+      btn.disabled = true;
+      btn.textContent = '刷新中...';
+      try {
+        await loadLive(force);
+        await loadStats();
+      } catch (e) {
+        document.getElementById('treemap').innerHTML = `<div class="loading">加载失败：${e.message}</div>`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '刷新';
+      }
+    }
+
+    async function saveSnapshot() {
+      const btn = document.getElementById('snapBtn');
+      btn.disabled = true;
+      btn.textContent = '保存中...';
+      try {
+        const res = await fetch('/api/heatmap/snapshot', { method: 'POST' });
+        const data = await res.json();
+        alert(data.skipped ? (data.reason || '已跳过') : `已保存 ${data.trade_date}，共 ${data.saved} 条`);
+        await reloadAll(true);
+      } catch (e) {
+        alert('保存失败: ' + e.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '存今日快照';
+      }
+    }
+
+    window.addEventListener('resize', () => render());
+    reloadAll();
+  </script>
+</body>
+</html>

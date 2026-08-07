@@ -9,6 +9,7 @@ import holidays
 from app.config import TIMEZONE
 
 _TZ = ZoneInfo(TIMEZONE)
+_US_TZ = ZoneInfo("America/New_York")
 
 
 @dataclass
@@ -25,6 +26,17 @@ def now_beijing() -> datetime:
 
 def today_beijing() -> date:
     return datetime.now(_TZ).date()
+
+
+def today_us() -> date:
+    return datetime.now(_US_TZ).date()
+
+
+def is_us_trading_day(check_date: date | None = None) -> bool:
+    check_date = check_date or today_us()
+    if check_date.weekday() >= 5:
+        return False
+    return check_date not in holidays.US(years=check_date.year)
 
 
 def load_funds(source_file: str) -> list[FundInfo]:
