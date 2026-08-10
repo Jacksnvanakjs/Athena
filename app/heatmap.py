@@ -26,7 +26,15 @@ HEADERS = {
 }
 
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+YAHOO_SPARK = "https://query1.finance.yahoo.com/v7/finance/spark"
 EASTMONEY_ULIST = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+
+# 成功样本过少时不覆盖界面（避免「全 0」或「单板块 100%」）
+_MIN_QUOTE_RATIO = 0.55
+_CACHE: dict[str, Any] = {"ts": 0.0, "data": None, "last_good": None}
+_CACHE_TTL = 120  # 秒
+_LAST_GOOD_TTL = 6 * 3600  # 拉取失败时最多回退 6 小时内的成功数据
+
 
 # 11 大 GICS 板块 → SPDR 行业 ETF + 代表性龙头股
 SECTORS: list[dict[str, Any]] = [
@@ -170,9 +178,6 @@ SECTORS: list[dict[str, Any]] = [
     },
 ]
 
-_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
-_CACHE_TTL = 180  # 秒
-
 PERIODS: dict[str, dict[str, Any]] = {
     # min_snapshots: 至少需要多少个交易日快照才展示该周期，否则留空
     "1d": {"days": 1, "label": "每天", "min_snapshots": 1},
@@ -298,6 +303,82 @@ def _yahoo_symbol(symbol: str) -> str:
     return symbol.replace(".", "-")
 
 
+def _from_yahoo_symbol(yahoo_symbol: str, wanted: set[str]) -> str:
+    if yahoo_symbol in wanted:
+        return yahoo_symbol
+    dotted = yahoo_symbol.replace("-", ".")
+    if dotted in wanted:
+        return dotted
+    return yahoo_symbol
+
+
+def _parse_yahoo_spark_item(
+    item: dict[str, Any], wanted: set[str]
+) -> tuple[str, dict[str, Any]] | None:
+    yahoo_sym = item.get("symbol") or ""
+    resp = (item.get("response") or [{}])[0] or {}
+    meta = resp.get("meta") or {}
+    quote = ((resp.get("indicators") or {}).get("quote") or [{}])[0]
+    closes = [c for c in (quote.get("close") or []) if c is not None]
+    volumes = [v for v in (quote.get("volume") or []) if v is not None]
+    price = _to_float(meta.get("regularMarketPrice"))
+    if price is None and closes:
+        price = float(closes[-1])
+    if price is None:
+        return None
+    change_pct = 0.0
+    if len(closes) >= 2 and closes[-2]:
+        change_pct = (float(closes[-1]) - float(closes[-2])) / float(closes[-2]) * 100
+        price = float(closes[-1])
+    else:
+        prev = _to_float(meta.get("previousClose")) or _to_float(
+            meta.get("chartPreviousClose")
+        )
+        if prev:
+            change_pct = (price - prev) / prev * 100
+    volume = float(volumes[-1]) if volumes else float(meta.get("regularMarketVolume") or 0)
+    symbol = _from_yahoo_symbol(str(yahoo_sym), wanted)
+    return symbol, _quote_row(
+        symbol,
+        name=meta.get("longName") or meta.get("shortName") or symbol,
+        price=price,
+        change_pct=change_pct,
+        volume=volume,
+    )
+
+
+async def _fetch_yahoo_spark(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Yahoo spark 批量报价：一次最多约 20 只，云端比逐只 chart 稳得多。"""
+    out: dict[str, dict[str, Any]] = {}
+    wanted = set(symbols)
+    headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
+    chunk_size = 20
+    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i : i + chunk_size]
+            ysyms = [_yahoo_symbol(s) for s in chunk]
+            try:
+                resp = await client.get(
+                    YAHOO_SPARK,
+                    params={
+                        "symbols": ",".join(ysyms),
+                        "range": "5d",
+                        "interval": "1d",
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning("Yahoo spark HTTP %s", resp.status_code)
+                    continue
+                for item in (resp.json().get("spark") or {}).get("result") or []:
+                    parsed = _parse_yahoo_spark_item(item, wanted)
+                    if parsed:
+                        sym, row = parsed
+                        out[sym] = row
+            except Exception as exc:
+                logger.warning("Yahoo spark batch failed: %s", exc)
+    return out
+
+
 async def _fetch_yahoo_one(
     client: httpx.AsyncClient, symbol: str
 ) -> tuple[str, dict[str, Any] | None]:
@@ -312,64 +393,44 @@ async def _fetch_yahoo_one(
         result = ((resp.json().get("chart") or {}).get("result")) or []
         if not result:
             return symbol, None
-        meta = result[0].get("meta") or {}
-        quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
-        closes = [c for c in (quote.get("close") or []) if c is not None]
-        volumes = [v for v in (quote.get("volume") or []) if v is not None]
-        price = _to_float(meta.get("regularMarketPrice"))
-        if price is None and closes:
-            price = float(closes[-1])
-        if price is None:
+        fake = {"symbol": ysym, "response": [result[0]]}
+        parsed = _parse_yahoo_spark_item(fake, {symbol, ysym, symbol.replace(".", "-")})
+        if not parsed:
             return symbol, None
-        change_pct = 0.0
-        if len(closes) >= 2 and closes[-2]:
-            change_pct = (float(closes[-1]) - float(closes[-2])) / float(closes[-2]) * 100
-            price = float(closes[-1])
-        else:
-            prev = _to_float(meta.get("previousClose")) or _to_float(
-                meta.get("chartPreviousClose")
-            )
-            if prev:
-                change_pct = (price - prev) / prev * 100
-        volume = float(volumes[-1]) if volumes else float(meta.get("regularMarketVolume") or 0)
-        return symbol, _quote_row(
-            symbol,
-            name=meta.get("longName") or meta.get("shortName") or symbol,
-            price=price,
-            change_pct=change_pct,
-            volume=volume,
-        )
+        return symbol, parsed[1]
     except Exception as exc:
         logger.debug("Yahoo quote failed %s: %s", symbol, exc)
         return symbol, None
 
 
-async def _fetch_yahoo(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """Yahoo chart 逐标的拉取（云端 CNBC 被拦时的备用源）。"""
+async def _fetch_yahoo_chart_missing(
+    symbols: list[str], existing: dict[str, dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
     import asyncio
 
+    missing = [s for s in symbols if s not in existing]
+    if not missing:
+        return {}
     out: dict[str, dict[str, Any]] = {}
     headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
-    sem = asyncio.Semaphore(10)
-
+    sem = asyncio.Semaphore(5)
     async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True) as client:
 
         async def one(sym: str):
             async with sem:
                 return await _fetch_yahoo_one(client, sym)
 
-        results = await asyncio.gather(*[one(s) for s in symbols])
+        results = await asyncio.gather(*[one(s) for s in missing])
     for sym, row in results:
         if row:
             out[sym] = row
-    # 个别失败再重试一次
-    missing = [s for s in symbols if s not in out]
-    if missing:
-        async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True) as client:
-            for sym in missing:
-                _, row = await _fetch_yahoo_one(client, sym)
-                if row:
-                    out[sym] = row
+    return out
+
+
+async def _fetch_yahoo(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    out = await _fetch_yahoo_spark(symbols)
+    if len(out) < len(symbols):
+        out.update(await _fetch_yahoo_chart_missing(symbols, out))
     return out
 
 
@@ -403,7 +464,6 @@ async def _fetch_eastmoney(symbols: list[str]) -> dict[str, dict[str, Any]]:
                         if not sym or price is None:
                             continue
                         change_pct = _to_float(item.get("f3")) or 0.0
-                        # f5=成交量(股), f6=成交额；优先用成交额反推更稳
                         dollar = _to_float(item.get("f6"))
                         volume = _to_float(item.get("f5")) or 0.0
                         if dollar and price:
@@ -420,41 +480,86 @@ async def _fetch_eastmoney(symbols: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _last_good_path():
+    from app.config import DATA_DIR
+
+    return DATA_DIR / "heatmap_last_good.json"
+
+
+def _load_last_good() -> dict[str, Any] | None:
+    if _CACHE.get("last_good"):
+        return _CACHE["last_good"]
+    path = _last_good_path()
+    try:
+        if not path.exists():
+            return None
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        saved_at = float(data.get("_saved_at") or 0)
+        if time.time() - saved_at > _LAST_GOOD_TTL:
+            return None
+        _CACHE["last_good"] = data
+        return data
+    except Exception as exc:
+        logger.warning("load last_good failed: %s", exc)
+        return None
+
+
+def _save_last_good(data: dict[str, Any]) -> None:
+    import json
+
+    payload = {**data, "_saved_at": time.time()}
+    _CACHE["last_good"] = payload
+    try:
+        _last_good_path().write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.warning("save last_good failed: %s", exc)
+
+
+def _is_quality_ok(quote_count: int, total: int) -> bool:
+    if total <= 0:
+        return False
+    return quote_count >= max(20, int(total * _MIN_QUOTE_RATIO))
+
+
 async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
-    """多数据源：CNBC → Yahoo → 东财。返回 (quotes, source)。"""
-    min_ok = max(8, len(symbols) // 3)
+    """多源合并：Yahoo spark（主）→ CNBC → 东财。优先稳定批量接口。"""
+    sources_used: list[str] = []
+    merged: dict[str, dict[str, Any]] = {}
+
+    yahoo = await _fetch_yahoo(symbols)
+    if yahoo:
+        merged.update(yahoo)
+        sources_used.append(f"Yahoo:{len(yahoo)}")
+    if _is_quality_ok(len(merged), len(symbols)):
+        return merged, "Yahoo"
 
     cnbc = await _fetch_cnbc(symbols)
-    if len(cnbc) >= min_ok:
-        logger.info("heatmap quotes from CNBC: %s/%s", len(cnbc), len(symbols))
-        return cnbc, "CNBC"
+    if cnbc:
+        for k, v in cnbc.items():
+            merged.setdefault(k, v)
+        sources_used.append(f"CNBC:{len(cnbc)}")
+    if _is_quality_ok(len(merged), len(symbols)):
+        return merged, "+".join(sources_used) if len(sources_used) > 1 else "CNBC"
 
-    logger.warning(
-        "CNBC insufficient (%s/%s), falling back to Yahoo",
-        len(cnbc),
-        len(symbols),
-    )
-    yahoo = await _fetch_yahoo(symbols)
-    if len(yahoo) >= min_ok:
-        logger.info("heatmap quotes from Yahoo: %s/%s", len(yahoo), len(symbols))
-        return yahoo, "Yahoo"
-
-    logger.warning(
-        "Yahoo insufficient (%s/%s), falling back to Eastmoney",
-        len(yahoo),
-        len(symbols),
-    )
     east = await _fetch_eastmoney(symbols)
     if east:
-        # 合并已有结果
-        merged = {**cnbc, **yahoo, **east}
-        logger.info("heatmap quotes from Eastmoney merge: %s/%s", len(merged), len(symbols))
-        return merged, "Eastmoney"
+        for k, v in east.items():
+            merged.setdefault(k, v)
+        sources_used.append(f"Eastmoney:{len(east)}")
 
-    merged = {**cnbc, **yahoo, **east}
-    source = "none" if not merged else "partial"
-    logger.error("heatmap quotes failed, only %s/%s", len(merged), len(symbols))
-    return merged, source
+    label = "+".join(sources_used) if sources_used else "none"
+    if not _is_quality_ok(len(merged), len(symbols)):
+        logger.error(
+            "heatmap quotes low quality %s/%s via %s",
+            len(merged),
+            len(symbols),
+            label,
+        )
+    return merged, label
 
 
 async def _build_heatmap() -> dict[str, Any]:
@@ -464,6 +569,22 @@ async def _build_heatmap() -> dict[str, Any]:
         symbols.extend(sym for sym, _ in sector["companies"])
 
     by_symbol, source = await _fetch_quotes(symbols)
+    total = len(symbols)
+    quote_count = len(by_symbol)
+
+    if not _is_quality_ok(quote_count, total):
+        stale = _load_last_good()
+        if stale and _is_quality_ok(int(stale.get("quote_count") or 0), total):
+            stale = dict(stale)
+            stale.pop("_saved_at", None)
+            stale["stale"] = True
+            stale["note"] = (
+                f"实时行情不完整（{source} 仅 {quote_count}/{total}），"
+                f"已显示上次成功数据（{stale.get('source')} @ {stale.get('updated_at')}）。"
+                "请稍后刷新。"
+            )
+            logger.warning("serving last_good heatmap due to low quality fetch")
+            return stale
 
     sectors_out = []
     all_companies = []
@@ -509,15 +630,11 @@ async def _build_heatmap() -> dict[str, Any]:
     sectors_out.sort(key=lambda x: x["flow_score"], reverse=True)
     all_companies.sort(key=lambda x: x["flow_score"], reverse=True)
 
-    quote_count = len(by_symbol)
     if quote_count == 0:
-        note = (
-            "行情拉取失败（云端可能无法访问 CNBC）。"
-            "已尝试备用源仍无数据，请查看服务日志或稍后重试。"
-        )
+        note = "行情拉取失败。已尝试 Yahoo/CNBC/东财仍无足够数据，请稍后刷新。"
     else:
         note = (
-            f"数据源 {source}（{quote_count}/{len(symbols)} 只）。"
+            f"数据源 {source}（{quote_count}/{total} 只）。"
             "本站% = 占监控样本（约11个主要板块+龙头股）的资金活跃度比重，"
             "非股价涨跌、非全市场资金占比；红流入绿流出。"
         )
@@ -526,7 +643,8 @@ async def _build_heatmap() -> dict[str, Any]:
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": source,
         "quote_count": quote_count,
-        "quote_total": len(symbols),
+        "quote_total": total,
+        "stale": False,
         "note": note,
         "sectors": sectors_out,
         "top_inflow_sectors": [s for s in sectors_out if s["flow_score"] > 0][:5],
@@ -544,16 +662,27 @@ async def _build_heatmap() -> dict[str, Any]:
 
 async def get_heatmap_data(force: bool = False) -> dict[str, Any]:
     now = time.time()
+    cached = _CACHE.get("data")
     if (
         not force
-        and _CACHE["data"] is not None
+        and cached is not None
         and now - _CACHE["ts"] < _CACHE_TTL
+        and not cached.get("stale")
+        and _is_quality_ok(
+            int(cached.get("quote_count") or 0),
+            int(cached.get("quote_total") or 72),
+        )
     ):
-        return _CACHE["data"]
+        return cached
 
     data = await _build_heatmap()
     _CACHE["ts"] = now
     _CACHE["data"] = data
+    if not data.get("stale") and _is_quality_ok(
+        int(data.get("quote_count") or 0),
+        int(data.get("quote_total") or 72),
+    ):
+        _save_last_good(data)
     return data
 
 

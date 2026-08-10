@@ -572,27 +572,104 @@
         const pct = fmtPct(d.data.flow_share_pct);
         const fill = '#fff';
         const g = d3.select(this);
+        const isCjk = /[\u4e00-\u9fff]/.test(label);
 
-        // 够大：内部显示代码 + 资金流占比
-        if (w >= 56 && h >= 36) {
-          const fs = Math.min(14, Math.max(10, w / 7));
-          g.append('text').attr('x', 6).attr('y', 16).attr('fill', fill)
-            .attr('font-size', fs).attr('font-weight', 700)
-            .text(label.length > 10 ? label.slice(0, 9) + '…' : label);
-          if (h >= 48) {
-            g.append('text').attr('x', 6).attr('y', 32).attr('fill', fill)
-              .attr('font-size', 11).attr('font-weight', 600).text(pct);
+        // 估算：中文约等于字号宽度，英文约 0.62 字号
+        function textWidth(str, fs) {
+          let n = 0;
+          for (const ch of str) n += /[\u4e00-\u9fff]/.test(ch) ? 1 : 0.62;
+          return n * fs;
+        }
+
+        function appendHorizontal(text, x, y, fs, weight) {
+          g.append('text').attr('x', x).attr('y', y).attr('fill', fill)
+            .attr('font-size', fs).attr('font-weight', weight || 700).text(text);
+        }
+
+        function appendVertical(chars, x, startY, fs, lineGap) {
+          chars.forEach((ch, i) => {
+            g.append('text').attr('x', x).attr('y', startY + i * lineGap)
+              .attr('fill', fill).attr('font-size', fs).attr('font-weight', 700).text(ch);
+          });
+        }
+
+        function appendWrappedCjk(text, x, y, fs, maxCharsPerLine) {
+          const lines = [];
+          for (let i = 0; i < text.length; i += maxCharsPerLine) {
+            lines.push(text.slice(i, i + maxCharsPerLine));
+          }
+          lines.slice(0, 3).forEach((line, i) => {
+            appendHorizontal(line, x, y + i * (fs + 2), fs, 700);
+          });
+          return lines.length;
+        }
+
+        // 太小：放到图下方色块标签
+        if (w < 28 || h < 20) {
+          smallItems.push({
+            label,
+            pct,
+            flow_share_pct: d.data.flow_share_pct,
+            name: d.data.name,
+          });
+          return;
+        }
+
+        // 窄而高：竖排「通 / 信 / 服 / 务」，避免横向截断
+        if (w < 70 && h >= 56 && isCjk && label.length >= 2) {
+          const fs = Math.min(13, Math.max(9, w - 10));
+          const lineGap = fs + 2;
+          const maxChars = Math.max(1, Math.floor((h - (h >= 40 ? 22 : 8)) / lineGap));
+          const chars = [...label].slice(0, maxChars);
+          const blockH = chars.length * lineGap;
+          const startY = Math.max(fs, Math.floor((h - blockH - (h >= 40 ? 16 : 0)) / 2) + fs);
+          appendVertical(chars, Math.max(2, Math.floor((w - fs) / 2)), startY, fs, lineGap);
+          if (h - (startY + blockH) >= 14 || h >= 70) {
+            const pctFs = Math.min(10, Math.max(8, w - 8));
+            if (textWidth(pct, pctFs) <= w - 4) {
+              appendHorizontal(pct, Math.max(2, (w - textWidth(pct, pctFs)) / 2), Math.min(h - 4, startY + blockH + 2), pctFs, 600);
+            }
           }
           return;
         }
-        // 中等：只显示代码
-        if (w >= 36 && h >= 22) {
-          g.append('text').attr('x', 4).attr('y', Math.min(14, h - 4)).attr('fill', fill)
-            .attr('font-size', 10).attr('font-weight', 700)
-            .text(label.length > 6 ? label.slice(0, 5) + '…' : label);
+
+        // 偏窄中文：两字换行，如「通信」「服务」
+        if (w < 96 && isCjk && label.length >= 4 && h >= 40) {
+          const fs = Math.min(13, Math.max(10, Math.floor(w / 3.2)));
+          const perLine = textWidth(label.slice(0, 2), fs) <= w - 8 ? 2 : 1;
+          const lineCount = appendWrappedCjk(label, 4, fs + 2, fs, perLine);
+          if (h >= fs * lineCount + 28) {
+            appendHorizontal(pct, 4, fs + 2 + lineCount * (fs + 2) + 4, 10, 600);
+          }
           return;
         }
-        // 太小：放到图下方色块标签
+
+        // 常规横排：按宽度裁剪，保证不溢出
+        if (w >= 40 && h >= 28) {
+          const fs = Math.min(14, Math.max(10, Math.floor(w / 8)));
+          let shown = label;
+          const fits = (s) => textWidth(s, fs) <= w - 10;
+          if (!fits(shown)) {
+            while (shown.length > 1 && !fits(shown + '…')) shown = shown.slice(0, -1);
+            shown = shown.length < label.length ? shown + '…' : shown;
+          }
+          if (!fits(shown) && shown === '…') {
+            smallItems.push({
+              label,
+              pct,
+              flow_share_pct: d.data.flow_share_pct,
+              name: d.data.name,
+            });
+            return;
+          }
+          appendHorizontal(shown, 6, fs + 4, fs, 700);
+          if (h >= 48 && textWidth(pct, 11) <= w - 10) {
+            appendHorizontal(pct, 6, fs + 20, 11, 600);
+          }
+          return;
+        }
+
+        // 其余：下方芯片
         smallItems.push({
           label,
           pct,
@@ -631,7 +708,8 @@
 
       if (usingLive()) {
         meta.textContent = liveData
-          ? `今日实时 · 更新时间 ${liveData.updated_at} · 数据源 CNBC`
+          ? `今日实时 · 更新时间 ${liveData.updated_at} · 数据源 ${liveData.source || 'CNBC'}` +
+            (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : '')
           : '今日实时加载中...';
         note.textContent = (liveData && liveData.note) || '';
         renderSidebar();
