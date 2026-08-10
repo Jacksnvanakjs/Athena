@@ -1,6 +1,7 @@
 """美股板块/个股热力图数据。
 
-主数据源 Yahoo spark 批量报价（云端更稳），CNBC / 东财作补充。
+主数据源：新浪财经美股批量行情（云端机房通常可用）；
+补充：Yahoo spark / CNBC / 东财。
 资金流入用「涨跌幅 × 成交额」代理指标；非 Level2 真实资金流。
 """
 
@@ -16,6 +17,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 CNBC_QUOTE = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
+SINA_HQ = "https://hq.sinajs.cn/list={codes}"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -29,7 +31,7 @@ YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_SPARK = "https://query1.finance.yahoo.com/v7/finance/spark"
 EASTMONEY_ULIST = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 
-# 成功样本过少时不覆盖界面（避免「全 0」或「单板块 100%」）
+# 成功样本过少时视为失败（避免「全 0」或「单板块 100%」）
 _MIN_QUOTE_RATIO = 0.55
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 120  # 秒
@@ -83,7 +85,7 @@ SECTORS: list[dict[str, Any]] = [
         "name": "金融",
         "etf": "XLF",
         "companies": [
-            ("BRK.B", "伯克希尔"),
+            ("WFC", "富国银行"),
             ("JPM", "摩根大通"),
             ("V", "Visa"),
             ("MA", "万事达"),
@@ -297,6 +299,59 @@ async def _fetch_cnbc(symbols: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _sina_code(symbol: str) -> str:
+    return "gb_" + symbol.lower().replace("-", ".")
+
+
+async def _fetch_sina(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """新浪财经美股批量行情（hq.sinajs.cn），云端机房通常不被拦。"""
+    out: dict[str, dict[str, Any]] = {}
+    code_to_sym = {_sina_code(s): s for s in symbols}
+    headers = {
+        **HEADERS,
+        "Referer": "https://finance.sina.com.cn/",
+        "Accept": "*/*",
+    }
+    chunk_size = 40
+    codes = list(code_to_sym.keys())
+    async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True) as client:
+        for i in range(0, len(codes), chunk_size):
+            chunk = codes[i : i + chunk_size]
+            try:
+                resp = await client.get(SINA_HQ.format(codes=",".join(chunk)))
+                resp.raise_for_status()
+                raw = resp.content
+                try:
+                    text = raw.decode("gb18030")
+                except UnicodeDecodeError:
+                    text = raw.decode("utf-8", errors="ignore")
+                for code, sym in ((c, code_to_sym[c]) for c in chunk):
+                    match = re.search(
+                        rf'hq_str_{re.escape(code)}="([^"]*)"',
+                        text,
+                    )
+                    if not match or not match.group(1):
+                        continue
+                    parts = match.group(1).split(",")
+                    if len(parts) < 11:
+                        continue
+                    price = _to_float(parts[1])
+                    change_pct = _to_float(parts[2])
+                    volume = _to_float(parts[10])
+                    if price is None or price <= 0:
+                        continue
+                    out[sym] = _quote_row(
+                        sym,
+                        name=parts[0] or sym,
+                        price=price,
+                        change_pct=change_pct or 0.0,
+                        volume=volume or 0.0,
+                    )
+            except Exception as exc:
+                logger.warning("Sina batch failed: %s", exc)
+    return out
+
+
 def _yahoo_symbol(symbol: str) -> str:
     # Yahoo 用 BRK-B，本站内部用 BRK.B
     return symbol.replace(".", "-")
@@ -486,16 +541,24 @@ def _is_quality_ok(quote_count: int, total: int) -> bool:
 
 
 async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
-    """多源合并：Yahoo spark（主）→ CNBC → 东财。优先稳定批量接口。"""
+    """多源合并：新浪（主）→ Yahoo → CNBC → 东财。"""
     sources_used: list[str] = []
     merged: dict[str, dict[str, Any]] = {}
 
+    sina = await _fetch_sina(symbols)
+    if sina:
+        merged.update(sina)
+        sources_used.append(f"Sina:{len(sina)}")
+    if _is_quality_ok(len(merged), len(symbols)):
+        return merged, "Sina"
+
     yahoo = await _fetch_yahoo(symbols)
     if yahoo:
-        merged.update(yahoo)
+        for k, v in yahoo.items():
+            merged.setdefault(k, v)
         sources_used.append(f"Yahoo:{len(yahoo)}")
     if _is_quality_ok(len(merged), len(symbols)):
-        return merged, "Yahoo"
+        return merged, "+".join(sources_used) if len(sources_used) > 1 else "Yahoo"
 
     cnbc = await _fetch_cnbc(symbols)
     if cnbc:
@@ -525,7 +588,7 @@ async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], 
 def _heatmap_failure(source: str, quote_count: int, total: int) -> dict[str, Any]:
     note = (
         f"行情拉取失败（{source} 仅 {quote_count}/{total}）。"
-        "已尝试 Yahoo / CNBC / 东财，请稍后点击刷新。"
+        "已尝试 新浪 / Yahoo / CNBC / 东财，请稍后点击刷新。"
     )
     return {
         "success": False,
