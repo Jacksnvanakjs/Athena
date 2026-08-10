@@ -350,6 +350,12 @@
 
       if (usingLive()) {
         if (!liveData) return;
+        if (liveData.success === false) {
+          const msg = liveData.note || '行情拉取失败';
+          topS.innerHTML = botS.innerHTML = topC.innerHTML = botC.innerHTML =
+            `<li class="muted">${msg}</li>`;
+          return;
+        }
         const secTotal = absFlowTotal(liveData.sectors, 'flow_score');
         const allCos = (liveData.sectors || []).flatMap(s => s.companies || []);
         const cosTotal = absFlowTotal(allCos, 'flow_score');
@@ -504,7 +510,7 @@
 
       if (!hierarchy || !hierarchy.children || !hierarchy.children.length) {
         const msg = usingLive()
-          ? '暂无行情数据'
+          ? ((liveData && liveData.success === false && liveData.note) || '行情拉取失败，请稍后刷新')
           : ((statsData && statsData.note) || '该周期数据还不足，请先积累交易日快照');
         document.getElementById('treemap').innerHTML = `<div class="loading">${msg}</div>`;
         document.getElementById('smallLabels').innerHTML = '';
@@ -694,9 +700,10 @@
       if (!res.ok) throw new Error('行情 HTTP ' + res.status);
       liveData = await res.json();
       document.getElementById('metaLine').textContent =
-        `更新时间 ${liveData.updated_at} · 数据源 ${liveData.source || '?'}` +
-        (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : '') +
-        (liveData.stale ? ' · 缓存回退' : '') +
+        (liveData.success === false
+          ? `行情拉取失败 · ${liveData.updated_at} · ${liveData.source || '?'}（${liveData.quote_count || 0}/${liveData.quote_total || '?'}）`
+          : `更新时间 ${liveData.updated_at} · 数据源 ${liveData.source || '?'}` +
+            (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : '')) +
         ` · 美股收盘后自动存快照（美东 16:30）`;
       if (usingLive()) document.getElementById('note').textContent = liveData.note || '';
     }
@@ -709,8 +716,10 @@
 
       if (usingLive()) {
         meta.textContent = liveData
-          ? `今日实时 · 更新时间 ${liveData.updated_at} · 数据源 ${liveData.source || 'CNBC'}` +
-            (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : '')
+          ? (liveData.success === false
+            ? `行情拉取失败 · ${liveData.updated_at} · ${liveData.source || '?'}（${liveData.quote_count || 0}/${liveData.quote_total || '?'}）`
+            : `今日实时 · 更新时间 ${liveData.updated_at} · 数据源 ${liveData.source || '?'}` +
+              (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : ''))
           : '今日实时加载中...';
         note.textContent = (liveData && liveData.note) || '';
         renderSidebar();

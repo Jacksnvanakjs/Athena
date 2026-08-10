@@ -31,9 +31,8 @@ EASTMONEY_ULIST = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 
 # 成功样本过少时不覆盖界面（避免「全 0」或「单板块 100%」）
 _MIN_QUOTE_RATIO = 0.55
-_CACHE: dict[str, Any] = {"ts": 0.0, "data": None, "last_good": None}
+_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 120  # 秒
-_LAST_GOOD_TTL = 6 * 3600  # 拉取失败时最多回退 6 小时内的成功数据
 
 
 # 11 大 GICS 板块 → SPDR 行业 ETF + 代表性龙头股
@@ -480,45 +479,6 @@ async def _fetch_eastmoney(symbols: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _last_good_path():
-    from app.config import DATA_DIR
-
-    return DATA_DIR / "heatmap_last_good.json"
-
-
-def _load_last_good() -> dict[str, Any] | None:
-    if _CACHE.get("last_good"):
-        return _CACHE["last_good"]
-    path = _last_good_path()
-    try:
-        if not path.exists():
-            return None
-        import json
-
-        data = json.loads(path.read_text(encoding="utf-8"))
-        saved_at = float(data.get("_saved_at") or 0)
-        if time.time() - saved_at > _LAST_GOOD_TTL:
-            return None
-        _CACHE["last_good"] = data
-        return data
-    except Exception as exc:
-        logger.warning("load last_good failed: %s", exc)
-        return None
-
-
-def _save_last_good(data: dict[str, Any]) -> None:
-    import json
-
-    payload = {**data, "_saved_at": time.time()}
-    _CACHE["last_good"] = payload
-    try:
-        _last_good_path().write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-        )
-    except Exception as exc:
-        logger.warning("save last_good failed: %s", exc)
-
-
 def _is_quality_ok(quote_count: int, total: int) -> bool:
     if total <= 0:
         return False
@@ -562,6 +522,26 @@ async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], 
     return merged, label
 
 
+def _heatmap_failure(source: str, quote_count: int, total: int) -> dict[str, Any]:
+    note = (
+        f"行情拉取失败（{source} 仅 {quote_count}/{total}）。"
+        "已尝试 Yahoo / CNBC / 东财，请稍后点击刷新。"
+    )
+    return {
+        "success": False,
+        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "source": source,
+        "quote_count": quote_count,
+        "quote_total": total,
+        "note": note,
+        "sectors": [],
+        "top_inflow_sectors": [],
+        "top_outflow_sectors": [],
+        "top_inflow_companies": [],
+        "top_outflow_companies": [],
+    }
+
+
 async def _build_heatmap() -> dict[str, Any]:
     symbols: list[str] = []
     for sector in SECTORS:
@@ -573,18 +553,8 @@ async def _build_heatmap() -> dict[str, Any]:
     quote_count = len(by_symbol)
 
     if not _is_quality_ok(quote_count, total):
-        stale = _load_last_good()
-        if stale and _is_quality_ok(int(stale.get("quote_count") or 0), total):
-            stale = dict(stale)
-            stale.pop("_saved_at", None)
-            stale["stale"] = True
-            stale["note"] = (
-                f"实时行情不完整（{source} 仅 {quote_count}/{total}），"
-                f"已显示上次成功数据（{stale.get('source')} @ {stale.get('updated_at')}）。"
-                "请稍后刷新。"
-            )
-            logger.warning("serving last_good heatmap due to low quality fetch")
-            return stale
+        logger.error("heatmap fetch failed %s/%s via %s", quote_count, total, source)
+        return _heatmap_failure(source, quote_count, total)
 
     sectors_out = []
     all_companies = []
@@ -630,21 +600,18 @@ async def _build_heatmap() -> dict[str, Any]:
     sectors_out.sort(key=lambda x: x["flow_score"], reverse=True)
     all_companies.sort(key=lambda x: x["flow_score"], reverse=True)
 
-    if quote_count == 0:
-        note = "行情拉取失败。已尝试 Yahoo/CNBC/东财仍无足够数据，请稍后刷新。"
-    else:
-        note = (
-            f"数据源 {source}（{quote_count}/{total} 只）。"
-            "本站% = 占监控样本（约11个主要板块+龙头股）的资金活跃度比重，"
-            "非股价涨跌、非全市场资金占比；红流入绿流出。"
-        )
+    note = (
+        f"数据源 {source}（{quote_count}/{total} 只）。"
+        "本站% = 占监控样本（约11个主要板块+龙头股）的资金活跃度比重，"
+        "非股价涨跌、非全市场资金占比；红流入绿流出。"
+    )
 
     return {
+        "success": True,
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": source,
         "quote_count": quote_count,
         "quote_total": total,
-        "stale": False,
         "note": note,
         "sectors": sectors_out,
         "top_inflow_sectors": [s for s in sectors_out if s["flow_score"] > 0][:5],
@@ -666,8 +633,8 @@ async def get_heatmap_data(force: bool = False) -> dict[str, Any]:
     if (
         not force
         and cached is not None
+        and cached.get("success")
         and now - _CACHE["ts"] < _CACHE_TTL
-        and not cached.get("stale")
         and _is_quality_ok(
             int(cached.get("quote_count") or 0),
             int(cached.get("quote_total") or 72),
@@ -677,12 +644,10 @@ async def get_heatmap_data(force: bool = False) -> dict[str, Any]:
 
     data = await _build_heatmap()
     _CACHE["ts"] = now
-    _CACHE["data"] = data
-    if not data.get("stale") and _is_quality_ok(
-        int(data.get("quote_count") or 0),
-        int(data.get("quote_total") or 72),
-    ):
-        _save_last_good(data)
+    if data.get("success"):
+        _CACHE["data"] = data
+    else:
+        _CACHE["data"] = None
     return data
 
 
