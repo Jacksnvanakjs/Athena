@@ -617,7 +617,9 @@
       if (!res.ok) throw new Error('行情 HTTP ' + res.status);
       liveData = await res.json();
       document.getElementById('metaLine').textContent =
-        `更新时间 ${liveData.updated_at} · 数据源 CNBC · 美股收盘后自动存快照（美东 16:30）`;
+        `更新时间 ${liveData.updated_at} · 数据源 ${liveData.source || 'CNBC'}` +
+        (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : '') +
+        ` · 美股收盘后自动存快照（美东 16:30）`;
       if (usingLive()) document.getElementById('note').textContent = liveData.note || '';
     }
 

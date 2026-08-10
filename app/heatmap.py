@@ -20,8 +20,13 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
 }
+
+YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+EASTMONEY_ULIST = "https://push2.eastmoney.com/api/qt/ulist.np/get"
 
 # 11 大 GICS 板块 → SPDR 行业 ETF + 代表性龙头股
 SECTORS: list[dict[str, Any]] = [
@@ -207,6 +212,28 @@ def _to_float(value: Any) -> float | None:
         return float(match.group()) if match else None
 
 
+def _quote_row(
+    symbol: str,
+    *,
+    name: str,
+    price: float,
+    change_pct: float,
+    volume: float,
+    market_cap: float | None = None,
+) -> dict[str, Any]:
+    dollar_volume = price * volume
+    return {
+        "symbol": symbol,
+        "name": name or symbol,
+        "price": round(price, 2),
+        "change_pct": round(change_pct, 2),
+        "volume": int(volume),
+        "dollar_volume": round(dollar_volume, 0),
+        "flow_score": round(change_pct * dollar_volume / 1e9, 4),
+        "market_cap": market_cap,
+    }
+
+
 def _parse_quote(raw: dict[str, Any]) -> dict[str, Any] | None:
     if raw.get("code") not in (0, "0", None):
         # code=1 means not found
@@ -217,26 +244,22 @@ def _parse_quote(raw: dict[str, Any]) -> dict[str, Any] | None:
         return None
     change_pct = _to_float(raw.get("change_pct")) or 0.0
     volume = _to_float(raw.get("volume")) or 0.0
-    dollar_volume = price * volume
-    flow_score = change_pct * dollar_volume / 1e9
-    return {
-        "symbol": raw.get("symbol") or raw.get("shortName"),
-        "name": raw.get("name") or raw.get("onAirName") or raw.get("symbol"),
-        "price": round(price, 2),
-        "change_pct": round(change_pct, 2),
-        "volume": int(volume),
-        "dollar_volume": round(dollar_volume, 0),
-        "flow_score": round(flow_score, 4),
-        "market_cap": _to_float(raw.get("mktcapView")),
-    }
+    return _quote_row(
+        raw.get("symbol") or raw.get("shortName") or "",
+        name=raw.get("name") or raw.get("onAirName") or raw.get("symbol") or "",
+        price=price,
+        change_pct=change_pct,
+        volume=volume,
+        market_cap=_to_float(raw.get("mktcapView")),
+    )
 
 
-async def _fetch_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """CNBC 支持用 | 批量拉取，一次拿齐所有标的。"""
+async def _fetch_cnbc(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """CNBC 批量报价；部分云主机 IP 会被拦截，失败时返回空。"""
     out: dict[str, dict[str, Any]] = {}
-    # 分两批，避免 URL 过长
     chunk_size = 40
-    async with httpx.AsyncClient(headers=HEADERS, timeout=30) as client:
+    headers = {**HEADERS, "Referer": "https://www.cnbc.com/"}
+    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
         for i in range(0, len(symbols), chunk_size):
             chunk = symbols[i : i + chunk_size]
             try:
@@ -270,13 +293,177 @@ async def _fetch_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _yahoo_symbol(symbol: str) -> str:
+    # Yahoo 用 BRK-B，本站内部用 BRK.B
+    return symbol.replace(".", "-")
+
+
+async def _fetch_yahoo_one(
+    client: httpx.AsyncClient, symbol: str
+) -> tuple[str, dict[str, Any] | None]:
+    ysym = _yahoo_symbol(symbol)
+    try:
+        resp = await client.get(
+            YAHOO_CHART.format(symbol=ysym),
+            params={"interval": "1d", "range": "5d"},
+        )
+        if resp.status_code != 200:
+            return symbol, None
+        result = ((resp.json().get("chart") or {}).get("result")) or []
+        if not result:
+            return symbol, None
+        meta = result[0].get("meta") or {}
+        quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+        closes = [c for c in (quote.get("close") or []) if c is not None]
+        volumes = [v for v in (quote.get("volume") or []) if v is not None]
+        price = _to_float(meta.get("regularMarketPrice"))
+        if price is None and closes:
+            price = float(closes[-1])
+        if price is None:
+            return symbol, None
+        change_pct = 0.0
+        if len(closes) >= 2 and closes[-2]:
+            change_pct = (float(closes[-1]) - float(closes[-2])) / float(closes[-2]) * 100
+            price = float(closes[-1])
+        else:
+            prev = _to_float(meta.get("previousClose")) or _to_float(
+                meta.get("chartPreviousClose")
+            )
+            if prev:
+                change_pct = (price - prev) / prev * 100
+        volume = float(volumes[-1]) if volumes else float(meta.get("regularMarketVolume") or 0)
+        return symbol, _quote_row(
+            symbol,
+            name=meta.get("longName") or meta.get("shortName") or symbol,
+            price=price,
+            change_pct=change_pct,
+            volume=volume,
+        )
+    except Exception as exc:
+        logger.debug("Yahoo quote failed %s: %s", symbol, exc)
+        return symbol, None
+
+
+async def _fetch_yahoo(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Yahoo chart 逐标的拉取（云端 CNBC 被拦时的备用源）。"""
+    import asyncio
+
+    out: dict[str, dict[str, Any]] = {}
+    headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
+    sem = asyncio.Semaphore(10)
+
+    async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True) as client:
+
+        async def one(sym: str):
+            async with sem:
+                return await _fetch_yahoo_one(client, sym)
+
+        results = await asyncio.gather(*[one(s) for s in symbols])
+    for sym, row in results:
+        if row:
+            out[sym] = row
+    # 个别失败再重试一次
+    missing = [s for s in symbols if s not in out]
+    if missing:
+        async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True) as client:
+            for sym in missing:
+                _, row = await _fetch_yahoo_one(client, sym)
+                if row:
+                    out[sym] = row
+    return out
+
+
+async def _fetch_eastmoney(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """东方财富美股列表接口（部分环境可用）。"""
+    out: dict[str, dict[str, Any]] = {}
+    headers = {**HEADERS, "Referer": "https://quote.eastmoney.com/"}
+    markets = (105, 106, 107)
+    async with httpx.AsyncClient(headers=headers, timeout=20, follow_redirects=True) as client:
+        for mkt in markets:
+            missing = [s for s in symbols if s not in out]
+            if not missing:
+                break
+            for i in range(0, len(missing), 20):
+                chunk = missing[i : i + 20]
+                secids = ",".join(f"{mkt}.{s}" for s in chunk)
+                try:
+                    resp = await client.get(
+                        EASTMONEY_ULIST,
+                        params={
+                            "fltt": "2",
+                            "secids": secids,
+                            "fields": "f12,f14,f2,f3,f5,f6",
+                        },
+                    )
+                    resp.raise_for_status()
+                    diff = ((resp.json().get("data") or {}).get("diff")) or []
+                    for item in diff:
+                        sym = item.get("f12")
+                        price = _to_float(item.get("f2"))
+                        if not sym or price is None:
+                            continue
+                        change_pct = _to_float(item.get("f3")) or 0.0
+                        # f5=成交量(股), f6=成交额；优先用成交额反推更稳
+                        dollar = _to_float(item.get("f6"))
+                        volume = _to_float(item.get("f5")) or 0.0
+                        if dollar and price:
+                            volume = dollar / price
+                        out[sym] = _quote_row(
+                            sym,
+                            name=str(item.get("f14") or sym),
+                            price=price,
+                            change_pct=change_pct,
+                            volume=volume,
+                        )
+                except Exception as exc:
+                    logger.warning("Eastmoney batch failed: %s", exc)
+    return out
+
+
+async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
+    """多数据源：CNBC → Yahoo → 东财。返回 (quotes, source)。"""
+    min_ok = max(8, len(symbols) // 3)
+
+    cnbc = await _fetch_cnbc(symbols)
+    if len(cnbc) >= min_ok:
+        logger.info("heatmap quotes from CNBC: %s/%s", len(cnbc), len(symbols))
+        return cnbc, "CNBC"
+
+    logger.warning(
+        "CNBC insufficient (%s/%s), falling back to Yahoo",
+        len(cnbc),
+        len(symbols),
+    )
+    yahoo = await _fetch_yahoo(symbols)
+    if len(yahoo) >= min_ok:
+        logger.info("heatmap quotes from Yahoo: %s/%s", len(yahoo), len(symbols))
+        return yahoo, "Yahoo"
+
+    logger.warning(
+        "Yahoo insufficient (%s/%s), falling back to Eastmoney",
+        len(yahoo),
+        len(symbols),
+    )
+    east = await _fetch_eastmoney(symbols)
+    if east:
+        # 合并已有结果
+        merged = {**cnbc, **yahoo, **east}
+        logger.info("heatmap quotes from Eastmoney merge: %s/%s", len(merged), len(symbols))
+        return merged, "Eastmoney"
+
+    merged = {**cnbc, **yahoo, **east}
+    source = "none" if not merged else "partial"
+    logger.error("heatmap quotes failed, only %s/%s", len(merged), len(symbols))
+    return merged, source
+
+
 async def _build_heatmap() -> dict[str, Any]:
     symbols: list[str] = []
     for sector in SECTORS:
         symbols.append(sector["etf"])
         symbols.extend(sym for sym, _ in sector["companies"])
 
-    by_symbol = await _fetch_quotes(symbols)
+    by_symbol, source = await _fetch_quotes(symbols)
 
     sectors_out = []
     all_companies = []
@@ -322,9 +509,25 @@ async def _build_heatmap() -> dict[str, Any]:
     sectors_out.sort(key=lambda x: x["flow_score"], reverse=True)
     all_companies.sort(key=lambda x: x["flow_score"], reverse=True)
 
+    quote_count = len(by_symbol)
+    if quote_count == 0:
+        note = (
+            "行情拉取失败（云端可能无法访问 CNBC）。"
+            "已尝试备用源仍无数据，请查看服务日志或稍后重试。"
+        )
+    else:
+        note = (
+            f"数据源 {source}（{quote_count}/{len(symbols)} 只）。"
+            "本站% = 占监控样本（约11个主要板块+龙头股）的资金活跃度比重，"
+            "非股价涨跌、非全市场资金占比；红流入绿流出。"
+        )
+
     return {
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "note": "本站% = 占监控样本（约11个主要板块+龙头股）的资金活跃度比重，非股价涨跌、非全市场资金占比；红流入绿流出；数据源 CNBC",
+        "source": source,
+        "quote_count": quote_count,
+        "quote_total": len(symbols),
+        "note": note,
         "sectors": sectors_out,
         "top_inflow_sectors": [s for s in sectors_out if s["flow_score"] > 0][:5],
         "top_outflow_sectors": sorted(
