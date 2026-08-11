@@ -70,21 +70,5 @@ SCRAPE_TIMES = [(11, 5), (14, 35)]
 # 卡片「额度变化」高亮保留天数（近 2 个月）
 CHANGE_HIGHLIGHT_DAYS = 60
 
-# AI产业链合作新闻监控（无预算版）
-# 抓取频率：尽量快但避免过载（默认 5 分钟）
-NEWS_MONITOR_INTERVAL_MIN = int(os.getenv("NEWS_MONITOR_INTERVAL_MIN", "5"))
-# 去重保存时长（防止重复推送）
-NEWS_DEDUP_HOURS = int(os.getenv("NEWS_DEDUP_HOURS", "24"))
-
-# Google News RSS 搜索关键词（每条一个 RSS 源）
-# 你可以继续加更多，但优先保证这些词命中“合作/协议 + 算力/云基础设施”
-NEWS_RSS_QUERIES = [
-    "Anthropic AI compute deal",
-    "AI compute agreement partnership",
-    "AI infrastructure cloud deal",
-    "GPU data center partnership",
-    "model deployment cloud agreement",
-]
-
 RANDOM_DELAY_MIN = 1.0
 RANDOM_DELAY_MAX = 3.0

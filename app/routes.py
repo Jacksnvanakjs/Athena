@@ -184,22 +184,3 @@ async def heatmap_snapshot(force: bool = Query(default=True)):
     from app.heatmap import save_daily_snapshot
 
     return await save_daily_snapshot(force=force)
-
-
-@router.get("/news/ai/latest")
-async def ai_news_latest():
-    """获取 AI 合作新闻监控的最新筛选结果（用于页面展示）。"""
-    from app.news_monitor import get_latest, update_latest
-
-    data = get_latest()
-    if data is None:
-        data = await update_latest()
-    return data
-
-
-@router.post("/news/ai/check")
-async def ai_news_check():
-    """手动触发 AI 合作新闻监控（便于测试/立刻推送）。"""
-    from app.news_monitor import update_latest
-
-    return await update_latest()
