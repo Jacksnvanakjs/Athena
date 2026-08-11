@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
-from app.config import FUNDS_SOURCE_FILE, SCRAPE_SECRET, SCRAPE_TIMES, TIMEZONE, USE_TURSO
+from app.config import CHANGE_HIGHLIGHT_DAYS, FUNDS_SOURCE_FILE, SCRAPE_SECRET, SCRAPE_TIMES, TIMEZONE, USE_TURSO
 from app.database import Fund, QuotaRecord, run_with_db_retry
 from app.service import run_scrape_and_notify
 from app.utils import is_trading_day, now_beijing
@@ -17,34 +17,61 @@ def _check_scrape_secret(secret: str | None):
         raise HTTPException(status_code=403, detail="无效的密钥")
 
 
+def _recent_change_baseline(records_desc: list[QuotaRecord]) -> tuple[float | None, str | None, str | None]:
+    """在最近 CHANGE_HIGHLIGHT_DAYS 天内找到最近一次额度/状态变化，返回变化前的值与时间。"""
+    if len(records_desc) < 2:
+        return None, None, None
+    since = now_beijing() - timedelta(days=CHANGE_HIGHLIGHT_DAYS)
+    for i in range(len(records_desc) - 1):
+        curr = records_desc[i]
+        prev = records_desc[i + 1]
+        if curr.quota != prev.quota or curr.status != prev.status:
+            if curr.scraped_at >= since:
+                return prev.quota, prev.status, curr.scraped_at.isoformat(timespec="minutes")
+            return None, None, None
+    return None, None, None
+
+
 def _list_funds(db: Session):
     funds = db.query(Fund).all()
-    latest = {}
-    previous = {}
+    since = now_beijing() - timedelta(days=CHANGE_HIGHLIGHT_DAYS)
+    result = []
     for fund in funds:
-        records = (
+        latest = (
             db.query(QuotaRecord)
             .filter(QuotaRecord.fund_code == fund.code)
             .order_by(desc(QuotaRecord.scraped_at))
-            .limit(2)
+            .first()
+        )
+        records = (
+            db.query(QuotaRecord)
+            .filter(QuotaRecord.fund_code == fund.code, QuotaRecord.scraped_at >= since)
+            .order_by(desc(QuotaRecord.scraped_at))
             .all()
         )
-        latest[fund.code] = records[0] if records else None
-        previous[fund.code] = records[1] if len(records) > 1 else None
-
-    return [
-        {
-            "code": f.code,
-            "name": f.name,
-            "url": f.url,
-            "status": latest[f.code].status if latest[f.code] else None,
-            "quota": latest[f.code].quota if latest[f.code] else None,
-            "scraped_at": latest[f.code].scraped_at.isoformat() if latest[f.code] else None,
-            "previous_status": previous[f.code].status if previous[f.code] else None,
-            "previous_quota": previous[f.code].quota if previous[f.code] else None,
-        }
-        for f in funds
-    ]
+        older = (
+            db.query(QuotaRecord)
+            .filter(QuotaRecord.fund_code == fund.code, QuotaRecord.scraped_at < since)
+            .order_by(desc(QuotaRecord.scraped_at))
+            .first()
+        )
+        if older:
+            records.append(older)
+        prev_quota, prev_status, changed_at = _recent_change_baseline(records)
+        result.append(
+            {
+                "code": fund.code,
+                "name": fund.name,
+                "url": fund.url,
+                "status": latest.status if latest else None,
+                "quota": latest.quota if latest else None,
+                "scraped_at": latest.scraped_at.isoformat() if latest else None,
+                "previous_status": prev_status,
+                "previous_quota": prev_quota,
+                "changed_at": changed_at,
+            }
+        )
+    return result
 
 
 @router.get("/funds")

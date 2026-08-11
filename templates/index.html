@@ -235,8 +235,15 @@
       return 'status-unknown';
     }
 
+    function formatChangedAt(iso) {
+      if (!iso) return '';
+      const dt = new Date(iso);
+      if (Number.isNaN(dt.getTime())) return '';
+      return dt.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+    }
+
     function hasChanged(f) {
-      if (f.previous_quota == null) return false;
+      if (f.previous_quota == null && f.previous_status == null) return false;
       return f.previous_quota !== f.quota || f.previous_status !== f.status;
     }
 
@@ -269,12 +276,13 @@
       }
       cards.innerHTML = funds.map(f => {
         const changed = hasChanged(f);
+        const changedLabel = f.changed_at ? `近2月变化 · ${formatChangedAt(f.changed_at)}` : '近2月变化';
         const prevBlock = changed
-          ? `<div class="card-prev">上次：<strong>${formatQuotaCard(f.previous_quota)}</strong> · <span class="card-status ${statusClass(f.previous_status)}">${f.previous_status}</span></div>`
+          ? `<div class="card-prev">变化前：<strong>${formatQuotaCard(f.previous_quota)}</strong> · <span class="card-status ${statusClass(f.previous_status)}">${f.previous_status}</span></div>`
           : '';
         return `
         <div class="card${changed ? ' card-changed' : ''}">
-          ${changed ? '<span class="card-change-badge">额度变化</span>' : ''}
+          ${changed ? `<span class="card-change-badge">${changedLabel}</span>` : ''}
           <div class="card-name">${f.name}</div>
           <div class="card-code">${f.code}</div>
           <div class="card-quota">${formatQuotaCard(f.quota)}</div>

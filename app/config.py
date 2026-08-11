@@ -67,5 +67,7 @@ SCRAPE_SECRET = os.getenv("SCRAPE_SECRET", "")
 PORT = int(os.getenv("PORT", "8000"))
 
 SCRAPE_TIMES = [(11, 5), (14, 35)]
+# 卡片「额度变化」高亮保留天数（近 2 个月）
+CHANGE_HIGHLIGHT_DAYS = 60
 RANDOM_DELAY_MIN = 1.0
 RANDOM_DELAY_MAX = 3.0
