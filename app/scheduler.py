@@ -3,7 +3,7 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.config import ENABLE_SCHEDULER, FUNDS_SOURCE_FILE, SCRAPE_TIMES, TIMEZONE
+from app.config import ENABLE_SCHEDULER, FUNDS_SOURCE_FILE, NEWS_MONITOR_INTERVAL_MIN, SCRAPE_TIMES, TIMEZONE
 from app.service import run_scrape_and_notify
 from app.utils import is_trading_day, is_us_trading_day
 
@@ -32,6 +32,17 @@ async def scheduled_heatmap_snapshot():
     logger.info("热力图快照完成: %s", result)
 
 
+async def scheduled_news_check():
+    """AI产业链合作新闻监控（候选抓取+关键词筛选，重点才推手机）"""
+    from app.news_monitor import update_latest
+
+    try:
+        result = await update_latest()
+        logger.info("AI news monitor: kept=%s pushed=%s", result.get("kept"), result.get("pushed"))
+    except Exception as exc:
+        logger.exception("AI news monitor failed: %s", exc)
+
+
 def start_scheduler():
     if not ENABLE_SCHEDULER:
         logger.info("内置调度器已禁用（ENABLE_SCHEDULER=false），请使用外部 cron 触发 /api/cron/scrape")
@@ -50,6 +61,15 @@ def start_scheduler():
         id="heatmap_snapshot_us_close",
         replace_existing=True,
     )
+
+    # 新闻监控：尽量快但别过载（分钟维度）
+    if NEWS_MONITOR_INTERVAL_MIN > 0:
+        scheduler.add_job(
+            scheduled_news_check,
+            CronTrigger(minute=f"*/{NEWS_MONITOR_INTERVAL_MIN}", timezone=TIMEZONE),
+            id="news_ai_monitor",
+            replace_existing=True,
+        )
     scheduler.start()
     times = ", ".join(f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES)
     logger.info(
