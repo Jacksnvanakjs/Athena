@@ -1,0 +1,39 @@
+{
+  "aliases": [
+    {"names": ["Riot Platforms", "Riot Blockchain", "RIOT"], "ticker": "RIOT"},
+    {"names": ["CoreWeave", "Core Weave"], "ticker": "CRWV"},
+    {"names": ["Applied Digital", "Applied Digital Corporation"], "ticker": "APLD"},
+    {"names": ["Cipher Mining"], "ticker": "CIFR"},
+    {"names": ["TeraWulf"], "ticker": "WULF"},
+    {"names": ["Core Scientific"], "ticker": "CORZ"},
+    {"names": ["Super Micro Computer", "Supermicro", "SMCI"], "ticker": "SMCI"},
+    {"names": ["Microsoft"], "ticker": "MSFT"},
+    {"names": ["Alphabet", "Google"], "ticker": "GOOG"},
+    {"names": ["Amazon", "Amazon.com"], "ticker": "AMZN"},
+    {"names": ["Meta Platforms", "Meta", "Facebook"], "ticker": "META"},
+    {"names": ["Nvidia", "NVIDIA"], "ticker": "NVDA"},
+    {"names": ["Oracle", "Oracle Corporation"], "ticker": "ORCL"},
+    {"names": ["Apple", "Apple Inc"], "ticker": "AAPL"},
+    {"names": ["TSMC", "Taiwan Semiconductor"], "ticker": "TSM"},
+    {"names": ["Nebius"], "ticker": "NBIS"},
+    {"names": ["Dell Technologies", "Dell"], "ticker": "DELL"},
+    {"names": ["Arista Networks"], "ticker": "ANET"},
+    {"names": ["Vertiv"], "ticker": "VRT"},
+    {"names": ["Micron Technology", "Micron"], "ticker": "MU"},
+    {"names": ["Broadcom"], "ticker": "AVGO"},
+    {"names": ["Marvell Technology", "Marvell"], "ticker": "MRVL"},
+    {"names": ["Equinix"], "ticker": "EQIX"},
+    {"names": ["Digital Realty"], "ticker": "DLR"},
+    {"names": ["IREN", "Iris Energy"], "ticker": "IREN"},
+    {"names": ["Hut 8", "Hut 8 Mining"], "ticker": "HUT"},
+    {"names": ["CleanSpark"], "ticker": "CLSK"},
+    {"names": ["Bitfarms"], "ticker": "BITF"},
+    {"names": ["SoftBank"], "ticker": "SFTBY"}
+  ],
+  "unlisted_anchors": [
+    {"names": ["OpenAI", "Open AI"], "id": "openai"},
+    {"names": ["Anthropic"], "id": "anthropic"},
+    {"names": ["xAI", "X.AI"], "id": "xai"}
+  ],
+  "t0_listed_tickers": ["MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "ORCL", "AAPL", "TSM", "SFTBY"]
+}

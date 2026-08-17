@@ -83,3 +83,8 @@ async def index(request: Request):
 @app.get("/heatmap", response_class=HTMLResponse)
 async def heatmap_page(request: Request):
     return templates.TemplateResponse("heatmap.html", {"request": request})
+
+
+@app.get("/deals", response_class=HTMLResponse)
+async def deals_page(request: Request):
+    return templates.TemplateResponse("deals.html", {"request": request})

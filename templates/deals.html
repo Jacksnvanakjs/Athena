@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI 合作快讯</title>
+  <style>
+    :root {
+      --bg: #f5f7fa;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --accent: #2563eb;
+      --green: #059669;
+      --orange: #d97706;
+      --shadow: 0 1px 3px rgba(15, 23, 42, 0.08);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .container { max-width: 1280px; margin: 0 auto; padding: 24px 20px; }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    h1 { font-size: 1.5rem; font-weight: 600; }
+    .sub { color: var(--text-muted); font-size: 0.85rem; margin-top: 4px; }
+    .btn {
+      padding: 8px 16px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 500;
+      text-decoration: none;
+      display: inline-block;
+    }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-dark { background: #0f172a; color: #fff; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .info-box {
+      background: #fff;
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--accent);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      font-size: 0.84rem;
+      line-height: 1.65;
+    }
+    .info-box h3 { font-size: 0.95rem; margin-bottom: 8px; }
+    .info-box .muted { color: var(--text-muted); font-size: 0.8rem; }
+    .info-box ul { margin: 6px 0 10px 1.1em; color: var(--text-muted); }
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .filters {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      align-items: flex-end;
+    }
+    .field {
+      display: flex;
+      flex-direction: column;
+    }
+    .field-label {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      min-height: 20px;
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .field select, .field input[type=number] {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0 10px;
+      font-size: 0.85rem;
+      height: 34px;
+      box-sizing: border-box;
+    }
+    .field select { min-width: 200px; padding-right: 28px; }
+    .field input[type=number].short { width: 72px; min-width: 72px; }
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 34px;
+      font-size: 0.85rem;
+      color: var(--text);
+    }
+    .help {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      line-height: 16px;
+      text-align: center;
+      border-radius: 50%;
+      background: #e2e8f0;
+      color: #475569;
+      font-size: 0.7rem;
+      font-weight: 700;
+      cursor: help;
+    }
+    .stats {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      margin-bottom: 12px;
+    }
+    .status-ok { color: var(--green); font-weight: 600; }
+    .status-warn { color: var(--orange); font-weight: 600; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th, td {
+      padding: 10px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    th {
+      color: var(--text-muted);
+      font-weight: 500;
+      background: #f8fafc;
+      white-space: nowrap;
+    }
+    tr:hover td { background: #f8fafc; }
+    .ticker { font-weight: 600; color: var(--accent); }
+    .score { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 0.72rem;
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-weight: 500;
+    }
+    .pushed { color: var(--green); font-weight: 600; }
+    .empty {
+      text-align: center;
+      padding: 48px 20px;
+      color: var(--text-muted);
+      line-height: 1.7;
+    }
+    .empty strong { color: var(--text); }
+    a.link { color: var(--accent); text-decoration: none; }
+    a.link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>AI 产业链合作快讯</h1>
+        <div class="sub" id="statusLine">加载状态…</div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <a class="btn btn-dark" href="/">基金监测</a>
+        <a class="btn btn-dark" href="/heatmap">美股热力图</a>
+        <button class="btn btn-dark" id="scanBtn" onclick="triggerScan()">立即扫描</button>
+        <button class="btn btn-primary" onclick="loadDeals()">刷新列表</button>
+      </div>
+    </header>
+
+    <div class="info-box">
+      <h3>这个页面做什么？</h3>
+      <p class="muted" style="margin-bottom:8px">
+        自动监控 PR 通稿 RSS，发现 <strong>AI 算力/数据中心类合作新闻</strong> 后，
+        识别合作双方（巨头锚点 ↔ 受益小票），打分、去重，并可选推送到微信。
+      </p>
+      <ul>
+        <li><strong>没有消息是正常的</strong>：并非每分钟都有合格合作稿；系统还会过滤 MOU、纯研究合作等低质量内容。</li>
+        <li><strong>推送更严格</strong>：入库 ≠ 一定推送；需满足材料性分数门槛，且同一 ticker 7 天内同类事件只推一次。</li>
+        <li>鼠标悬停在筛选旁的 <span class="help">?</span> 可查看说明。</li>
+      </ul>
+    </div>
+
+    <div class="panel">
+      <div class="filters">
+        <div class="field">
+          <div class="field-label">
+            时间范围（天）
+            <span class="help" title="显示最近 N 天内抓取并入库的快讯。默认 7 天，与「同一受益 ticker 7 天内只推一次」的去重窗口一致。">?</span>
+          </div>
+          <input type="number" class="short" id="days" value="7" min="1" max="90">
+        </div>
+        <div class="field">
+          <div class="field-label">
+            合作类型
+            <span class="help" title="【分档含义】&#10;T0：市值 &gt; 5000 亿美元，或未上市 AI 巨头（OpenAI、Anthropic、xAI 等）及 MSFT/NVDA/ORCL 等，作新闻锚点。&#10;T1：50 亿～5000 亿美元，中型算力链（如 CRWV、SMCI、IREN）。&#10;T2：&lt; 50 亿美元，小市值受益方（矿转算力、小型云/数据中心等）。&#10;&#10;【组合含义 · 括号内为通常推送对象】&#10;T0_T2：巨头 ↔ 小票（推 T2）— 最常见，如 Anthropic ↔ RIOT。&#10;T0_T1：巨头 ↔ 中型（推 T1）— 如 OpenAI ↔ CoreWeave。&#10;T1_T2：中型 ↔ 小票（推 T2）— 如 CRWV ↔ 某矿工。&#10;T0_T0：双巨头（推市值较小者）— 弹性有限，分数门槛更高。&#10;T1_T1：双中型（推市值较小者）。&#10;T2_T2：双小票（推市值更小者）。">?</span>
+          </div>
+          <select id="tier_pair">
+            <option value="">全部类型</option>
+            <option value="T0_T2" title="巨头/AI实验室 ↔ 小市值（&lt;50亿）。推送小票。例：Anthropic 与 RIOT 算力协议。">T0_T2 · 巨头↔小票</option>
+            <option value="T0_T1" title="巨头/AI实验室 ↔ 中型（50亿～5000亿）。推送中型。例：OpenAI 与 CoreWeave。">T0_T1 · 巨头↔中型</option>
+            <option value="T1_T2" title="中型 ↔ 小市值。推送小票。例：CoreWeave 与某矿工合作。">T1_T2 · 中型↔小票</option>
+            <option value="T0_T0" title="两家均为 T0（双巨头或未上市+巨头）。仍推送，但推市值较小一侧；材料性门槛 ≥70。">T0_T0 · 双巨头</option>
+            <option value="T1_T1" title="两家均为 T1 中型。推送市值较小者；材料性门槛 ≥65。">T1_T1 · 双中型</option>
+            <option value="T2_T2" title="两家均为 T2 小票。默认推送市值更小者。">T2_T2 · 双小票</option>
+          </select>
+        </div>
+        <div class="field">
+          <div class="field-label">
+            最低材料性分数
+            <span class="help" title="0～100 分，越高表示新闻越「实锤」（含金额、多年期、正式协议、算力/GW/MW 容量等）。低于系统门槛的稿件不会入库；此处可进一步筛高置信度条目。默认 0 表示显示全部已入库记录。">?</span>
+          </div>
+          <input type="number" class="short" id="min_score" value="0" min="0" max="100">
+        </div>
+        <div class="field">
+          <div class="field-label">
+            推送筛选
+            <span class="help" title="勾选后只显示已通过 PushPlus / Server酱 发出微信通知的记录。未勾选则包含「已入库但未推送」的条目。">?</span>
+          </div>
+          <div class="check-row">
+            <input type="checkbox" id="pushed_only">
+            <label for="pushed_only">仅看已推送</label>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stats" id="stats"></div>
+
+    <div class="panel table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>发布时间</th>
+            <th>受益方</th>
+            <th>锚点</th>
+            <th>标题</th>
+            <th>
+              分数
+              <span class="help" title="材料性评分 0～100，综合金额、年限、协议类型、算力容量等信号。">?</span>
+            </th>
+            <th>
+              关系
+              <span class="help" title="双方市值分档组合。T0=巨头/未上市AI实验室，T1=中型算力链（50亿～5000亿），T2=小市值（&lt;50亿）。详见上方「合作类型」旁的 ?。">?</span>
+            </th>
+            <th>已推送</th>
+            <th>来源</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+      <div class="empty" id="empty" style="display:none">
+        <strong>暂无快讯记录</strong><br>
+        可能原因：① 近期没有符合条件的合作新闻；② 本地未开启定时扫描（见页头状态）；③ 稿件被关键词/分数过滤。<br>
+        可点击右上角「立即扫描」手动拉取一轮。
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function fmtTime(iso) {
+      if (!iso) return '-';
+      return new Date(iso).toLocaleString('zh-CN', { hour12: false });
+    }
+
+    async function loadStatus() {
+      try {
+        const res = await fetch('/api/status');
+        const data = await res.json();
+        const dm = data.deal_monitor || {};
+        const sched = data.scheduler_enabled;
+        const el = document.getElementById('statusLine');
+        if (sched) {
+          el.innerHTML = `<span class="status-ok">● 监控运行中</span> · 每 ${dm.poll_interval_min || 3} 分钟扫描 · 累计入库 ${dm.events_total || 0} 条`;
+        } else {
+          el.innerHTML = `<span class="status-warn">● 定时扫描未开启</span>（ENABLE_SCHEDULER=false）· 累计入库 ${dm.events_total || 0} 条 · 请用「立即扫描」手动触发`;
+        }
+      } catch (e) {
+        document.getElementById('statusLine').textContent = '状态加载失败';
+      }
+    }
+
+    async function loadStats() {
+      const res = await fetch('/api/deals/stats?days=' + document.getElementById('days').value);
+      const data = await res.json();
+      const pairs = Object.entries(data.by_tier_pair || {}).map(([k, v]) => k + ' ' + v + '条').join(' · ');
+      document.getElementById('stats').textContent =
+        `筛选范围内：共 ${data.total} 条 · 已推送 ${data.pushed} 条` + (pairs ? ' · ' + pairs : '');
+    }
+
+    async function loadDeals() {
+      const params = new URLSearchParams();
+      params.set('days', document.getElementById('days').value);
+      const tp = document.getElementById('tier_pair').value;
+      if (tp) params.set('tier_pair', tp);
+      params.set('min_score', document.getElementById('min_score').value);
+      if (document.getElementById('pushed_only').checked) params.set('pushed_only', 'true');
+
+      const res = await fetch('/api/deals?' + params);
+      const items = await res.json();
+      const tbody = document.getElementById('tbody');
+      const empty = document.getElementById('empty');
+      tbody.innerHTML = '';
+      if (!items.length) {
+        empty.style.display = 'block';
+        loadStats();
+        loadStatus();
+        return;
+      }
+      empty.style.display = 'none';
+      for (const row of items) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${fmtTime(row.published_at)}</td>
+          <td><span class="ticker">${row.beneficiary_ticker}</span> <span class="badge">${row.beneficiary_tier}</span></td>
+          <td>${row.anchor_name} ${row.anchor_ticker ? '(' + row.anchor_ticker + ')' : '(未上市)'}</td>
+          <td>${row.headline}</td>
+          <td class="score">${row.materiality_score}</td>
+          <td><span class="badge">${row.tier_pair}</span></td>
+          <td class="${row.pushed_at ? 'pushed' : ''}">${row.pushed_at ? '✓' : '—'}</td>
+          <td><a class="link" href="${row.source_url}" target="_blank" rel="noopener">原文</a></td>
+        `;
+        tbody.appendChild(tr);
+      }
+      loadStats();
+      loadStatus();
+    }
+
+    async function triggerScan() {
+      const btn = document.getElementById('scanBtn');
+      btn.disabled = true;
+      btn.textContent = '扫描中…';
+      try {
+        const res = await fetch('/api/deals/run', { method: 'POST' });
+        const data = await res.json();
+        alert(`扫描完成：抓取 ${data.fetched || 0} 条，入库 ${data.saved || 0} 条，推送 ${data.pushed || 0} 条`);
+        await loadDeals();
+      } catch (e) {
+        alert('扫描失败，请查看服务端日志');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '立即扫描';
+      }
+    }
+
+    ['days', 'tier_pair', 'min_score', 'pushed_only'].forEach(id => {
+      document.getElementById(id).addEventListener('change', loadDeals);
+    });
+
+    loadDeals();
+    setInterval(loadDeals, 180000);
+  </script>
+</body>
+</html>

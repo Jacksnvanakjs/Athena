@@ -68,7 +68,27 @@ PORT = int(os.getenv("PORT", "8000"))
 
 SCRAPE_TIMES = [(11, 5), (14, 35)]
 # 卡片「额度变化」高亮保留天数（近 2 个月）
-CHANGE_HIGHLIGHT_DAYS = 60
+CHANGE_HIGHLIGHT_DAYS = int(os.getenv("CHANGE_HIGHLIGHT_DAYS", "60"))
+
+# ── AI 合作快讯监控 (deal_monitor) ──
+DEAL_T0_MIN_CAP = float(os.getenv("DEAL_T0_MIN_CAP", "500000000000"))
+DEAL_T1_MIN_CAP = float(os.getenv("DEAL_T1_MIN_CAP", "5000000000"))
+DEAL_T2_MAX_CAP = float(os.getenv("DEAL_T2_MAX_CAP", "5000000000"))
+DEAL_SCORE_MIN_DEFAULT = int(os.getenv("DEAL_SCORE_MIN_DEFAULT", "55"))
+DEAL_SCORE_MIN_T0_T0 = int(os.getenv("DEAL_SCORE_MIN_T0_T0", "70"))
+DEAL_SCORE_MIN_T0_T1 = int(os.getenv("DEAL_SCORE_MIN_T0_T1", "60"))
+DEAL_SCORE_MIN_T1_T1 = int(os.getenv("DEAL_SCORE_MIN_T1_T1", "65"))
+DEAL_DEDUP_DAYS = int(os.getenv("DEAL_DEDUP_DAYS", "7"))
+DEAL_MAX_PUSH_PER_HOUR = int(os.getenv("DEAL_MAX_PUSH_PER_HOUR", "10"))
+DEAL_MAX_PUSH_PER_BENEFICIARY_24H = int(os.getenv("DEAL_MAX_PUSH_PER_BENEFICIARY_24H", "1"))
+DEAL_T0_T0_PUSH_ENABLED = os.getenv("DEAL_T0_T0_PUSH_ENABLED", "true").lower() == "true"
+DEAL_T2_T2_PUSH_BOTH = os.getenv("DEAL_T2_T2_PUSH_BOTH", "false").lower() == "true"
+DEAL_PUSH_ENABLED = os.getenv("DEAL_PUSH_ENABLED", "true").lower() == "true"
+DEAL_POLL_INTERVAL_MIN = int(os.getenv("DEAL_POLL_INTERVAL_MIN", "3"))
+DEAL_ADMIN_TOKEN = os.getenv("DEAL_ADMIN_TOKEN", "")
+SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "AthenaDealMonitor contact@example.com")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
+POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
 
 RANDOM_DELAY_MIN = 1.0
 RANDOM_DELAY_MAX = 3.0

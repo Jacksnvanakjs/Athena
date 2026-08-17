@@ -151,12 +151,24 @@ async def cron_scrape(secret: str = Query(...)):
 
 @router.get("/status")
 def system_status():
+    from app.config import DEAL_POLL_INTERVAL_MIN, ENABLE_SCHEDULER
+    from app.database import DealEvent
+
+    def _deal_count(db: Session):
+        return db.query(DealEvent).count()
+
+    deal_total = run_with_db_retry(_deal_count)
     return {
         "is_trading_day": is_trading_day(),
         "scrape_times": [f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES],
         "timezone": TIMEZONE,
         "database": "turso" if USE_TURSO else "sqlite",
         "now": now_beijing().isoformat(timespec="seconds"),
+        "scheduler_enabled": ENABLE_SCHEDULER,
+        "deal_monitor": {
+            "poll_interval_min": DEAL_POLL_INTERVAL_MIN,
+            "events_total": deal_total,
+        },
     }
 
 
@@ -184,3 +196,116 @@ async def heatmap_snapshot(force: bool = Query(default=True)):
     from app.heatmap import save_daily_snapshot
 
     return await save_daily_snapshot(force=force)
+
+
+# ── AI 合作快讯 ──
+
+
+def _deal_to_dict(event) -> dict:
+    return {
+        "id": event.id,
+        "published_at": event.published_at.isoformat() if event.published_at else None,
+        "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
+        "headline": event.headline,
+        "summary": event.summary,
+        "source": event.source,
+        "source_url": event.source_url,
+        "anchor_name": event.anchor_name,
+        "anchor_ticker": event.anchor_ticker,
+        "anchor_tier": event.anchor_tier,
+        "beneficiary_ticker": event.beneficiary_ticker,
+        "beneficiary_name": event.beneficiary_name,
+        "beneficiary_tier": event.beneficiary_tier,
+        "beneficiary_market_cap_usd": event.beneficiary_market_cap_usd,
+        "tier_pair": event.tier_pair,
+        "materiality_score": event.materiality_score,
+        "matched_keywords": event.matched_keywords,
+        "event_type": event.event_type,
+        "is_update": event.is_update,
+        "pushed_at": event.pushed_at.isoformat() if event.pushed_at else None,
+        "push_channel": event.push_channel,
+    }
+
+
+@router.get("/deals")
+def list_deals(
+    days: int = Query(default=7, ge=1, le=90),
+    tier_pair: str | None = Query(default=None),
+    min_score: int = Query(default=0, ge=0, le=100),
+    pushed_only: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    from sqlalchemy import desc
+
+    from app.database import DealEvent
+    from app.utils import now_beijing
+
+    since = now_beijing() - timedelta(days=days)
+
+    def _query(db: Session):
+        q = db.query(DealEvent).filter(DealEvent.published_at >= since)
+        if tier_pair:
+            q = q.filter(DealEvent.tier_pair == tier_pair)
+        if min_score:
+            q = q.filter(DealEvent.materiality_score >= min_score)
+        if pushed_only:
+            q = q.filter(DealEvent.pushed_at.isnot(None))
+        rows = q.order_by(desc(DealEvent.published_at)).limit(limit).all()
+        return [_deal_to_dict(r) for r in rows]
+
+    return run_with_db_retry(_query)
+
+
+@router.get("/deals/stats")
+def deals_stats(days: int = Query(default=7, ge=1, le=90)):
+    from sqlalchemy import func
+
+    from app.database import DealEvent
+    from app.utils import now_beijing
+
+    since = now_beijing() - timedelta(days=days)
+
+    def _query(db: Session):
+        total = db.query(DealEvent).filter(DealEvent.published_at >= since).count()
+        pushed = (
+            db.query(DealEvent)
+            .filter(DealEvent.published_at >= since, DealEvent.pushed_at.isnot(None))
+            .count()
+        )
+        pairs = (
+            db.query(DealEvent.tier_pair, func.count(DealEvent.id))
+            .filter(DealEvent.published_at >= since)
+            .group_by(DealEvent.tier_pair)
+            .all()
+        )
+        return {
+            "days": days,
+            "total": total,
+            "pushed": pushed,
+            "by_tier_pair": {p: c for p, c in pairs},
+        }
+
+    return run_with_db_retry(_query)
+
+
+@router.get("/deals/{deal_id}")
+def get_deal(deal_id: int):
+    from app.database import DealEvent
+
+    def _query(db: Session):
+        event = db.query(DealEvent).filter(DealEvent.id == deal_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="未找到")
+        return _deal_to_dict(event)
+
+    return run_with_db_retry(_query)
+
+
+@router.post("/deals/run")
+async def run_deals(token: str = Query(default="")):
+    from app.config import DEAL_ADMIN_TOKEN
+    from app.deal_monitor.pipeline import run_pipeline
+
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+    return await run_pipeline()

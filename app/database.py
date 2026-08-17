@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar
 
-from sqlalchemy import Column, Date, DateTime, Float, Integer, String, UniqueConstraint, create_engine, text
+from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import DATABASE_URL, TURSO_AUTH_TOKEN, TURSO_DATABASE_URL, USE_TURSO
@@ -41,6 +41,52 @@ class QuotaRecord(Base):
     status = Column(String(20), nullable=False)
     quota = Column(Float, nullable=False)
     scraped_at = Column(DateTime, nullable=False, default=now_beijing, index=True)
+
+
+class DealEvent(Base):
+    __tablename__ = "deal_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    published_at = Column(DateTime, nullable=False, index=True)
+    fetched_at = Column(DateTime, nullable=False)
+    headline = Column(String(500), nullable=False)
+    summary = Column(Text, nullable=True)
+    source = Column(String(50), nullable=False)
+    source_url = Column(String(500), nullable=False, index=True)
+    headline_hash = Column(String(32), nullable=False, index=True)
+    anchor_name = Column(String(100), nullable=False)
+    anchor_ticker = Column(String(20), nullable=True)
+    anchor_tier = Column(String(10), nullable=False)
+    beneficiary_ticker = Column(String(20), nullable=False, index=True)
+    beneficiary_name = Column(String(100), nullable=False)
+    beneficiary_tier = Column(String(10), nullable=False)
+    beneficiary_market_cap_usd = Column(Float, nullable=True)
+    tier_pair = Column(String(20), nullable=False)
+    materiality_score = Column(Integer, nullable=False)
+    matched_keywords = Column(String(500), nullable=True)
+    event_type = Column(String(30), nullable=False, default="compute_deal")
+    is_update = Column(Boolean, nullable=False, default=False)
+    pushed_at = Column(DateTime, nullable=True)
+    push_channel = Column(String(30), nullable=True)
+
+
+class EntityAlias(Base):
+    __tablename__ = "entity_aliases"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(200), nullable=False, unique=True, index=True)
+    ticker = Column(String(20), nullable=True)
+    unlisted_id = Column(String(50), nullable=True)
+    updated_at = Column(DateTime, nullable=False)
+
+
+class MarketCapCache(Base):
+    __tablename__ = "market_cap_cache"
+
+    ticker = Column(String(20), primary_key=True)
+    market_cap_usd = Column(Float, nullable=False)
+    tier = Column(String(10), nullable=False)
+    refreshed_at = Column(DateTime, nullable=False)
 
 
 class HeatmapSnapshot(Base):
