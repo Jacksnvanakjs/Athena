@@ -11,19 +11,24 @@ from datetime import timedelta
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
 
-from app.database import DealEvent, db_session
+from app.database import DealEvent, DealSeenUrl, db_session
 from app.deal_monitor.config import (
     DEAL_DEDUP_DAYS,
+    DEAL_LLM_MODEL,
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
     DEAL_PUSH_ENABLED,
+    DEAL_USE_LLM,
 )
 from app.deal_monitor.entities import Entity, registry
+from app.deal_monitor.entity_resolver import parse_sec_filer, resolve_entity
 from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
+from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
 from app.deal_monitor.keywords import is_update_headline, passes_keyword_filter
+from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
 from app.deal_monitor.materiality import score_materiality
-from app.deal_monitor.parser import infer_partnership_pair
+from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pair_text
 from app.deal_monitor.tiers import assign_roles, score_threshold
 from app.notifier import notify
 from app.utils import now_beijing
@@ -41,6 +46,16 @@ def normalize_headline(headline: str) -> str:
 
 def headline_hash(headline: str) -> str:
     return hashlib.md5(normalize_headline(headline).encode()).hexdigest()
+
+
+def _same_company(a: Entity, b: Entity) -> bool:
+    if a.ticker and b.ticker and a.ticker.upper() == b.ticker.upper():
+        return True
+    if a.unlisted_id and b.unlisted_id and a.unlisted_id == b.unlisted_id:
+        return True
+    na = (a.name or "").strip().lower()
+    nb = (b.name or "").strip().lower()
+    return bool(na and nb and na == nb)
 
 
 def _cap_billions(cap: float | None) -> str:
@@ -207,27 +222,88 @@ def _save_event(
     return event
 
 
-async def process_item(db: Session, item: RawItem) -> dict:
+async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | None = None) -> dict:
     stats = {"skipped": True, "reason": ""}
     text = f"{item.headline}\n{item.summary}"
-    ok, matched = passes_keyword_filter(text)
-    if not ok:
-        stats["reason"] = "关键词/合作词未通过"
-        return stats
+    matched: list[str] = []
+
+    if DEAL_USE_LLM:
+        if not llm_decision:
+            stats["reason"] = "LLM 无判定"
+            return stats
+        if not llm_decision.is_relevant:
+            stats["reason"] = f"LLM 判定不相关: {llm_decision.reason}"
+            return stats
+        matched = ["LLM"]
+    else:
+        ok, matched = passes_keyword_filter(text, source=item.source)
+        if not ok:
+            stats["reason"] = "关键词/合作词未通过"
+            return stats
 
     h_hash = headline_hash(item.headline)
 
-    entities = registry.extract_entities(text)
-    if len(entities) < 2:
-        stats["reason"] = "未识别到合作双方"
+    if llm_decision and llm_decision.anchor_name and llm_decision.beneficiary_name:
+        entity_a = await resolve_entity(
+            llm_decision.anchor_name,
+            context=text,
+            ticker_hint=llm_decision.anchor_ticker,
+        )
+        entity_b = await resolve_entity(
+            llm_decision.beneficiary_name,
+            context=text,
+            ticker_hint=llm_decision.beneficiary_ticker,
+        )
+    elif item.source == "sec_8k":
+        filer = parse_sec_filer(item.headline)
+        if not filer:
+            stats["reason"] = "SEC 8-K 未解析申报方"
+            return stats
+        entity_a = await resolve_entity(filer, context=text)
+        entities = [e for e in registry.extract_entities(text) if not _same_company(e, entity_a)]
+        if entities:
+            pair = infer_partnership_pair(item.headline, item.summary, [entity_a, *entities])
+            entity_b = pair[1] if pair else entities[0]
+            if not entity_b.ticker:
+                entity_b = await resolve_entity(entity_b.name, context=text)
+        else:
+            pair_text = infer_partnership_pair_text(item.headline, item.summary)
+            if not pair_text:
+                stats["reason"] = "SEC 8-K 未识别到协议对方"
+                return stats
+            _, b_name = pair_text
+            entity_b = await resolve_entity(b_name, context=text)
+    else:
+        entities = registry.extract_entities(text)
+        if len(entities) < 2:
+            pair_text = infer_partnership_pair_text(item.headline, item.summary)
+            if not pair_text:
+                stats["reason"] = "未识别到合作双方"
+                return stats
+            a_name, b_name = pair_text
+            entity_a = await resolve_entity(a_name, context=text)
+            entity_b = await resolve_entity(b_name, context=text)
+        else:
+            pair = infer_partnership_pair(item.headline, item.summary, entities)
+            if not pair:
+                pair_text = infer_partnership_pair_text(item.headline, item.summary)
+                if not pair_text:
+                    stats["reason"] = "无法推断合作对"
+                    return stats
+                a_name, b_name = pair_text
+                entity_a = await resolve_entity(a_name, context=text)
+                entity_b = await resolve_entity(b_name, context=text)
+            else:
+                entity_a, entity_b = pair
+                if not entity_a.ticker:
+                    entity_a = await resolve_entity(entity_a.name, context=text)
+                if not entity_b.ticker:
+                    entity_b = await resolve_entity(entity_b.name, context=text)
+
+    if _same_company(entity_a, entity_b):
+        stats["reason"] = "双方为同一公司，不是合作事件"
         return stats
 
-    pair = infer_partnership_pair(item.headline, item.summary, entities)
-    if not pair:
-        stats["reason"] = "无法推断合作对"
-        return stats
-
-    entity_a, entity_b = pair
     await enrich_entity_tiers(db, [entity_a, entity_b])
 
     roles = assign_roles(entity_a, entity_b)
@@ -240,6 +316,12 @@ async def process_item(db: Session, item: RawItem) -> dict:
         return stats
 
     score = score_materiality(text, item.source, matched)
+    if llm_decision and llm_decision.llm_score:
+        # 不把营销稿的 LLM 高分抬上去；材料性仍以规则分为准，LLM 只作下限闸
+        if llm_decision.llm_score < 70:
+            stats["reason"] = f"LLM 材料性不足 {llm_decision.llm_score} < 70"
+            return stats
+        score = min(100, max(score, min(llm_decision.llm_score, score + 10)))
     threshold = score_threshold(roles.tier_pair)
     if score < threshold:
         stats["reason"] = f"材料性 {score} < {threshold}"
@@ -287,14 +369,57 @@ async def process_item(db: Session, item: RawItem) -> dict:
 async def run_pipeline() -> dict:
     """执行一轮 PR RSS 抓取与处理。"""
     registry.load_seed()
-    items = await fetch_pr_wires()
-    summary = {"fetched": len(items), "processed": 0, "saved": 0, "pushed": 0, "errors": []}
+    pr_items = await fetch_pr_wires()
+    sec_items = await fetch_sec_8k()
+    items = pr_items + sec_items
+    summary = {
+        "fetched": len(items),
+        "fetched_pr": len(pr_items),
+        "fetched_sec_8k": len(sec_items),
+        "fetched_new": 0,
+        "processed": 0,
+        "saved": 0,
+        "pushed": 0,
+        "errors": [],
+    }
+    llm_decisions: dict[str, LlmDecision] = {}
 
     with db_session() as db:
         registry.sync_to_db(db)
-        for item in items:
+        seen_urls = {
+            row.source_url
+            for row in db.query(DealSeenUrl.source_url).all()
+        }
+        new_items = [item for item in items if item.source_url not in seen_urls]
+        summary["fetched_new"] = len(new_items)
+
+        if DEAL_USE_LLM:
+            llm_decisions = await classify_items(new_items)
+            summary["llm_enabled"] = True
+            summary["llm_model"] = DEAL_LLM_MODEL
+            summary["llm_hits"] = sum(1 for d in llm_decisions.values() if d.is_relevant)
+            summary["llm_items_sent"] = len(new_items)
+        else:
+            summary["llm_enabled"] = False
+
+        for item in new_items:
             try:
-                result = await process_item(db, item)
+                result = await process_item(db, item, llm_decisions.get(item.source_url))
+                if DEAL_USE_LLM and item.source_url not in llm_decisions:
+                    # API 失败时不记 seen，下一轮重试，避免漏稿
+                    continue
+                db.merge(
+                    DealSeenUrl(
+                        source_url=item.source_url,
+                        headline_hash=headline_hash(item.headline),
+                        seen_at=now_beijing(),
+                        llm_relevant=bool(
+                            llm_decisions.get(item.source_url)
+                            and llm_decisions[item.source_url].is_relevant
+                        ),
+                    )
+                )
+                db.commit()
                 if not result.get("skipped"):
                     summary["processed"] += 1
                     summary["saved"] += len(result.get("saved", []))
@@ -307,7 +432,7 @@ async def run_pipeline() -> dict:
             db.query(DealEvent)
             .filter(DealEvent.pushed_at.isnot(None))
             .order_by(desc(DealEvent.pushed_at))
-            .limit(summary["saved"])
+            .limit(max(summary["saved"], 1))
             .all()
         )
         summary["pushed"] = sum(1 for e in pushed if e.push_channel and e.push_channel != "none")

@@ -91,15 +91,25 @@ def _parse_rss(xml: str, source: str) -> list[RawItem]:
 
 async def fetch_pr_wires() -> list[RawItem]:
     results: list[RawItem] = []
+    seen_urls: set[str] = set()
     headers = {"User-Agent": "AthenaDealMonitor/1.0"}
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=45) as client:
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=90) as client:
         for feed in PR_WIRE_FEEDS:
             try:
-                resp = await client.get(feed["url"])
+                feed_url = str(feed["url"]).strip().rstrip("/")
+                resp = await client.get(feed_url)
                 resp.raise_for_status()
                 items = _parse_rss(resp.text, feed["name"])
-                results.extend(items)
-                logger.info("RSS %s: %d 条", feed["name"], len(items))
+                kept = 0
+                for item in items:
+                    url = (item.source_url or "").strip().rstrip("/")
+                    if not url or url in seen_urls:
+                        continue
+                    seen_urls.add(url)
+                    item.source_url = url
+                    results.append(item)
+                    kept += 1
+                logger.info("RSS %s: %d 条（去重后 %d）", feed["name"], len(items), kept)
             except Exception as exc:
-                logger.warning("RSS %s 抓取失败: %s", feed["name"], exc)
+                logger.warning("RSS %s 抓取失败: %r", feed["name"], exc)
     return results

@@ -6,6 +6,7 @@ from app.config import (
     DEAL_DEDUP_DAYS,
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
+    DEAL_LLM_MODEL,
     DEAL_POLL_INTERVAL_MIN,
     DEAL_PUSH_ENABLED,
     DEAL_SCORE_MIN_DEFAULT,
@@ -17,7 +18,9 @@ from app.config import (
     DEAL_T1_MIN_CAP,
     DEAL_T2_MAX_CAP,
     DEAL_T2_T2_PUSH_BOTH,
+    DEAL_USE_LLM,
     FINNHUB_API_KEY,
+    GEMINI_API_KEY,
     SEC_USER_AGENT,
 )
 
@@ -30,8 +33,28 @@ PR_WIRE_FEEDS = [
         "url": "https://www.prnewswire.com/rss/technology-latest-news/technology-latest-news-list.rss",
     },
     {
-        "name": "globe",
-        "url": "https://www.globenewswire.com/RssFeed/subjectcode/13-Artificial%20Intelligence/feedTitle/GlobeNewswire%20-%20Artificial%20Intelligence",
+        "name": "business_tech",
+        "url": "https://www.prnewswire.com/rss/business-technology-latest-news/business-technology-latest-news-list.rss",
+    },
+    {
+        "name": "consumer_tech",
+        "url": "https://www.prnewswire.com/rss/consumer-technology-latest-news/consumer-technology-latest-news-list.rss",
+    },
+    {
+        "name": "energy",
+        "url": "https://www.prnewswire.com/rss/energy-latest-news/energy-latest-news-list.rss",
+    },
+    {
+        "name": "financial",
+        "url": "https://www.prnewswire.com/rss/financial-services-latest-news/financial-services-latest-news-list.rss",
+    },
+    {
+        "name": "heavy_industry",
+        "url": "https://www.prnewswire.com/rss/heavy-industry-manufacturing-latest-news/heavy-industry-manufacturing-latest-news-list.rss",
+    },
+    {
+        "name": "telecom",
+        "url": "https://www.prnewswire.com/rss/telecommunications-latest-news/telecommunications-latest-news-list.rss",
     },
 ]
 

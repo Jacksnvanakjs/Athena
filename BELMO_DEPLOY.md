@@ -47,7 +47,10 @@ turso db tokens create athena # 得到 TURSO_AUTH_TOKEN
 | `SERVERCHAN_SENDKEY` | 你的 SendKey | Server酱 推送密钥（必填） |
 | `SCRAPE_SECRET` | 随机字符串 | 保护 `/api/cron/scrape` 接口 |
 | `TIMEZONE` | `Asia/Shanghai` | 北京时间 |
-| `ENABLE_SCHEDULER` | `true` | 启用内置 11:05 / 14:35 定时抓取 |
+| `ENABLE_SCHEDULER` | `true` | 启用内置定时任务（额度抓取 + 合作快讯每 3 分钟扫描） |
+| `GEMINI_API_KEY` | 你的 Gemini Key | AI 合作快讯第一轮筛选（必填） |
+| `SEC_USER_AGENT` | `YourName your@email.com` | SEC 要求带联系邮箱，否则 8-K 抓不到 |
+| `FINNHUB_API_KEY` | 你的 Finnhub Key | 公司名 → 美股 ticker / 市值（建议填） |
 
 > 配置 Turso 后**不要**再设 `DATABASE_URL`，程序会自动使用 Turso。  
 > 未配置 Turso 时，程序回退到 `/tmp/athena-data/` 本地 SQLite（重新部署会丢历史）。

@@ -28,7 +28,17 @@
     {"names": ["Hut 8", "Hut 8 Mining"], "ticker": "HUT"},
     {"names": ["CleanSpark"], "ticker": "CLSK"},
     {"names": ["Bitfarms"], "ticker": "BITF"},
-    {"names": ["SoftBank"], "ticker": "SFTBY"}
+    {"names": ["SoftBank"], "ticker": "SFTBY"},
+    {"names": ["Castrol"], "ticker": "BP"},
+    {"names": ["BP", "BP plc", "British Petroleum"], "ticker": "BP"},
+    {"names": ["LG Electronics", "LG"], "ticker": "LPLCY"},
+    {"names": ["Intel", "Intel Corporation"], "ticker": "INTC"},
+    {"names": ["Advanced Micro Devices", "AMD"], "ticker": "AMD"},
+    {"names": ["IBM", "International Business Machines"], "ticker": "IBM"},
+    {"names": ["Cisco", "Cisco Systems"], "ticker": "CSCO"},
+    {"names": ["Salesforce"], "ticker": "CRM"},
+    {"names": ["Snowflake"], "ticker": "SNOW"},
+    {"names": ["Palantir"], "ticker": "PLTR"}
   ],
   "unlisted_anchors": [
     {"names": ["OpenAI", "Open AI"], "id": "openai"},

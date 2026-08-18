@@ -70,6 +70,17 @@ class DealEvent(Base):
     push_channel = Column(String(30), nullable=True)
 
 
+class DealSeenUrl(Base):
+    """已分析过的稿件 URL，避免每轮重复送 LLM，也避免漏掉窗口外的旧稿。"""
+
+    __tablename__ = "deal_seen_urls"
+
+    source_url = Column(String(500), primary_key=True)
+    headline_hash = Column(String(32), nullable=True, index=True)
+    seen_at = Column(DateTime, nullable=False)
+    llm_relevant = Column(Boolean, nullable=True)
+
+
 class EntityAlias(Base):
     __tablename__ = "entity_aliases"
 
