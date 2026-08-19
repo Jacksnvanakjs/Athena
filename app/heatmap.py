@@ -179,6 +179,88 @@ SECTORS: list[dict[str, Any]] = [
     },
 ]
 
+# 细粒度主题板块：优先用 ETF 实时涨跌幅（最准确），无 ETF 时回退到成分股等权平均。
+# 主题命名对齐雪球/富途/市场魔法助手等主流平台。
+THEMES: list[dict[str, Any]] = [
+    {"key": "semi", "name": "半导体", "etf": "SOXX",
+     "tickers": [("NVDA", "英伟达"), ("AMD", "AMD"), ("AVGO", "博通"), ("QCOM", "高通"), ("MU", "美光"), ("INTC", "英特尔"), ("MRVL", "Marvell"), ("TSM", "台积电"), ("ASML", "ASML"), ("ARM", "ARM")]},
+    {"key": "semi_equipment", "name": "半导体设备",
+     "tickers": [("ASML", "ASML"), ("AMAT", "应用材料"), ("LRCX", "拉姆研究"), ("KLAC", "KLA"), ("ONTO", "Onto Innovation")]},
+    {"key": "semi_eda", "name": "EDA/IC设计",
+     "tickers": [("SNPS", "Synopsys"), ("CDNS", "Cadence"), ("ANSS", "ANSYS"), ("MCHP", "微芯")]},
+    {"key": "ai_compute", "name": "AI算力",
+     "tickers": [("NVDA", "英伟达"), ("AMD", "AMD"), ("SMCI", "超微"), ("CRWV", "CoreWeave"), ("VRT", "Vertiv"), ("DELL", "戴尔"), ("IREN", "IREN"), ("APLD", "Applied Digital"), ("CORZ", "Core Scientific"), ("WULF", "TeraWulf")]},
+    {"key": "cpo", "name": "CPO/光模块",
+     "tickers": [("LITE", "Lumentum"), ("COHR", "Coherent"), ("CIEN", "Ciena"), ("FN", "Fabrinet"), ("AAOI", "Applied Opto"), ("GLW", "康宁"), ("MTSI", "MACOM"), ("AVGO", "博通")]},
+    {"key": "storage", "name": "存储",
+     "tickers": [("MU", "美光"), ("WDC", "西部数据"), ("STX", "希捷"), ("PSTG", "Pure Storage"), ("NTAP", "NetApp")]},
+    {"key": "datacenter", "name": "数据中心/IDC", "etf": "SRVR",
+     "tickers": [("EQIX", "Equinix"), ("DLR", "Digital Realty"), ("AMT", "美国电塔"), ("VRT", "Vertiv"), ("ANET", "Arista"), ("CRWV", "CoreWeave")]},
+    {"key": "cloud_saas", "name": "云计算/SaaS", "etf": "SKYY",
+     "tickers": [("MSFT", "微软"), ("AMZN", "亚马逊"), ("GOOGL", "谷歌"), ("CRM", "Salesforce"), ("NOW", "ServiceNow"), ("SNOW", "Snowflake"), ("ORCL", "甲骨文")]},
+    {"key": "ai_software", "name": "AI应用/软件",
+     "tickers": [("PLTR", "Palantir"), ("ADBE", "Adobe"), ("DDOG", "Datadog"), ("MDB", "MongoDB"), ("PATH", "UiPath"), ("AI", "C3.ai")]},
+    {"key": "cybersecurity", "name": "网络安全", "etf": "HACK",
+     "tickers": [("CRWD", "CrowdStrike"), ("PANW", "Palo Alto"), ("FTNT", "Fortinet"), ("ZS", "Zscaler"), ("OKTA", "Okta"), ("S", "SentinelOne")]},
+    {"key": "network", "name": "网络设备",
+     "tickers": [("ANET", "Arista"), ("CSCO", "思科"), ("JNPR", "Juniper"), ("FFIV", "F5"), ("NTNX", "Nutanix")]},
+    {"key": "fintech", "name": "金融科技", "etf": "FINX",
+     "tickers": [("V", "Visa"), ("MA", "万事达"), ("SQ", "Block"), ("PYPL", "PayPal"), ("AXP", "美国运通")]},
+    {"key": "crypto", "name": "加密货币/区块链", "etf": "BITO",
+     "tickers": [("COIN", "Coinbase"), ("RIOT", "Riot"), ("MARA", "Marathon"), ("HUT", "Hut 8"), ("CLSK", "CleanSpark")]},
+    {"key": "ev", "name": "新能源车", "etf": "DRIV",
+     "tickers": [("TSLA", "特斯拉"), ("NIO", "蔚来"), ("XPEV", "小鹏"), ("LI", "理想"), ("RIVN", "Rivian"), ("LCID", "Lucid")]},
+    {"key": "ev_charging", "name": "充电桩",
+     "tickers": [("EVGO", "EVgo"), ("BLNK", "Blink"), ("CHPT", "ChargePoint")]},
+    {"key": "ev_battery", "name": "锂电池/电池材料", "etf": "LIT",
+     "tickers": [("ALB", "Albemarle"), ("SQM", "SQM"), ("SLDP", "Solid Power"), ("ENVX", "Enovix"), ("QS", "QuantumScape")]},
+    {"key": "autonomous", "name": "自动驾驶",
+     "tickers": [("TSLA", "特斯拉"), ("NVDA", "英伟达"), ("QCOM", "高通"), ("MBLY", "Mobileye"), ("LAZR", "Luminar")]},
+    {"key": "robotics", "name": "机器人", "etf": "ROBT",
+     "tickers": [("ISRG", "直觉外科"), ("ROK", "Rockwell"), ("ABB", "ABB"), ("IRBT", "iRobot")]},
+    {"key": "quantum", "name": "量子计算", "etf": "QTUM",
+     "tickers": [("IONQ", "IonQ"), ("RGTI", "Rigetti"), ("QBTS", "D-Wave Quantum"), ("QUBT", "Quantum Computing")]},
+    {"key": "biotech", "name": "生物科技", "etf": "IBB",
+     "tickers": [("REGN", "Regeneron"), ("BIIB", "Biogen"), ("MRNA", "Moderna"), ("VRTX", "Vertex"), ("GILD", "吉利德")]},
+    {"key": "pharma", "name": "创新药/大药企", "etf": "XLV",
+     "tickers": [("LLY", "礼来"), ("ABBV", "艾伯维"), ("MRK", "默沙东"), ("JNJ", "强生"), ("PFE", "辉瑞"), ("NVO", "诺和诺德")]},
+    {"key": "med_devices", "name": "医疗器械", "etf": "IHI",
+     "tickers": [("ISRG", "直觉外科"), ("MDT", "美敦力"), ("SYK", "史赛克"), ("BSX", "波士顿科学"), ("EW", "Edwards")]},
+    {"key": "clean_energy", "name": "清洁能源", "etf": "ICLN",
+     "tickers": [("ENPH", "Enphase"), ("FSLR", "First Solar"), ("SEDG", "SolarEdge"), ("NEE", "新纪元能源")]},
+    {"key": "solar", "name": "光伏", "etf": "TAN",
+     "tickers": [("FSLR", "First Solar"), ("ENPH", "Enphase"), ("SEDG", "SolarEdge"), ("RUN", "Sunrun"), ("NOVA", "Sunnova")]},
+    {"key": "nuclear", "name": "核能/铀", "etf": "URNM",
+     "tickers": [("CCJ", "Cameco"), ("UEC", "Uranium Energy"), ("OKLO", "Oklo"), ("NNE", "Nano Nuclear")]},
+    {"key": "dc_power", "name": "电力/独立发电",
+     "tickers": [("VST", "Vistra"), ("CEG", "Constellation"), ("NRG", "NRG"), ("GEV", "GE Vernova"), ("OKLO", "Oklo")]},
+    {"key": "grid", "name": "电网/电气设备",
+     "tickers": [("ETN", "Eaton"), ("GEV", "GE Vernova"), ("PWR", "Quanta"), ("EMR", "艾默生"), ("GNRC", "Generac")]},
+    {"key": "oil_gas", "name": "油气", "etf": "XLE",
+     "tickers": [("XOM", "埃克森美孚"), ("CVX", "雪佛龙"), ("COP", "康菲"), ("SLB", "斯伦贝谢"), ("EOG", "EOG")]},
+    {"key": "gold", "name": "黄金", "etf": "GDX",
+     "tickers": [("NEM", "纽蒙特"), ("GOLD", "巴里克"), ("FNV", "Franco-Nevada"), ("WPM", "惠顿贵金属")]},
+    {"key": "rare_earth", "name": "稀土/战略金属", "etf": "REMX",
+     "tickers": [("MP", "MP Materials"), ("ALB", "Albemarle"), ("FCX", "自由港")]},
+    {"key": "defense", "name": "国防军工", "etf": "ITA",
+     "tickers": [("LMT", "洛马"), ("NOC", "诺斯罗普"), ("RTX", "雷神"), ("GD", "通用动力"), ("LHX", "L3Harris")]},
+    {"key": "space", "name": "航天/卫星",
+     "tickers": [("RKLB", "Rocket Lab"), ("ASTS", "AST SpaceMobile"), ("PL", "Planet Labs"), ("LHX", "L3Harris")]},
+    {"key": "telecom_5g", "name": "5G/通信",
+     "tickers": [("TMUS", "T-Mobile"), ("VZ", "Verizon"), ("T", "AT&T"), ("ERIC", "爱立信"), ("NOK", "诺基亚")]},
+    {"key": "gaming", "name": "游戏", "etf": "HERO",
+     "tickers": [("EA", "艺电"), ("TTWO", "Take-Two"), ("RBLX", "Roblox"), ("U", "Unity")]},
+    {"key": "streaming", "name": "流媒体/传媒",
+     "tickers": [("NFLX", "Netflix"), ("DIS", "迪士尼"), ("CMCSA", "康卡斯特"), ("WBD", "华纳兄弟")]},
+    {"key": "3d_printing", "name": "3D打印", "etf": "PRNT",
+     "tickers": [("DDD", "3D Systems"), ("SSYS", "Stratasys")]},
+    {"key": "cloud_collab", "name": "远程办公/协作",
+     "tickers": [("ZM", "Zoom"), ("TEAM", "Atlassian"), ("NET", "Cloudflare"), ("DOCN", "DigitalOcean")]},
+    {"key": "rideshare", "name": "共享出行/外卖",
+     "tickers": [("DASH", "DoorDash"), ("UBER", "Uber"), ("LYFT", "Lyft")]},
+]
+
+
 PERIODS: dict[str, dict[str, Any]] = {
     # min_snapshots: 至少需要多少个交易日快照才展示该周期，否则留空
     "1d": {"days": 1, "label": "每天", "min_snapshots": 1},
@@ -338,6 +420,14 @@ async def _fetch_sina(symbols: list[str]) -> dict[str, dict[str, Any]]:
                     price = _to_float(parts[1])
                     change_pct = _to_float(parts[2])
                     volume = _to_float(parts[10])
+                    # 盘前/盘后: 字段[21]=延时价, [26]=昨收价
+                    # 用延时价相对昨收算总涨跌幅，与"市场魔法助手"等一致
+                    if len(parts) >= 27:
+                        ext_price = _to_float(parts[21])
+                        prev_close = _to_float(parts[26])
+                        if ext_price and ext_price > 0 and prev_close and prev_close > 0:
+                            price = ext_price
+                            change_pct = round((ext_price - prev_close) / prev_close * 100, 2)
                     if price is None or price <= 0:
                         continue
                     out[sym] = _quote_row(
@@ -602,22 +692,90 @@ def _heatmap_failure(source: str, quote_count: int, total: int) -> dict[str, Any
         "top_outflow_sectors": [],
         "top_inflow_companies": [],
         "top_outflow_companies": [],
+        "themes": [],
     }
 
 
-async def _build_heatmap() -> dict[str, Any]:
+def _sector_symbols() -> list[str]:
     symbols: list[str] = []
     for sector in SECTORS:
         symbols.append(sector["etf"])
         symbols.extend(sym for sym, _ in sector["companies"])
+    return list(dict.fromkeys(symbols))
+
+
+def _theme_symbols() -> list[str]:
+    symbols: list[str] = []
+    for theme in THEMES:
+        etf = theme.get("etf")
+        if etf:
+            symbols.append(etf)
+        symbols.extend(sym for sym, _ in theme["tickers"])
+    return list(dict.fromkeys(symbols))
+
+
+def _build_themes(by_symbol: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    themes_out: list[dict[str, Any]] = []
+    for theme in THEMES:
+        companies: list[dict[str, Any]] = []
+        for sym, cn_name in theme["tickers"]:
+            row = by_symbol.get(sym)
+            if not row:
+                continue
+            companies.append({**row, "cn_name": cn_name})
+
+        etf = theme.get("etf")
+        etf_row = by_symbol.get(etf) if etf else None
+        total = len(theme["tickers"])
+        quoted = len(companies)
+
+        if etf_row:
+            change_pct = etf_row["change_pct"]
+        elif companies:
+            change_pct = sum(c["change_pct"] for c in companies) / len(companies)
+        else:
+            change_pct = 0.0
+
+        themes_out.append(
+            {
+                "key": theme["key"],
+                "name": theme["name"],
+                "etf": etf,
+                "change_pct": round(change_pct, 2),
+                "quote_count": quoted,
+                "quote_total": total,
+                "etf_quote": etf_row,
+                "companies": sorted(companies, key=lambda x: x["change_pct"], reverse=True),
+            }
+        )
+
+    themes_out.sort(key=lambda x: x["change_pct"], reverse=True)
+    return themes_out
+
+
+async def _build_heatmap() -> dict[str, Any]:
+    sector_syms = _sector_symbols()
+    theme_syms = _theme_symbols()
+    symbols = list(dict.fromkeys(sector_syms + theme_syms))
 
     by_symbol, source = await _fetch_quotes(symbols)
-    total = len(symbols)
+    sector_hits = sum(1 for s in sector_syms if s in by_symbol)
+    total_sector = len(sector_syms)
     quote_count = len(by_symbol)
 
-    if not _is_quality_ok(quote_count, total):
-        logger.error("heatmap fetch failed %s/%s via %s", quote_count, total, source)
-        return _heatmap_failure(source, quote_count, total)
+    if not _is_quality_ok(sector_hits, total_sector):
+        logger.error(
+            "heatmap fetch failed sector %s/%s total_quotes %s via %s",
+            sector_hits,
+            total_sector,
+            quote_count,
+            source,
+        )
+        failure = _heatmap_failure(source, sector_hits, total_sector)
+        failure["themes"] = _build_themes(by_symbol) if by_symbol else []
+        failure["quote_count"] = quote_count
+        failure["quote_total"] = len(symbols)
+        return failure
 
     sectors_out = []
     all_companies = []
@@ -664,9 +822,10 @@ async def _build_heatmap() -> dict[str, Any]:
     all_companies.sort(key=lambda x: x["flow_score"], reverse=True)
 
     note = (
-        f"数据源 {source}（{quote_count}/{total} 只）。"
+        f"数据源 {source}（板块 {sector_hits}/{total_sector}，合计 {quote_count}/{len(symbols)} 只）。"
         "本站% = 占监控样本（约11个主要板块+龙头股）的资金活跃度比重，"
         "非股价涨跌、非全市场资金占比；红流入绿流出。"
+        "主题涨跌幅 = 有代表性 ETF 的主题优先使用 ETF 实时价格，其余为成分股等权平均。"
     )
 
     return {
@@ -674,8 +833,9 @@ async def _build_heatmap() -> dict[str, Any]:
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "source": source,
         "quote_count": quote_count,
-        "quote_total": total,
+        "quote_total": len(symbols),
         "note": note,
+        "themes": _build_themes(by_symbol),
         "sectors": sectors_out,
         "top_inflow_sectors": [s for s in sectors_out if s["flow_score"] > 0][:5],
         "top_outflow_sectors": sorted(

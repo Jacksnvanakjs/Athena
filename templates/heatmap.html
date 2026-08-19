@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>美股资金热力图</title>
+  <title>美股资金变化</title>
   <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
   <style>
     :root {
@@ -125,6 +125,65 @@
     /* A股习惯：红涨绿跌 */
     .up { color: #dc2626; font-weight: 600; }
     .down { color: #15803d; font-weight: 600; }
+    .section-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      padding: 18px 20px;
+      margin-bottom: 18px;
+    }
+    .section-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+    .section-header h2 {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin: 0;
+    }
+    .section-foot {
+      color: var(--text-muted);
+      font-size: 0.75rem;
+      margin-top: 10px;
+    }
+    .timer-label {
+      margin-left: auto;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      font-weight: 400;
+      white-space: nowrap;
+    }
+    .theme-strip {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+      gap: 10px;
+    }
+    .theme-chip {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #f8fafc;
+      font-size: 0.82rem;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      min-height: 44px;
+    }
+    .theme-chip:hover { background: #eef2ff; border-color: #93c5fd; }
+    .theme-chip.active { background: #dbeafe; border-color: #2563eb; }
+    .theme-chip .theme-left { display: flex; flex-direction: column; gap: 3px; }
+    .theme-chip .tname { font-weight: 650; line-height: 1.1; }
+    .theme-chip .tmeta { color: var(--text-muted); font-size: 0.72rem; line-height: 1.1; }
+    .theme-chip .pct { font-variant-numeric: tabular-nums; font-weight: 800; font-size: 0.95rem; }
+    .theme-note { color: var(--text-muted); font-size: 0.75rem; margin-top: 8px; display: none; }
     .muted { color: var(--text-muted); }
     .note {
       margin-top: 14px;
@@ -182,7 +241,7 @@
   <div class="container">
     <header>
       <div>
-        <h1>美股资金热力图</h1>
+        <h1>美股资金变化</h1>
         <div class="sub" id="metaLine">加载中...</div>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
@@ -193,35 +252,40 @@
       </div>
     </header>
 
-    <div class="info-box">
-      <h3>与一般网站不同：按「资金流入/流出」着色，不是股价涨跌</h3>
-      <p class="muted" style="margin-bottom:10px">
-        多数热力图用<strong>股价涨跌</strong>定红绿；本站用<strong>资金流代理</strong>（涨跌幅×成交额）：
-        <strong class="up">红=流入</strong>，<strong class="down">绿=流出</strong>。
-      </p>
-      <p class="muted" style="margin-bottom:10px">
-        <strong>% 怎么读（例：科技 +56.88%）：</strong>
-        不是股价涨了 56%，也不是「全市场有 56% 的钱进了科技」。
-        含义是：在本站监控的这些<strong>主要板块</strong>里，科技的资金活跃度约占合计的 56.88%，正数偏流入、负数偏流出。
-        <strong>分母（总量）只含本站约 11 个主要板块及其龙头股样本</strong>，不是美股全部板块/全部股票。股价涨跌可悬停查看。
-      </p>
-      <h3>数据说明</h3>
-      <p><strong>优势：</strong></p>
-      <ul>
-        <li>主源新浪财经美股批量行情，云端机房通常可访问；Yahoo / CNBC / 东财作补充</li>
-        <li>龙头股与行业 ETF（如 XLK）价格、涨跌幅、成交量可批量拉取，适合每日快照</li>
-        <li>便于做「涨跌 × 成交额」这类资金活跃度代理指标</li>
-      </ul>
-      <p><strong>局限：</strong></p>
-      <ul>
-        <li>不是交易所 Level2 真实资金流向（没有主动买卖单拆分）</li>
-        <li>每个板块只覆盖约 5～8 只龙头 + 1 只行业 ETF，不能代表板块全部成分股</li>
-        <li>与 Finviz Groups 等全样本板块涨跌榜数值会不一致，属样本与算法不同</li>
-      </ul>
+    <!-- 主题涨跌幅 -->
+    <div class="section-card" id="themePanel">
+      <div class="section-header">
+        <h2>主题涨跌幅（实时）</h2>
+        <span class="help" title="有ETF的主题使用ETF实时价格（最准确），其余为成分股等权平均。红涨绿跌。">?</span>
+        <span id="themeTimer" class="timer-label"></span>
+      </div>
+      <div class="theme-strip" id="themeStrip">
+        <span class="muted">加载中...</span>
+      </div>
+      <p class="section-foot" id="themeNote">仅「今日实时」模式展示 · 点击主题查看成分股</p>
     </div>
 
+    <!-- 板块资金流向 -->
+    <div class="section-card" id="flowPanel">
+      <div class="section-header">
+        <h2>板块资金流向</h2>
+        <span class="help" title="左侧=资金流出板块，右侧=资金流入板块。曲线粗细代表该板块成交额相对占比。金额=涨跌幅×成交额的代理指标，非真实资金流。">?</span>
+        <span id="flowTimer" class="timer-label"></span>
+      </div>
+      <div id="flowChart" style="width:100%;position:relative;overflow:auto"></div>
+      <p class="section-foot">38个细分主题 · 左绿=下跌/流出 右红=上涨/流入 · 按涨跌幅排序</p>
+    </div>
+
+    <!-- 美股资金热力图 -->
+    <div class="section-card" id="heatmapSection">
+      <div class="section-header">
+        <h2>美股资金热力图</h2>
+        <span class="help" title="按「资金流入/流出」着色：红=流入、绿=流出。面积 = 成交额占比。不是股价涨跌。">?</span>
+        <span id="heatmapTimer" class="timer-label"></span>
+      </div>
+
     <div class="layout">
-      <div class="panel">
+      <div>
         <div class="toolbar">
           <select id="viewMode" onchange="render()">
             <option value="sector">板块视图</option>
@@ -267,12 +331,14 @@
         </div>
       </div>
     </div>
+    </div>
   </div>
 
   <script>
     let liveData = null;
     let statsData = null;
     let focusSector = null;
+    let focusTheme = null;
 
     function currentPeriod() {
       return document.getElementById('periodSelect').value;
@@ -335,6 +401,131 @@
         '不是股价涨跌，也不是全市场资金占比。总量仅含本站主要板块/龙头股。' +
         (pricePct != null ? ' 股价涨跌 ' + fmtPct(pricePct) + '。' : '')
       );
+    }
+
+    function renderThemes() {
+      const strip = document.getElementById('themeStrip');
+      const panel = document.getElementById('themePanel');
+      const note = document.getElementById('themeNote');
+      if (!usingLive()) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = 'block';
+      if (!liveData || liveData.success === false || !(liveData.themes || []).length) {
+        strip.innerHTML = '<span class="muted">暂无主题行情</span>';
+        return;
+      }
+      strip.innerHTML = liveData.themes.map(t => {
+        const active = focusTheme === t.key ? ' active' : '';
+        const src = t.etf ? `ETF:${t.etf}` : `成分股 ${t.quote_count}/${t.quote_total}`;
+        return `<button type="button" class="theme-chip${active}" onclick="selectTheme('${t.key}')">
+          <span class="theme-left">
+            <span class="tname">${t.name}</span>
+            <span class="tmeta">${src}</span>
+          </span>
+          <span class="pct ${pctClass(t.change_pct)}">${fmtPct(t.change_pct)}</span>
+        </button>`;
+      }).join('');
+      note.textContent = '有ETF的主题使用ETF实时价格，其余为成分股等权平均 · 点击主题查看成分股';
+    }
+
+    function renderFlow() {
+      const container = document.getElementById('flowChart');
+      const panel = document.getElementById('flowPanel');
+      if (!usingLive()) { panel.style.display = 'none'; return; }
+      panel.style.display = 'block';
+      if (!liveData || !liveData.themes) { container.innerHTML = '<span class="muted">暂无数据</span>'; return; }
+
+      const themes = liveData.themes.filter(t => Math.abs(t.change_pct) > 0.001);
+      const outflow = themes.filter(t => t.change_pct < 0).sort((a,b) => a.change_pct - b.change_pct);
+      const inflow = themes.filter(t => t.change_pct > 0).sort((a,b) => b.change_pct - a.change_pct);
+      if (!outflow.length && !inflow.length) { container.innerHTML = '<span class="muted">当前无明显资金流向</span>'; return; }
+
+      const W = container.clientWidth || 900;
+      const rowH = 28;
+      const maxRows = Math.max(outflow.length, inflow.length, 1);
+      const headerH = 36;
+      const H = headerH + maxRows * rowH + 10;
+      const midX = W / 2;
+      const colGap = 20;
+
+      const halfW = midX - colGap / 2;
+      const nameLabelW = 100;
+      const pctLabelW = 65;
+      const barMaxW = halfW - nameLabelW - pctLabelW - 16;
+
+      const maxAbsPct = Math.max(
+        ...outflow.map(s => Math.abs(s.change_pct)),
+        ...inflow.map(s => Math.abs(s.change_pct)), 0.01
+      );
+
+      let svg = `<svg width="${W}" height="${H}" style="display:block;font-family:-apple-system,BlinkMacSystemFont,sans-serif;border-radius:10px" viewBox="0 0 ${W} ${H}">`;
+
+      // Background
+      svg += `<rect width="${W}" height="${H}" rx="10" fill="#fff"/>`;
+
+      // Column headers with background
+      svg += `<rect x="0" y="0" width="${midX - colGap/2}" height="${headerH - 4}" rx="10" fill="#f0fdf4"/>`;
+      svg += `<rect x="${midX + colGap/2}" y="0" width="${halfW}" height="${headerH - 4}" rx="10" fill="#fef2f2"/>`;
+      svg += `<text x="14" y="${headerH - 14}" fill="#15803d" font-size="13" font-weight="700">资金流出板块（绿色）</text>`;
+      svg += `<text x="${W - 14}" y="${headerH - 14}" fill="#dc2626" font-size="13" font-weight="700" text-anchor="end">资金流入方向（红色）</text>`;
+
+      // Center divider
+      svg += `<line x1="${midX}" y1="${headerH}" x2="${midX}" y2="${H - 4}" stroke="#e2e8f0" stroke-width="1"/>`;
+
+      // --- Outflow (left): name | pct | ████ bar grows rightward toward center ---
+      outflow.forEach((s, i) => {
+        const y = headerH + i * rowH;
+        const cy = y + rowH / 2;
+        const pct = Math.abs(s.change_pct);
+        const bw = Math.max(6, (pct / maxAbsPct) * barMaxW);
+        const barX = midX - colGap / 2 - bw;
+
+        // Alternating row bg
+        if (i % 2 === 0) svg += `<rect x="0" y="${y}" width="${midX - colGap/2}" height="${rowH}" fill="#f8faf9" opacity="0.6"/>`;
+
+        // Bar (grows leftward from center edge)
+        svg += `<rect x="${barX}" y="${y + 5}" width="${bw}" height="${rowH - 11}" rx="4" fill="#16a34a" opacity="0.85"/>`;
+
+        // Name (left)
+        svg += `<text x="10" y="${cy}" fill="#1e293b" font-size="12" font-weight="600" dominant-baseline="middle">${s.name}</text>`;
+
+        // Pct (between name and bar)
+        svg += `<text x="${barX - 6}" y="${cy}" text-anchor="end" fill="#15803d" font-size="11" font-weight="700" dominant-baseline="middle">${s.change_pct.toFixed(2)}%</text>`;
+      });
+
+      // --- Inflow (right): bar ████ | pct | name ---
+      inflow.forEach((s, i) => {
+        const y = headerH + i * rowH;
+        const cy = y + rowH / 2;
+        const pct = Math.abs(s.change_pct);
+        const bw = Math.max(6, (pct / maxAbsPct) * barMaxW);
+        const barX = midX + colGap / 2;
+
+        // Alternating row bg
+        if (i % 2 === 0) svg += `<rect x="${midX + colGap/2}" y="${y}" width="${halfW}" height="${rowH}" fill="#fef7f7" opacity="0.6"/>`;
+
+        // Bar (grows rightward from center edge)
+        svg += `<rect x="${barX}" y="${y + 5}" width="${bw}" height="${rowH - 11}" rx="4" fill="#dc2626" opacity="0.85"/>`;
+
+        // Pct
+        svg += `<text x="${barX + bw + 6}" y="${cy}" fill="#dc2626" font-size="11" font-weight="700" dominant-baseline="middle">+${s.change_pct.toFixed(2)}%</text>`;
+
+        // Name (right)
+        svg += `<text x="${W - 10}" y="${cy}" text-anchor="end" fill="#1e293b" font-size="12" font-weight="600" dominant-baseline="middle">${s.name}</text>`;
+      });
+
+      svg += '</svg>';
+      container.innerHTML = svg;
+    }
+
+    function selectTheme(key) {
+      focusTheme = focusTheme === key ? null : key;
+      focusSector = null;
+      document.getElementById('viewMode').value = 'company';
+      renderThemes();
+      render();
     }
 
     function renderSidebar() {
@@ -449,6 +640,25 @@
           }))
         };
       }
+      if (focusTheme) {
+        const theme = (liveData.themes || []).find(t => t.key === focusTheme);
+        if (theme && theme.companies && theme.companies.length) {
+          return {
+            name: 'root',
+            children: [{
+              name: theme.name,
+              children: theme.companies.map(c => ({
+                name: c.cn_name || c.symbol,
+                symbol: c.symbol,
+                change_pct: c.change_pct,
+                dollar_volume: Math.max(c.dollar_volume, 1),
+                flow_score: c.flow_score,
+                value: Math.max(c.dollar_volume, 1),
+              }))
+            }]
+          };
+        }
+      }
       const sectors = focusSector
         ? liveData.sectors.filter(s => s.key === focusSector)
         : liveData.sectors;
@@ -518,8 +728,11 @@
         return;
       }
 
-      if (mode === 'company' && focusSector) {
-        crumb.innerHTML = `<a onclick="focusSector=null;render()">全部板块</a> / ${focusSector}`;
+      if (mode === 'company' && focusTheme) {
+        const theme = (liveData.themes || []).find(t => t.key === focusTheme);
+        crumb.innerHTML = `<a href="#" onclick="focusTheme=null;focusSector=null;renderThemes();render();return false">全部</a> / 主题：${theme ? theme.name : focusTheme}`;
+      } else if (mode === 'company' && focusSector) {
+        crumb.innerHTML = `<a href="#" onclick="focusSector=null;render();return false">全部板块</a> / ${focusSector}`;
       } else if (usingLive()) {
         crumb.textContent = '今日实时：方块大小≈资金流强度；颜色与% = 占本站主要板块/龙头样本的资金活跃度比重（红流入绿流出，非股价、非全市场）';
       } else {
@@ -707,6 +920,8 @@
             (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : '')) +
         ` · 美股收盘后自动存快照（美东 16:30）`;
       if (usingLive()) document.getElementById('note').textContent = liveData.note || '';
+      renderThemes();
+      renderFlow();
     }
 
     async function loadStats() {
@@ -723,10 +938,15 @@
               (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : ''))
           : '今日实时加载中...';
         note.textContent = (liveData && liveData.note) || '';
+        renderThemes();
+        renderFlow();
         renderSidebar();
         render();
         return;
       }
+
+      document.getElementById('themePanel').style.display = 'none';
+      document.getElementById('flowPanel').style.display = 'none';
 
       treemap.innerHTML = '<div class="loading">正在加载周期统计...</div>';
       document.getElementById('topSectors').innerHTML = '<li class="muted">加载中...</li>';
@@ -805,7 +1025,41 @@
       }
     }
 
-    window.addEventListener('resize', () => render());
+    const LIVE_REFRESH_MS = 60_000;
+    let liveReloading = false;
+    let countdownSec = LIVE_REFRESH_MS / 1000;
+
+    function updateTimerUI() {
+      const tt = document.getElementById('themeTimer');
+      const ht = document.getElementById('heatmapTimer');
+      const ft = document.getElementById('flowTimer');
+      if (!usingLive()) { tt.textContent = ''; ht.textContent = ''; if(ft) ft.textContent = ''; return; }
+      const label = liveReloading ? '刷新中...' : countdownSec + 's 后自动刷新';
+      tt.textContent = label;
+      ht.textContent = label;
+      if(ft) ft.textContent = label;
+    }
+
+    setInterval(() => {
+      if (!usingLive()) return;
+      countdownSec = Math.max(0, countdownSec - 1);
+      updateTimerUI();
+    }, 1000);
+
+    setInterval(async () => {
+      if (!usingLive() || liveReloading) return;
+      liveReloading = true;
+      updateTimerUI();
+      try {
+        await reloadAll(true);
+      } finally {
+        liveReloading = false;
+        countdownSec = LIVE_REFRESH_MS / 1000;
+        updateTimerUI();
+      }
+    }, LIVE_REFRESH_MS);
+
+    window.addEventListener('resize', () => { render(); renderFlow(); });
     reloadAll();
   </script>
 </body>
