@@ -347,7 +347,11 @@
       try {
         const res = await fetch('/api/deals/run', { method: 'POST' });
         const data = await res.json();
-        alert(`扫描完成：抓取 ${data.fetched || 0} 条，入库 ${data.saved || 0} 条，推送 ${data.pushed || 0} 条`);
+        const llm = data.llm_enabled
+          ? `，大模型 ${data.llm_hits || 0}/${data.llm_items_sent || 0} 条相关`
+          : '，未启用大模型';
+        const neu = data.fetched_new != null ? `，其中新稿 ${data.fetched_new} 条` : '';
+        alert(`扫描完成：抓取 ${data.fetched || 0} 条${neu}，入库 ${data.saved || 0} 条，推送 ${data.pushed || 0} 条${llm}`);
         await loadDeals();
       } catch (e) {
         alert('扫描失败，请查看服务端日志');
