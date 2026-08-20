@@ -8,7 +8,7 @@ import logging
 import re
 from datetime import timedelta
 
-from sqlalchemy import desc, func
+from sqlalchemy import and_, desc, func, or_
 from sqlalchemy.orm import Session
 
 from app.database import DealEvent, DealSeenUrl, db_session
@@ -143,48 +143,111 @@ def _dedup_blocked(
     return existing is not None
 
 
+def _push_succeeded(event: DealEvent) -> bool:
+    ch = (event.push_channel or "").strip()
+    return bool(
+        event.pushed_at
+        and ch
+        and ch not in {"none", "failed", "unconfigured", "disabled", "rate_limited"}
+    )
+
+
 def _push_rate_limited(db: Session, beneficiary_ticker: str) -> bool:
     since_24h = now_beijing() - timedelta(hours=24)
+    since_1h = now_beijing() - timedelta(hours=1)
+    # 只统计真正推成功的，避免失败占额度、页面误显示已推送
+    success_like = and_(
+        DealEvent.push_channel.isnot(None),
+        ~DealEvent.push_channel.in_(
+            ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+        ),
+    )
     count_24h = (
         db.query(DealEvent)
         .filter(
             DealEvent.beneficiary_ticker == beneficiary_ticker,
             DealEvent.pushed_at.isnot(None),
             DealEvent.pushed_at >= since_24h,
+            success_like,
         )
         .count()
     )
     if count_24h >= DEAL_MAX_PUSH_PER_BENEFICIARY_24H:
         return True
-
-    since_1h = now_beijing() - timedelta(hours=1)
     global_count = (
         db.query(DealEvent)
-        .filter(DealEvent.pushed_at.isnot(None), DealEvent.pushed_at >= since_1h)
+        .filter(
+            DealEvent.pushed_at.isnot(None),
+            DealEvent.pushed_at >= since_1h,
+            success_like,
+        )
         .count()
     )
     return global_count >= DEAL_MAX_PUSH_PER_HOUR
 
 
 async def _maybe_push(db: Session, event: DealEvent, roles_should_push: bool) -> None:
+    """仅在渠道真正发送成功时写入 pushed_at；失败可被后续重试。"""
     if not roles_should_push or not DEAL_PUSH_ENABLED:
-        event.push_channel = "none"
+        event.push_channel = "disabled"
         return
     if _push_rate_limited(db, event.beneficiary_ticker):
         logger.info("推送频率限制，跳过 %s", event.beneficiary_ticker)
-        event.push_channel = "none"
+        event.push_channel = "rate_limited"
         return
 
     anchor_display = event.anchor_ticker or "未上市"
     title, content = build_push_content(event, anchor_display)
     results = await notify(title, content)
-    event.pushed_at = now_beijing()
+    if not results:
+        logger.warning("推送通道未配置（PUSHPLUS/SERVERCHAN 为空），跳过 %s", event.beneficiary_ticker)
+        event.push_channel = "unconfigured"
+        event.pushed_at = None
+        return
+
     channels = []
     if results.get("pushplus"):
         channels.append("pushplus")
     if results.get("serverchan"):
         channels.append("serverchan")
-    event.push_channel = "+".join(channels) if channels else "none"
+    if channels:
+        event.pushed_at = now_beijing()
+        event.push_channel = "+".join(channels)
+        logger.info("已推送 %s via %s", event.beneficiary_ticker, event.push_channel)
+    else:
+        logger.warning("推送全部失败 %s results=%s", event.beneficiary_ticker, results)
+        event.push_channel = "failed"
+        event.pushed_at = None
+
+
+async def retry_unpushed_events(db: Session, limit: int = 20) -> int:
+    """补推：从未成功推送的事件（含误写 pushed_at 但 channel=none）。"""
+    if not DEAL_PUSH_ENABLED:
+        return 0
+    pending = (
+        db.query(DealEvent)
+        .filter(
+            or_(
+                DealEvent.pushed_at.is_(None),
+                DealEvent.push_channel.is_(None),
+                DealEvent.push_channel.in_(
+                    ["none", "failed", "unconfigured", "rate_limited"]
+                ),
+            )
+        )
+        .order_by(DealEvent.id.asc())
+        .limit(limit)
+        .all()
+    )
+    n = 0
+    for event in pending:
+        await _maybe_push(db, event, roles_should_push=True)
+        if _push_succeeded(event):
+            n += 1
+        db.add(event)
+    if pending:
+        db.commit()
+    return n
 
 
 def _save_event(
@@ -428,14 +491,18 @@ async def run_pipeline() -> dict:
                 summary["errors"].append(str(exc)[:200])
                 db.rollback()
 
-        pushed = (
+        summary["push_retried"] = await retry_unpushed_events(db)
+        summary["pushed"] = (
             db.query(DealEvent)
-            .filter(DealEvent.pushed_at.isnot(None))
-            .order_by(desc(DealEvent.pushed_at))
-            .limit(max(summary["saved"], 1))
-            .all()
+            .filter(
+                DealEvent.pushed_at.isnot(None),
+                DealEvent.push_channel.isnot(None),
+                ~DealEvent.push_channel.in_(
+                    ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+                ),
+            )
+            .count()
         )
-        summary["pushed"] = sum(1 for e in pushed if e.push_channel and e.push_channel != "none")
 
     logger.info("deal_monitor pipeline: %s", summary)
     return summary

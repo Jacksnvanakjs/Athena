@@ -224,6 +224,12 @@ def _deal_to_dict(event) -> dict:
         "is_update": event.is_update,
         "pushed_at": event.pushed_at.isoformat() if event.pushed_at else None,
         "push_channel": event.push_channel,
+        "pushed": bool(
+            event.pushed_at
+            and event.push_channel
+            and event.push_channel
+            not in {"none", "failed", "unconfigured", "disabled", "rate_limited"}
+        ),
     }
 
 
@@ -249,7 +255,13 @@ def list_deals(
         if min_score:
             q = q.filter(DealEvent.materiality_score >= min_score)
         if pushed_only:
-            q = q.filter(DealEvent.pushed_at.isnot(None))
+            q = q.filter(
+                DealEvent.pushed_at.isnot(None),
+                DealEvent.push_channel.isnot(None),
+                ~DealEvent.push_channel.in_(
+                    ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+                ),
+            )
         rows = q.order_by(desc(DealEvent.published_at)).limit(limit).all()
         return [_deal_to_dict(r) for r in rows]
 
@@ -269,7 +281,14 @@ def deals_stats(days: int = Query(default=7, ge=1, le=90)):
         total = db.query(DealEvent).filter(DealEvent.published_at >= since).count()
         pushed = (
             db.query(DealEvent)
-            .filter(DealEvent.published_at >= since, DealEvent.pushed_at.isnot(None))
+            .filter(
+                DealEvent.published_at >= since,
+                DealEvent.pushed_at.isnot(None),
+                DealEvent.push_channel.isnot(None),
+                ~DealEvent.push_channel.in_(
+                    ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+                ),
+            )
             .count()
         )
         pairs = (

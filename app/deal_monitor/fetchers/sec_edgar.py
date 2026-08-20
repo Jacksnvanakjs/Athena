@@ -79,27 +79,104 @@ def _index_url(source_url: str) -> str:
     return source_url
 
 
-async def _fetch_index_text(client: httpx.AsyncClient, source_url: str) -> str:
-    url = _index_url(source_url)
+def _absolute_sec_url(href: str) -> str:
+    href = href.strip()
+    if href.startswith("http"):
+        return href
+    # ix viewer → 直接取 Archives 原文
+    m = re.search(r"/Archives/edgar/data/\d+/\d+/[^\"'\s>]+\.htm", href, re.I)
+    if m:
+        return "https://www.sec.gov" + m.group(0)
+    if href.startswith("/"):
+        return "https://www.sec.gov" + href
+    return href
+
+
+def _normalize_sec_text(html: str) -> str:
+    """去掉标签/实体，便于匹配 Item 1.01（SEC 常用 Item&#8201;1.01）。"""
+    text = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", html)
+    text = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = (
+        text.replace("&#8201;", " ")
+        .replace("&#160;", " ")
+        .replace("&nbsp;", " ")
+        .replace("&#8220;", '"')
+        .replace("&#8221;", '"')
+        .replace("&#8217;", "'")
+        .replace("&amp;", "&")
+    )
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+async def _fetch_text(client: httpx.AsyncClient, url: str, limit: int = 200_000) -> str:
     resp = await client.get(url)
     resp.raise_for_status()
-    return resp.text[:120_000]
+    return resp.text[:limit]
 
 
 def _has_item_101(html: str) -> bool:
-    lower = html.lower()
+    lower = _normalize_sec_text(html).lower()
     return any(marker in lower for marker in ITEM_101_MARKERS)
 
 
-def _extract_item_101_snippet(html: str, max_len: int = 800) -> str:
-    lower = html.lower()
-    for marker in ITEM_101_MARKERS:
-        idx = lower.find(marker)
+def _find_8k_document_url(index_html: str, index_url: str) -> str | None:
+    """从 index 页找到主 8-K 文档（排除 exhibit）。"""
+    candidates: list[str] = []
+    for m in re.finditer(r'href="([^"]+\.htm)"', index_html, re.I):
+        href = m.group(1)
+        abs_url = _absolute_sec_url(href)
+        lower = abs_url.lower()
+        if "/archives/edgar/data/" not in lower:
+            continue
+        if "index.htm" in lower:
+            continue
+        # 排除常见 exhibit / cover
+        if re.search(r"ex[-_]?\d|exhibit|ex99|r\d+\.htm", lower):
+            continue
+        if re.search(r"d\d+d8k\.htm|form8[-_]?k|/8-?k[^a-z]", lower) or lower.endswith("8k.htm"):
+            candidates.insert(0, abs_url)
+        else:
+            candidates.append(abs_url)
+    if candidates:
+        return candidates[0]
+    # fallback：同目录下猜测
+    base = re.sub(r"/[^/]+-index\.htm$", "/", index_url)
+    return None if not base.startswith("http") else None
+
+
+def _extract_item_101_snippet(html: str, max_len: int = 1200) -> str:
+    text = _normalize_sec_text(html)
+    lower = text.lower()
+    # 优先真正的 Item 1.01 标题段，避开 “incorporated by reference into Item …”
+    patterns = (
+        r"item\s*1\.01\s+entry into a material definitive agreement",
+        r"item\s*1\.01\s*[:.\-–]?",
+        r"entry into a material definitive agreement",
+    )
+    idx = -1
+    for pat in patterns:
+        for m in re.finditer(pat, lower):
+            window = lower[m.start() : m.start() + 80]
+            if "incorporated by reference" in window:
+                continue
+            idx = m.start()
+            break
         if idx >= 0:
-            start = max(0, idx - 120)
-            snippet = re.sub(r"\s+", " ", html[start : start + max_len])
-            return snippet.strip()
-    return ""
+            break
+    if idx < 0:
+        return ""
+    # 截到下一个主要 Item 或签名前
+    end = len(text)
+    for m in re.finditer(r"\bitem\s*\d+\.\d+\b", lower[idx + 20 :], re.I):
+        end = idx + 20 + m.start()
+        break
+    sig = lower.find("signature", idx + 50)
+    if sig > 0:
+        end = min(end, sig)
+    snippet = text[idx:end].strip()
+    return snippet[:max_len]
 
 
 async def _enrich_item_101(
@@ -109,16 +186,29 @@ async def _enrich_item_101(
 ) -> RawItem | None:
     async with sem:
         try:
-            html = await _fetch_index_text(client, item.source_url)
+            index_url = _index_url(item.source_url)
+            index_html = await _fetch_text(client, index_url)
         except Exception as exc:
             logger.debug("SEC index 抓取失败 %s: %r", item.source_url[:80], exc)
             return None
 
-        if not _has_item_101(html):
+        if not _has_item_101(index_html):
             return None
 
         filer = parse_sec_filer(item.headline) or "Unknown filer"
-        snippet = _extract_item_101_snippet(html)
+        snippet = ""
+        doc_url = _find_8k_document_url(index_html, index_url)
+        if doc_url:
+            try:
+                doc_html = await _fetch_text(client, doc_url)
+                snippet = _extract_item_101_snippet(doc_html)
+            except Exception as exc:
+                logger.debug("SEC 8-K 正文抓取失败 %s: %r", doc_url[:80], exc)
+
+        # 正文失败时退回 index（通常只有 Items 列表，信息不足）
+        if not snippet:
+            snippet = _extract_item_101_snippet(index_html)
+
         prefix = f"[SEC Item 1.01] Filer: {filer}\n"
         body = snippet or item.summary or item.headline
         item.summary = (prefix + body)[:2000]

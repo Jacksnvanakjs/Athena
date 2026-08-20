@@ -1,10 +1,11 @@
-"""Gemini 批量识别：从 RSS 中筛出 AI 算力/数据中心合作稿。"""
+"""Gemini 批量识别：从 RSS/SEC 中筛出 AI 算力产业链合作稿。"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -28,6 +29,101 @@ class LlmDecision:
     reason: str = ""
 
 
+# ---------------------------------------------------------------------------
+# 通用主题 / 商业信号（提示词与规则兜底共用，避免只靠单个案例）
+# ---------------------------------------------------------------------------
+
+THEME_TOKENS = (
+    # 算力容量
+    "gpu", "accelerator", "ai cluster", "compute capacity", "training capacity",
+    "inference capacity", "ai infrastructure", "hyperscale",
+    # 数据中心 / 电力 / 液冷
+    "data center", "data centre", "colocation", "colo ", "megawatt", "gigawatt",
+    "mw capacity", "power purchase", "liquid cooling", "液冷", "数据中心", "算力",
+    # 定制硅 / 芯片供应链
+    "custom semiconductor", "custom silicon", "custom chip", "asic", "tpu",
+    "ai inference", "inference accelerator", "near-memory", "hbm",
+    "memory interface", "network interface", "ethernet", "infiniband",
+    "optical", "光子", "foundry", "advanced packaging", "chiplet",
+    "semiconductor products", "wafer",
+)
+
+# 强商业信号：有其一即可，不强制美元金额
+COMMERCIAL_SIGNAL_TOKENS = (
+    "item 1.01", "material definitive agreement", "definitive agreement",
+    "commercial agreement", "entered into", "enter into",
+    "purchase agreement", "supply agreement", "capacity agreement",
+    "lease agreement", "master services agreement", "offtake",
+    "warrant", "multi-year", "years", "megawatt", "gigawatt",
+    "$", "million", "billion",
+)
+
+# 明显非目标：融资/并购等（兜底时直接放弃）
+HARD_NEGATIVE_TOKENS = (
+    "notes offering", "senior notes", "credit agreement", "revolving credit",
+    "term loan", "convertible note", "atm offering", "equity distribution",
+    "merger agreement", "arrangement agreement", "stock purchase agreement",
+    "securities purchase agreement", "private placement", "underwriting agreement",
+    "indenture", "debenture",
+)
+
+
+def _summary_window(item: RawItem) -> str:
+    # SEC Item 1.01 对方/条款常在中后段；RSS 摘要本身较短
+    limit = 1600 if item.source == "sec_8k" else 800
+    return (item.summary or "")[:limit]
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").lower())
+
+
+def _has_any(text: str, tokens: tuple[str, ...]) -> bool:
+    return any(tok in text for tok in tokens)
+
+
+def _has_counterparty_cue(text: str) -> bool:
+    """摘要里是否像写了「与另一方」——通用，不绑具体公司名。"""
+    patterns = (
+        r"\band\s+[A-Z][A-Za-z0-9&.,' -]{1,60}\s*\(",
+        r"\bwith\s+[A-Z][A-Za-z0-9&.,' -]{1,60}\b",
+        r"\bbetween\s+.+\band\s+",
+        r"entered into .{0,80}\bwith\b",
+        r"commercial agreement .{0,80}\bwith\b",
+        r"\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?\s+LLC\b",
+        r"\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?\s+Inc\.?\b",
+        r"\b[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?\s+Corp\.?\b",
+    )
+    return any(re.search(p, text or "") for p in patterns)
+
+
+def heuristic_ai_deal_signal(item: RawItem) -> bool:
+    """
+    高置信规则信号：用于 LLM 漏判兜底，不替代 LLM 主体判断。
+    条件：主题命中 + 商业信号 + 对方线索，且非硬融资/并购。
+    """
+    blob = _norm(f"{item.headline}\n{item.summary}")
+    if not blob.strip():
+        return False
+    if _has_any(blob, HARD_NEGATIVE_TOKENS) and not _has_any(
+        blob,
+        ("data center", "data centre", "gpu", "custom semiconductor", "asic", "tpu", "colocation"),
+    ):
+        # 纯融资/并购：直接否；若融资稿里同时写了 data center/GPU 等，仍交给主题判断
+        if not _has_any(blob, THEME_TOKENS):
+            return False
+    if _has_any(blob, HARD_NEGATIVE_TOKENS) and not _has_any(blob, THEME_TOKENS):
+        return False
+    if not _has_any(blob, THEME_TOKENS):
+        return False
+    if not _has_any(blob, COMMERCIAL_SIGNAL_TOKENS):
+        return False
+    # SEC 正文常有 Company + 对方；RSS 至少要有 with/and 类线索
+    if item.source == "sec_8k":
+        return _has_counterparty_cue(item.summary or item.headline) or "item 1.01" in blob
+    return _has_counterparty_cue(f"{item.headline}\n{item.summary}")
+
+
 def _build_prompt(items: list[RawItem]) -> str:
     payload = []
     for idx, item in enumerate(items, start=1):
@@ -37,33 +133,47 @@ def _build_prompt(items: list[RawItem]) -> str:
                 "source_url": item.source_url,
                 "source": item.source,
                 "headline": item.headline,
-                "summary": item.summary[:600],
+                "summary": _summary_window(item),
             }
         )
 
     return (
-        "你是一个严格的美股 AI 产业链合作快讯筛选器。"
-        "只根据标题和摘要判断，不要假设正文里还有未给出的金额或协议。"
-        "目标是找出会对美股标的产生材料性影响的「新签/扩容」算力或数据中心商业协议。"
-        "只保留真正存在两家不同公司、且有商业条款信号的事件。\n"
-        "允许：新签或明确扩容的 GPU/算力容量、数据中心托管/租赁、电力或机柜 MW/GW 级协议，"
-        "且受益方是美股可交易公司（不是未上市子公司硬映射到母公司）。\n"
-        "一律 relevant=false：\n"
-        "- 已有合作的仪式性新闻（高管到访、加速合作、战略合作展、产品联名、实验室揭幕）\n"
-        "- 产品验证/认证/兼容性（validated / certified / compatible）但没有新的采购、租赁或容量合同\n"
-        "- 子公司新闻，且该业务相对上市母公司明显偏小（如 Castrol vs BP、品牌部门 vs 综合集团）\n"
-        "- 机器人/消费电子/普通软件合作，即使对方是 NVIDIA\n"
-        "- 信贷、并购、药企授权、普通融资；8-K 只列出 Item 1.01 而无协议对方\n"
-        "- MOU、探索性合作、学术研究、单方产品发布\n\n"
-        "规则：\n"
-        "1. relevant=true 必须同时满足：两家不同公司 + 主题是 AI 算力/数据中心基础设施 + 有材料性商业信号"
-        "（金额、年限、MW/GW、GPU 数量、正式协议/lease/capacity agreement 至少一类）。\n"
-        "2. anchor 是更大/更核心的一方；beneficiary 必须是其自身业务会受该协议直接影响的美股 ticker，"
-        "禁止把小子公司映射成综合集团母公司。\n"
-        "3. 若已知美股 ticker，输出 anchor_ticker / beneficiary_ticker。受益方无美股 ticker 则 relevant=false。\n"
-        "4. llm_score 0-100：仪式/验证稿 0-40；有合作但条款弱 40-60；有金额/年限/容量的正式协议 70+。\n"
-        "5. 不确定就 relevant=false。event_type 默认 compute_deal。\n\n"
-        "只返回 JSON（不要带 ``` 或任何额外文本），格式为：\n"
+        "你是美股「AI 算力产业链」材料性商业协议筛选器。"
+        "只根据标题和摘要判断，禁止脑补未出现的金额/对方/条款。\n\n"
+        "用三道闸门决定 relevant（必须全过才 true）：\n"
+        "闸门1 双方：存在两家不同公司（申报方/买方/卖方/合作方）。"
+        "只有 Item 标题、无对方名 → false。\n"
+        "闸门2 主题：属于下方「主题白名单」任一子类；不属于则 false。"
+        "不要把主题窄化成「只有 GPU 租赁/机柜 MW」。\n"
+        "闸门3 商业信号：有材料性合同信号（不必有美元金额）。"
+        "Item 1.01 / definitive|commercial|supply|capacity|lease agreement / "
+        "entered into / multi-year / MW|GW|数量 / 与采购挂钩的 warrant|equity "
+        "任一即可。纯仪式/认证/MOU → false。\n\n"
+        "【主题白名单】（子类通用，覆盖整条 AI 供给链）\n"
+        "T1 算力容量：GPU/加速器采购或租赁、集群、云/专用算力包年包容量\n"
+        "T2 数据中心基建：托管/colo、机柜、电力/PPA、液冷，明确服务 AI/hyperscale\n"
+        "T3 定制硅与芯片：ASIC/TPU/custom semiconductor|silicon|chip、"
+        "inference accelerator、为云厂开发定制芯片、design win\n"
+        "T4 AI 集群互联与光模块：以太网/InfiniBand/NIC/光互联/交换，明确 AI 训练/推理场景\n"
+        "T5 AI 存储与先进封装：HBM、近存算、存储/内存控制器、foundry/advanced packaging "
+        "且服务 AI 加速器\n"
+        "T6 其他：明确写给 AI 训练/推理/智算用的长期供应或 offtake\n\n"
+        "【模式正例】（抽象模板，勿死记单一公司）\n"
+        "- 美股芯片/光模块/DC 公司 + 云厂/hyperscaler + 正式商业协议/Item 1.01 → true\n"
+        "- 算力/托管商 + 云厂或大模型公司 + 多年容量/MW 协议 → true\n"
+        "- 供应链公司 + 采购挂钩 warrant/长期供应，标的是 AI 芯片或加速器生态 → true\n"
+        "【模式负例】\n"
+        "- 索引页仅 Item 1.01 无对方/无标的；仪式合作；validated/certified；"
+        "机器人/消费电子/普通软件；信贷/发债/并购/私募；"
+        "无 AI 算力关联的纯地产/咨询 → false\n\n"
+        "角色与打分：\n"
+        "- anchor=更大/更核心方（常为云厂）；beneficiary=业务直接受益的美股公司；"
+        "禁止把小子公司映射成综合集团母公司；受益方无美股 ticker → false。\n"
+        "- llm_score：仪式/认证 0-40；弱合作 40-60；正式协议且过三闸 ≥70；"
+        "再有 warrant/金额/年限/容量 ≥80。\n"
+        "- SEC：过三闸时倾向 true，禁止因「没写美元」否决；"
+        "非 SEC 不确定则 false。event_type 默认 compute_deal。\n\n"
+        "只返回 JSON（不要 ```），格式：\n"
         '{"items":[{"source_url":"...","is_relevant":true,"anchor_name":"...","beneficiary_name":"...","anchor_ticker":"NVDA","beneficiary_ticker":"RIOT","event_type":"compute_deal","llm_score":78,"reason":"..."}]}\n\n'
         f"待分析新闻：\n{json.dumps(payload, ensure_ascii=False)}"
     )
@@ -126,6 +236,41 @@ def _decisions_from_parsed(parsed, requested: list[RawItem]) -> dict[str, LlmDec
     return result
 
 
+def apply_heuristic_rescue(
+    items: list[RawItem],
+    decisions: dict[str, LlmDecision],
+) -> dict[str, LlmDecision]:
+    """LLM 判 false 但高置信规则命中时抬为 true，防止主题换皮后再漏。"""
+    by_url = {it.source_url: it for it in items}
+    rescued = 0
+    for url, decision in list(decisions.items()):
+        if decision.is_relevant and decision.llm_score >= 70:
+            continue
+        item = by_url.get(url)
+        if not item or not heuristic_ai_deal_signal(item):
+            continue
+        # 保留 LLM 已抽出的双方；没有则交给 pipeline 的 SEC/实体解析
+        decisions[url] = LlmDecision(
+            source_url=url,
+            is_relevant=True,
+            anchor_name=decision.anchor_name,
+            beneficiary_name=decision.beneficiary_name,
+            anchor_ticker=decision.anchor_ticker,
+            beneficiary_ticker=decision.beneficiary_ticker,
+            event_type=decision.event_type or "compute_deal",
+            llm_score=max(decision.llm_score, 72),
+            reason=(
+                f"规则兜底(主题+商业信号): {decision.reason}"
+                if decision.reason
+                else "规则兜底: AI产业链主题+材料性协议信号"
+            ),
+        )
+        rescued += 1
+    if rescued:
+        logger.info("LLM 漏判规则兜底 %s 条", rescued)
+    return decisions
+
+
 async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None:
     models = [DEAL_LLM_MODEL, "gemini-3.5-flash", "gemini-3.5-flash-lite"]
     data = None
@@ -182,7 +327,7 @@ async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None
 
 
 async def classify_items(items: list[RawItem]) -> dict[str, LlmDecision]:
-    """按批分类；失败的批次不写入结果，便于下一轮重试。"""
+    """按批分类；失败的批次不写入结果，便于下一轮重试。成功后做规则兜底。"""
     if not GEMINI_API_KEY or not items:
         return {}
 
@@ -191,6 +336,5 @@ async def classify_items(items: list[RawItem]) -> dict[str, LlmDecision]:
         chunk = items[start : start + LLM_BATCH_SIZE]
         part = await _classify_batch(chunk)
         if part:
-            merged.update(part)
+            merged.update(apply_heuristic_rescue(chunk, part))
     return merged
-

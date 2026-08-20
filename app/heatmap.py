@@ -10,9 +10,13 @@ from __future__ import annotations
 import logging
 import re
 import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
+
+from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
 
@@ -308,9 +312,11 @@ def _quote_row(
     change_pct: float,
     volume: float,
     market_cap: float | None = None,
+    quote_time: str | None = None,
+    quote_time_et: str | None = None,
 ) -> dict[str, Any]:
     dollar_volume = price * volume
-    return {
+    row = {
         "symbol": symbol,
         "name": name or symbol,
         "price": round(price, 2),
@@ -320,6 +326,110 @@ def _quote_row(
         "flow_score": round(change_pct * dollar_volume / 1e9, 4),
         "market_cap": market_cap,
     }
+    if quote_time:
+        row["quote_time"] = quote_time
+    if quote_time_et:
+        row["quote_time_et"] = quote_time_et
+    return row
+
+
+_US_TZ = ZoneInfo("America/New_York")
+_BJ_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _parse_sina_et_time(text: str) -> datetime | None:
+    """解析新浪美东时间，如 'Aug 19 07:59PM EDT'。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    m = re.match(
+        r"^([A-Za-z]{3}\s+\d{1,2}\s+\d{1,2}:\d{2}\s*(?:AM|PM))\s*(?:EDT|EST|ET)?$",
+        text,
+        re.I,
+    )
+    if not m:
+        return None
+    raw = re.sub(r"\s+", " ", m.group(1).strip())
+    now_et = datetime.now(_US_TZ)
+    for year in (now_et.year, now_et.year - 1):
+        try:
+            naive = datetime.strptime(f"{raw} {year}", "%b %d %I:%M%p %Y")
+        except ValueError:
+            continue
+        aware = naive.replace(tzinfo=_US_TZ)
+        # 远离当前时刻的年份视为错误，换一年再试
+        if abs((aware - now_et).total_seconds()) <= 180 * 24 * 3600:
+            return aware
+    return None
+
+
+def _us_market_session(now_et: datetime | None = None) -> dict[str, str]:
+    """美股交易时段（按美东时间）。"""
+    now_et = now_et or datetime.now(_US_TZ)
+    minutes = now_et.hour * 60 + now_et.minute
+    weekday = now_et.weekday()  # 0=Mon
+    if weekday >= 5:
+        return {
+            "session": "closed",
+            "session_label": "周末休市",
+            "data_freshness": "休市中，显示最近一个交易日收盘/盘后价",
+        }
+    if 4 * 60 <= minutes < 9 * 60 + 30:
+        return {
+            "session": "pre",
+            "session_label": "盘前交易",
+            "data_freshness": "盘前实时（新浪延时行情，通常接近实时）",
+        }
+    if 9 * 60 + 30 <= minutes < 16 * 60:
+        return {
+            "session": "regular",
+            "session_label": "盘中交易",
+            "data_freshness": "盘中实时（新浪延时行情，通常接近实时）",
+        }
+    if 16 * 60 <= minutes < 20 * 60:
+        return {
+            "session": "post",
+            "session_label": "盘后交易",
+            "data_freshness": "盘后实时（新浪延时行情，通常接近实时）",
+        }
+    return {
+        "session": "overnight",
+        "session_label": "隔夜休市",
+        "data_freshness": "隔夜休市，价格停在昨盘后；开盘前（美东04:00起）才会继续变动",
+    }
+
+
+def _snapshot_time_hint() -> str:
+    """美东 16:30 收盘存快照对应的北京时间。"""
+    now_et = datetime.now(_US_TZ)
+    close_et = now_et.replace(hour=16, minute=30, second=0, microsecond=0)
+    close_bj = close_et.astimezone(_BJ_TZ)
+    return f"美东 16:30（北京时间 {close_bj.strftime('%H:%M')}）"
+
+
+def _response_timestamps(by_symbol: dict[str, dict[str, Any]] | None = None) -> dict[str, str]:
+    """页面时间统一用北京时间；行情时间优先用新浪美东成交时间戳。"""
+    now_et = datetime.now(_US_TZ)
+    session = _us_market_session(now_et)
+    out: dict[str, str] = {
+        "updated_at": now_beijing().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at_label": "北京时间",
+        "market_time_et": now_et.strftime("%Y-%m-%d %H:%M"),
+        "market_time_bj": now_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M"),
+        "snapshot_hint": _snapshot_time_hint(),
+        **session,
+    }
+    if not by_symbol:
+        return out
+
+    # 优先用各标的 quote_time（已转北京时间的 ISO 字符串）取最新
+    quote_times = sorted(
+        {r["quote_time"] for r in by_symbol.values() if r.get("quote_time")}
+    )
+    if quote_times:
+        out["quote_time"] = quote_times[-1]
+        out["quote_time_label"] = "北京时间"
+    return out
 
 
 def _parse_quote(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -430,12 +540,23 @@ async def _fetch_sina(symbols: list[str]) -> dict[str, dict[str, Any]]:
                             change_pct = round((ext_price - prev_close) / prev_close * 100, 2)
                     if price is None or price <= 0:
                         continue
+                    # [24]=美东行情时间（对应当前使用的盘前/盘后/收盘价）
+                    # [3]=新浪服务器写入时间，隔夜常不更新，不能当行情时间
+                    et_raw = parts[24].strip() if len(parts) > 24 else ""
+                    et_dt = _parse_sina_et_time(et_raw)
+                    quote_time = (
+                        et_dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                        if et_dt
+                        else None
+                    )
                     out[sym] = _quote_row(
                         sym,
                         name=parts[0] or sym,
                         price=price,
                         change_pct=change_pct or 0.0,
                         volume=volume or 0.0,
+                        quote_time=quote_time,
+                        quote_time_et=et_raw or None,
                     )
             except Exception as exc:
                 logger.warning("Sina batch failed: %s", exc)
@@ -682,7 +803,7 @@ def _heatmap_failure(source: str, quote_count: int, total: int) -> dict[str, Any
     )
     return {
         "success": False,
-        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        **_response_timestamps(),
         "source": source,
         "quote_count": quote_count,
         "quote_total": total,
@@ -830,7 +951,7 @@ async def _build_heatmap() -> dict[str, Any]:
 
     return {
         "success": True,
-        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        **_response_timestamps(by_symbol),
         "source": source,
         "quote_count": quote_count,
         "quote_total": len(symbols),

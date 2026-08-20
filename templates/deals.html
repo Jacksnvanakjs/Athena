@@ -331,7 +331,7 @@
           <td>${row.headline}</td>
           <td class="score">${row.materiality_score}</td>
           <td><span class="badge">${row.tier_pair}</span></td>
-          <td class="${row.pushed_at ? 'pushed' : ''}">${row.pushed_at ? '✓' : '—'}</td>
+          <td class="${row.pushed ? 'pushed' : ''}">${row.pushed ? '✓' : (row.push_channel === 'unconfigured' || row.push_channel === 'failed' || row.push_channel === 'none' ? '未送达' : '—')}</td>
           <td><a class="link" href="${row.source_url}" target="_blank" rel="noopener">${row.source === 'sec_8k' ? 'SEC 8-K' : '原文'}</a></td>
         `;
         tbody.appendChild(tr);

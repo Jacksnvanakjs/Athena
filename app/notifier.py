@@ -1,6 +1,10 @@
+import logging
+
 import httpx
 
 from app.config import PUSHPLUS_TOKEN, SERVERCHAN_SENDKEY
+
+logger = logging.getLogger(__name__)
 
 
 async def send_pushplus(title: str, content: str) -> bool:
@@ -19,8 +23,12 @@ async def send_pushplus(title: str, content: str) -> bool:
                 timeout=15,
             )
             data = resp.json()
-            return data.get("code") == 200
-    except Exception:
+            ok = data.get("code") == 200
+            if not ok:
+                logger.warning("PushPlus 失败: %s", data)
+            return ok
+    except Exception as exc:
+        logger.warning("PushPlus 异常: %s", exc)
         return False
 
 
@@ -35,8 +43,12 @@ async def send_serverchan(title: str, content: str) -> bool:
                 timeout=15,
             )
             data = resp.json()
-            return data.get("code") == 0
-    except Exception:
+            ok = data.get("code") == 0
+            if not ok:
+                logger.warning("Server酱 失败: %s", data)
+            return ok
+    except Exception as exc:
+        logger.warning("Server酱 异常: %s", exc)
         return False
 
 
@@ -46,6 +58,8 @@ async def notify(title: str, content: str) -> dict:
         results["pushplus"] = await send_pushplus(title, content)
     if SERVERCHAN_SENDKEY:
         results["serverchan"] = await send_serverchan(title, content)
+    if not results:
+        logger.warning("未配置任何推送通道（PUSHPLUS_TOKEN / SERVERCHAN_SENDKEY）")
     return results
 
 

@@ -41,6 +41,16 @@ HIGH_VALUE_TOKENS = [
     "租赁协议",
     "训练",
     "推理",
+    # 定制硅 / 互联 / 先进封装（避免只认 GPU/机柜）
+    "custom semiconductor",
+    "custom silicon",
+    "asic",
+    "tpu",
+    "inference accelerator",
+    "hbm",
+    "hyperscale",
+    "advanced packaging",
+    "infiniband",
 ]
 
 NEGATIVE_KEYWORDS = [

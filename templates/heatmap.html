@@ -361,6 +361,25 @@
       return n.toFixed(0);
     }
 
+    function formatMetaLine(data, prefix) {
+      if (!data) return prefix ? prefix + '加载中...' : '加载中...';
+      const tz = data.updated_at_label || '北京时间';
+      const refresh = `刷新 ${data.updated_at}（${tz}）`;
+      const session = data.session_label ? ` · ${data.session_label}` : '';
+      const quote = data.quote_time
+        ? ` · 最新行情 ${data.quote_time}（${data.quote_time_label || '北京时间'}）`
+        : '';
+      const freshness = data.data_freshness ? ` · ${data.data_freshness}` : '';
+      const src = ` · 数据源 ${data.source || '?'}`;
+      const cov = data.quote_count != null ? `（${data.quote_count}/${data.quote_total || '?'}）` : '';
+      const head = prefix ? prefix + ' · ' : '';
+      const snap = data.snapshot_hint || '美东 16:30（北京时间 04:30/05:30）';
+      if (data.success === false) {
+        return `${head}行情拉取失败 · ${refresh}${src}${cov}`;
+      }
+      return `${head}${refresh}${session}${quote}${freshness}${src}${cov} · 每60秒自动刷新 · 收盘后自动存快照（${snap}）`;
+    }
+
     function absFlowTotal(items, key) {
       const k = key || 'flow_score';
       return (items || []).reduce((s, i) => s + Math.abs(Number(i[k] || 0)), 0) || 1;
@@ -913,15 +932,12 @@
       const res = await fetch('/api/heatmap' + (force ? '?force=true' : ''));
       if (!res.ok) throw new Error('行情 HTTP ' + res.status);
       liveData = await res.json();
-      document.getElementById('metaLine').textContent =
-        (liveData.success === false
-          ? `行情拉取失败 · ${liveData.updated_at} · ${liveData.source || '?'}（${liveData.quote_count || 0}/${liveData.quote_total || '?'}）`
-          : `更新时间 ${liveData.updated_at} · 数据源 ${liveData.source || '?'}` +
-            (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : '')) +
-        ` · 美股收盘后自动存快照（美东 16:30）`;
+      document.getElementById('metaLine').textContent = formatMetaLine(liveData, '');
       if (usingLive()) document.getElementById('note').textContent = liveData.note || '';
       renderThemes();
       renderFlow();
+      setTimerUI();
+      ensureLiveInterval();
     }
 
     async function loadStats() {
@@ -932,14 +948,13 @@
 
       if (usingLive()) {
         meta.textContent = liveData
-          ? (liveData.success === false
-            ? `行情拉取失败 · ${liveData.updated_at} · ${liveData.source || '?'}（${liveData.quote_count || 0}/${liveData.quote_total || '?'}）`
-            : `今日实时 · 更新时间 ${liveData.updated_at} · 数据源 ${liveData.source || '?'}` +
-              (liveData.quote_count != null ? `（${liveData.quote_count}/${liveData.quote_total || '?'}）` : ''))
+          ? formatMetaLine(liveData, '今日实时')
           : '今日实时加载中...';
         note.textContent = (liveData && liveData.note) || '';
         renderThemes();
         renderFlow();
+        setTimerUI();
+        ensureLiveInterval();
         renderSidebar();
         render();
         return;
@@ -1025,42 +1040,101 @@
       }
     }
 
-    const LIVE_REFRESH_MS = 60_000;
     let liveReloading = false;
-    let countdownSec = LIVE_REFRESH_MS / 1000;
+    let liveIntervalId = null;
+    let countdownTickId = null;
+    let countdownSec = 60;
+    let currentRefreshMs = 60_000;
 
-    function updateTimerUI() {
+    const LIVE_REFRESH_MS_OPEN = 60_000; // 盘前/盘中/盘后：1 分钟刷新
+    const LIVE_REFRESH_MS_CLOSED = 300_000; // 休市：每 5 分钟检查一次
+
+    function currentIsOpenSession() {
+      const s = liveData && liveData.session ? liveData.session : 'unknown';
+      return (s === 'pre' || s === 'regular' || s === 'post');
+    }
+
+    function setTimerUI() {
       const tt = document.getElementById('themeTimer');
       const ht = document.getElementById('heatmapTimer');
       const ft = document.getElementById('flowTimer');
-      if (!usingLive()) { tt.textContent = ''; ht.textContent = ''; if(ft) ft.textContent = ''; return; }
-      const label = liveReloading ? '刷新中...' : countdownSec + 's 后自动刷新';
+      if (!usingLive()) {
+        tt.textContent = '';
+        ht.textContent = '';
+        if (ft) ft.textContent = '';
+        return;
+      }
+
+      let label;
+      if (liveReloading) {
+        label = '刷新中...';
+      } else if (currentIsOpenSession()) {
+        label = countdownSec + 's 后自动刷新';
+      } else {
+        label = '休市中 · ' + countdownSec + 's 后检查';
+      }
+
       tt.textContent = label;
       ht.textContent = label;
-      if(ft) ft.textContent = label;
+      if (ft) ft.textContent = label;
     }
 
-    setInterval(() => {
-      if (!usingLive()) return;
-      countdownSec = Math.max(0, countdownSec - 1);
-      updateTimerUI();
-    }, 1000);
-
-    setInterval(async () => {
-      if (!usingLive() || liveReloading) return;
-      liveReloading = true;
-      updateTimerUI();
-      try {
-        await reloadAll(true);
-      } finally {
-        liveReloading = false;
-        countdownSec = LIVE_REFRESH_MS / 1000;
-        updateTimerUI();
+    function stopLiveInterval() {
+      if (liveIntervalId) {
+        clearInterval(liveIntervalId);
+        liveIntervalId = null;
       }
-    }, LIVE_REFRESH_MS);
+      if (countdownTickId) {
+        clearInterval(countdownTickId);
+        countdownTickId = null;
+      }
+    }
+
+    function ensureLiveInterval() {
+      if (!usingLive()) {
+        stopLiveInterval();
+        setTimerUI();
+        return;
+      }
+
+      const isOpen = currentIsOpenSession();
+      const ms = isOpen ? LIVE_REFRESH_MS_OPEN : LIVE_REFRESH_MS_CLOSED;
+
+      // 同间隔已在跑时只重置倒计时，避免每次 loadLive 重建定时器
+      if (liveIntervalId && currentRefreshMs === ms) {
+        countdownSec = Math.floor(ms / 1000);
+        setTimerUI();
+        return;
+      }
+
+      stopLiveInterval();
+      currentRefreshMs = ms;
+      countdownSec = Math.floor(ms / 1000);
+
+      countdownTickId = setInterval(() => {
+        if (!usingLive() || liveReloading) return;
+        countdownSec = Math.max(0, countdownSec - 1);
+        setTimerUI();
+      }, 1000);
+
+      liveIntervalId = setInterval(async () => {
+        if (!usingLive() || liveReloading) return;
+        liveReloading = true;
+        setTimerUI();
+        try {
+          await reloadAll(true);
+        } finally {
+          liveReloading = false;
+          countdownSec = Math.floor(currentRefreshMs / 1000);
+          setTimerUI();
+        }
+      }, ms);
+
+      setTimerUI();
+    }
 
     window.addEventListener('resize', () => { render(); renderFlow(); });
-    reloadAll();
+    reloadAll(true);
   </script>
 </body>
 </html>
