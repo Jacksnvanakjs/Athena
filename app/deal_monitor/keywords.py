@@ -6,8 +6,8 @@ POSITIVE_KEYWORDS = [
     # 中文
     "算力协议", "算力服务", "计算能力", "数据中心", "机房", "托管", "租赁协议",
     "容量协议", "GPU", "训练", "推理", "智算", "多年期", "独家", "千兆瓦", "兆瓦",
+    "战略合作", "产品整合", "人工智能",
     # 英文（领域 + 合作语义混合）
-    # 英文
     "compute agreement", "capacity agreement", "cloud services agreement",
     "colocation", "hosting agreement", "data center lease", "AI infrastructure",
     "GPU deployment", "training capacity", "inference capacity",
@@ -15,9 +15,12 @@ POSITIVE_KEYWORDS = [
     "hyperscaler", "definitive agreement", "material definitive agreement",
     # 为了不让命中率为 0：加入少量“基础领域词”
     "lease", "data center", "data centre", "infrastructure", "cloud", "AI", "artificial intelligence",
+    # 企业 AI 平台 / Agent
+    "Agentforce", "Claudeforce", "AI agent", "agentic", "Anthropic", "OpenAI",
+    "Claude", "Copilot", "product integration", "strategic partnership",
 ]
 
-# 有效性兜底：必须至少包含一个明显的“算力/数据中心/GPU/容量”领域信号
+# 有效性兜底：必须至少包含一个明显的“算力/数据中心/GPU/容量/企业AI”领域信号
 HIGH_VALUE_TOKENS = [
     "ai",
     "artificial intelligence",
@@ -51,6 +54,17 @@ HIGH_VALUE_TOKENS = [
     "hyperscale",
     "advanced packaging",
     "infiniband",
+    # 企业 AI 平台
+    "anthropic",
+    "openai",
+    "claude",
+    "agentforce",
+    "claudeforce",
+    "ai agent",
+    "agentic",
+    "llm",
+    "generative ai",
+    "copilot",
 ]
 
 NEGATIVE_KEYWORDS = [
@@ -58,6 +72,12 @@ NEGATIVE_KEYWORDS = [
     "non-binding", "joint research", "academic collaboration",
     "谅解备忘录", "探索", "非约束",
 ]
+
+# strategic partnership 若伴随企业 AI/大模型产品信号，不当作负向
+_AI_SOFT_ESCAPE = (
+    "anthropic", "openai", "claude", "ai agent", "agentic", "agentforce",
+    "claudeforce", "llm", "generative ai", "copilot", "large language model",
+)
 
 COOPERATION_VERBS = [
     "sign", "signed", "signs", "enters", "enter into", "award", "awarded",
@@ -87,6 +107,9 @@ def has_negative_dominance(text: str) -> bool:
         if kw.lower() in norm:
             return True
     if "strategic partnership" in norm:
+        # 企业 AI / 大模型产品合作：不过度误杀
+        if any(tok in norm for tok in _AI_SOFT_ESCAPE):
+            return False
         has_amount = bool(re.search(r"\$[\d,.]+\s*(million|billion|m\b|b\b)", norm, re.I))
         has_term = "multi-year" in norm or "year agreement" in norm or "多年" in norm
         if not has_amount and not has_term:

@@ -58,6 +58,20 @@ PR_WIRE_FEEDS = [
     },
 ]
 
+# Google News：补抓 SaaS/Agent × 大模型合作（PRN/SEC 常漏）
+GOOGLE_NEWS_QUERIES = [
+    '(Anthropic OR OpenAI OR "AI agent" OR Agentforce OR Claudeforce) '
+    "(partnership OR collaboration OR integration) when:3d",
+    '"strategic partnership" (Anthropic OR OpenAI OR Claude) when:3d',
+]
+
+# Finnhub 公司新闻：覆盖 IR/Business Wire 通稿；仅粗筛后进 LLM
+FINNHUB_NEWS_TICKERS = [
+    "CRM", "MSFT", "GOOGL", "AMZN", "META", "ORCL", "NOW", "SNOW",
+    "ADBE", "PLTR", "IBM", "NVDA", "MRVL", "AVGO", "SMCI", "CRWV",
+]
+FINNHUB_NEWS_LOOKBACK_DAYS = 3
+
 # 未上市 T0 锚点视为极大市值
 UNLISTED_T0_MARKET_CAP = 1e12
 

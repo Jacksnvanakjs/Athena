@@ -46,6 +46,11 @@ THEME_TOKENS = (
     "memory interface", "network interface", "ethernet", "infiniband",
     "optical", "光子", "foundry", "advanced packaging", "chiplet",
     "semiconductor products", "wafer",
+    # SaaS / Agent / 大模型产品整合（Claudeforce 类）
+    "ai agent", "agentic", "agentforce", "claudeforce", "llm",
+    "large language model", "generative ai", "enterprise ai", "copilot",
+    "claude", "gpt-4", "gpt-5", "model integration", "ai assistant",
+    "product integration", "salesforce in claude",
 )
 
 # 强商业信号：有其一即可，不强制美元金额
@@ -56,6 +61,10 @@ COMMERCIAL_SIGNAL_TOKENS = (
     "lease agreement", "master services agreement", "offtake",
     "warrant", "multi-year", "years", "megawatt", "gigawatt",
     "$", "million", "billion",
+    # 软件/平台合作常见措辞
+    "strategic partnership", "expanded partnership", "expand", "collaboration",
+    "product integration", "integration", "plugin", "announce", "launches",
+    "launching", "jointly",
 )
 
 # 明显非目标：融资/并购等（兜底时直接放弃）
@@ -107,9 +116,13 @@ def heuristic_ai_deal_signal(item: RawItem) -> bool:
         return False
     if _has_any(blob, HARD_NEGATIVE_TOKENS) and not _has_any(
         blob,
-        ("data center", "data centre", "gpu", "custom semiconductor", "asic", "tpu", "colocation"),
+        (
+            "data center", "data centre", "gpu", "custom semiconductor", "asic", "tpu",
+            "colocation", "ai agent", "agentforce", "claudeforce", "claude", "llm",
+            "generative ai", "anthropic", "openai",
+        ),
     ):
-        # 纯融资/并购：直接否；若融资稿里同时写了 data center/GPU 等，仍交给主题判断
+        # 纯融资/并购：直接否；若融资稿里同时写了 data center/GPU/AI 平台等，仍交给主题判断
         if not _has_any(blob, THEME_TOKENS):
             return False
     if _has_any(blob, HARD_NEGATIVE_TOKENS) and not _has_any(blob, THEME_TOKENS):
@@ -138,18 +151,20 @@ def _build_prompt(items: list[RawItem]) -> str:
         )
 
     return (
-        "你是美股「AI 算力产业链」材料性商业协议筛选器。"
+        "你是美股「AI 产业链」材料性商业合作筛选器（含算力供给链 + 企业 AI 平台合作）。"
         "只根据标题和摘要判断，禁止脑补未出现的金额/对方/条款。\n\n"
         "用三道闸门决定 relevant（必须全过才 true）：\n"
         "闸门1 双方：存在两家不同公司（申报方/买方/卖方/合作方）。"
         "只有 Item 标题、无对方名 → false。\n"
         "闸门2 主题：属于下方「主题白名单」任一子类；不属于则 false。"
         "不要把主题窄化成「只有 GPU 租赁/机柜 MW」。\n"
-        "闸门3 商业信号：有材料性合同信号（不必有美元金额）。"
+        "闸门3 商业信号：有材料性合同/产品落地信号（不必有美元金额）。"
         "Item 1.01 / definitive|commercial|supply|capacity|lease agreement / "
-        "entered into / multi-year / MW|GW|数量 / 与采购挂钩的 warrant|equity "
-        "任一即可。纯仪式/认证/MOU → false。\n\n"
-        "【主题白名单】（子类通用，覆盖整条 AI 供给链）\n"
+        "entered into / multi-year / MW|GW|数量 / 与采购挂钩的 warrant|equity / "
+        "正式产品整合上线（plugin/agent/integration launch）/ "
+        "named frontier-model lab 的 expanded strategic partnership "
+        "任一即可。纯仪式/认证/MOU/无产品落地的口头加速合作 → false。\n\n"
+        "【主题白名单】\n"
         "T1 算力容量：GPU/加速器采购或租赁、集群、云/专用算力包年包容量\n"
         "T2 数据中心基建：托管/colo、机柜、电力/PPA、液冷，明确服务 AI/hyperscale\n"
         "T3 定制硅与芯片：ASIC/TPU/custom semiconductor|silicon|chip、"
@@ -157,22 +172,29 @@ def _build_prompt(items: list[RawItem]) -> str:
         "T4 AI 集群互联与光模块：以太网/InfiniBand/NIC/光互联/交换，明确 AI 训练/推理场景\n"
         "T5 AI 存储与先进封装：HBM、近存算、存储/内存控制器、foundry/advanced packaging "
         "且服务 AI 加速器\n"
-        "T6 其他：明确写给 AI 训练/推理/智算用的长期供应或 offtake\n\n"
-        "【模式正例】（抽象模板，勿死记单一公司）\n"
+        "T6 其他算力供应：明确写给 AI 训练/推理/智算用的长期供应或 offtake\n"
+        "T7 企业 AI 平台合作：美股 SaaS/CRM/数据/安全软件公司与 OpenAI/Anthropic/Google/"
+        "Microsoft 等大模型方，推出 Agent/Copilot/插件/工作流整合，或扩大战略合作且有"
+        "明确产品名/上线计划（如 Claudeforce、Salesforce in Claude）。"
+        "纯财报超预期、无新合作细节 → false；财报稿中若同时宣布上述产品合作 → true。\n\n"
+        "【模式正例】（抽象模板）\n"
         "- 美股芯片/光模块/DC 公司 + 云厂/hyperscaler + 正式商业协议/Item 1.01 → true\n"
         "- 算力/托管商 + 云厂或大模型公司 + 多年容量/MW 协议 → true\n"
         "- 供应链公司 + 采购挂钩 warrant/长期供应，标的是 AI 芯片或加速器生态 → true\n"
+        "- 美股 SaaS + Anthropic/OpenAI + 命名产品整合/Agent 上线 → true "
+        "(event_type=ai_platform_deal)\n"
         "【模式负例】\n"
         "- 索引页仅 Item 1.01 无对方/无标的；仪式合作；validated/certified；"
-        "机器人/消费电子/普通软件；信贷/发债/并购/私募；"
-        "无 AI 算力关联的纯地产/咨询 → false\n\n"
+        "机器人/消费电子；与大模型无关的普通软件功能更新；信贷/发债/并购/私募；"
+        "无产品落地的咨询/营销战略合作；纯 ETF/杠杆产品发行 → false\n\n"
         "角色与打分：\n"
-        "- anchor=更大/更核心方（常为云厂）；beneficiary=业务直接受益的美股公司；"
+        "- anchor=更大/更核心方（常为云厂或大模型公司）；beneficiary=业务直接受益的美股公司；"
         "禁止把小子公司映射成综合集团母公司；受益方无美股 ticker → false。\n"
-        "- llm_score：仪式/认证 0-40；弱合作 40-60；正式协议且过三闸 ≥70；"
+        "- llm_score：仪式/认证 0-40；弱合作 40-60；正式协议/命名产品整合且过三闸 ≥70；"
         "再有 warrant/金额/年限/容量 ≥80。\n"
-        "- SEC：过三闸时倾向 true，禁止因「没写美元」否决；"
-        "非 SEC 不确定则 false。event_type 默认 compute_deal。\n\n"
+        "- SEC 与通稿：过三闸时倾向 true，禁止因「没写美元」否决；"
+        "不确定且非 T7 产品整合则 false。"
+        "event_type：算力类用 compute_deal；T7 用 ai_platform_deal。\n\n"
         "只返回 JSON（不要 ```），格式：\n"
         '{"items":[{"source_url":"...","is_relevant":true,"anchor_name":"...","beneficiary_name":"...","anchor_ticker":"NVDA","beneficiary_ticker":"RIOT","event_type":"compute_deal","llm_score":78,"reason":"..."}]}\n\n'
         f"待分析新闻：\n{json.dumps(payload, ensure_ascii=False)}"

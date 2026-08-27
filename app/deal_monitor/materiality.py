@@ -2,7 +2,7 @@
 
 import re
 
-from app.deal_monitor.keywords import NEGATIVE_KEYWORDS
+from app.deal_monitor.keywords import NEGATIVE_KEYWORDS, _AI_SOFT_ESCAPE
 
 
 def score_materiality(text: str, source: str, matched_keywords: list[str]) -> int:
@@ -32,10 +32,20 @@ def score_materiality(text: str, source: str, matched_keywords: list[str]) -> in
     elif re.search(r"\d+\s*gpu", norm):
         score += 10
 
-    if source in ("pr_newswire", "globe", "sec_8k"):
+    # 企业 AI 平台产品落地信号
+    soft_ai = any(tok in norm for tok in _AI_SOFT_ESCAPE)
+    if soft_ai and re.search(
+        r"integration|plugin|agentforce|claudeforce|copilot|product launch|announc",
+        norm,
+    ):
+        score += 18
+
+    if source in ("pr_newswire", "globe", "sec_8k") or source.startswith(
+        ("finnhub:", "google_news")
+    ):
         score += 8
 
-    coop_verbs = ["signs", "signed", "enters", "awards", "awarded", "lease"]
+    coop_verbs = ["signs", "signed", "enters", "awards", "awarded", "lease", "collaboration"]
     if any(v in norm for v in coop_verbs):
         score += 5
 
@@ -54,7 +64,7 @@ def score_materiality(text: str, source: str, matched_keywords: list[str]) -> in
             else:
                 score -= 15
 
-    if "strategic partnership" in norm and not amount_match:
+    if "strategic partnership" in norm and not amount_match and not soft_ai:
         score -= 15
 
     return max(0, min(100, score))

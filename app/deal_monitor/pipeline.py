@@ -24,6 +24,7 @@ from app.deal_monitor.entities import Entity, registry
 from app.deal_monitor.entity_resolver import parse_sec_filer, resolve_entity
 from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
+from app.deal_monitor.fetchers.company_ir import fetch_company_ir_and_aggregators
 from app.deal_monitor.keywords import is_update_headline, passes_keyword_filter
 from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
@@ -258,6 +259,7 @@ def _save_event(
     matched_keywords: list[str],
     is_update: bool,
     beneficiary: Entity,
+    event_type: str = EVENT_TYPE,
 ) -> DealEvent:
     h_hash = headline_hash(item.headline)
     event = DealEvent(
@@ -278,7 +280,7 @@ def _save_event(
         tier_pair=roles.tier_pair,
         materiality_score=score,
         matched_keywords=json.dumps(matched_keywords, ensure_ascii=False),
-        event_type=EVENT_TYPE,
+        event_type=event_type or EVENT_TYPE,
         is_update=is_update,
     )
     db.add(event)
@@ -384,7 +386,11 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         if llm_decision.llm_score < 70:
             stats["reason"] = f"LLM 材料性不足 {llm_decision.llm_score} < 70"
             return stats
-        score = min(100, max(score, min(llm_decision.llm_score, score + 10)))
+        # 企业 AI 平台合作：规则分可能偏低，允许 LLM 分数更多参与
+        if (llm_decision.event_type or "") == "ai_platform_deal":
+            score = min(100, max(score, llm_decision.llm_score))
+        else:
+            score = min(100, max(score, min(llm_decision.llm_score, score + 10)))
     threshold = score_threshold(roles.tier_pair)
     if score < threshold:
         stats["reason"] = f"材料性 {score} < {threshold}"
@@ -400,6 +406,9 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         else:
             beneficiaries = [e for e in (entity_b, entity_a) if e.ticker]
 
+    event_type = (
+        (llm_decision.event_type if llm_decision else None) or EVENT_TYPE
+    )
     saved = []
     for beneficiary in beneficiaries:
         ticker = beneficiary.ticker
@@ -413,7 +422,9 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             logger.info("7 天去重跳过 %s", ticker)
             continue
 
-        event = _save_event(db, item, roles, score, matched, is_update, beneficiary)
+        event = _save_event(
+            db, item, roles, score, matched, is_update, beneficiary, event_type=event_type
+        )
         await _maybe_push(db, event, roles.should_push)
         saved.append(event.beneficiary_ticker)
 
@@ -430,14 +441,25 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
 
 
 async def run_pipeline() -> dict:
-    """执行一轮 PR RSS 抓取与处理。"""
+    """执行一轮 RSS / Finnhub / Google News / SEC 抓取与处理。"""
     registry.load_seed()
     pr_items = await fetch_pr_wires()
+    agg_items = await fetch_company_ir_and_aggregators()
     sec_items = await fetch_sec_8k()
-    items = pr_items + sec_items
+    # URL 去重：同一通稿可能同时出现在 PRN / Finnhub / Google
+    items: list[RawItem] = []
+    seen_fetch: set[str] = set()
+    for batch in (pr_items, agg_items, sec_items):
+        for item in batch:
+            url = (item.source_url or "").strip()
+            if not url or url in seen_fetch:
+                continue
+            seen_fetch.add(url)
+            items.append(item)
     summary = {
         "fetched": len(items),
         "fetched_pr": len(pr_items),
+        "fetched_agg": len(agg_items),
         "fetched_sec_8k": len(sec_items),
         "fetched_new": 0,
         "processed": 0,

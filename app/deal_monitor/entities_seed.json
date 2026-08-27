@@ -37,12 +37,14 @@
     {"names": ["IBM", "International Business Machines"], "ticker": "IBM"},
     {"names": ["Cisco", "Cisco Systems"], "ticker": "CSCO"},
     {"names": ["Salesforce"], "ticker": "CRM"},
+    {"names": ["ServiceNow"], "ticker": "NOW"},
+    {"names": ["Adobe", "Adobe Inc"], "ticker": "ADBE"},
     {"names": ["Snowflake"], "ticker": "SNOW"},
     {"names": ["Palantir"], "ticker": "PLTR"}
   ],
   "unlisted_anchors": [
     {"names": ["OpenAI", "Open AI"], "id": "openai"},
-    {"names": ["Anthropic"], "id": "anthropic"},
+    {"names": ["Anthropic", "Claude"], "id": "anthropic"},
     {"names": ["xAI", "X.AI"], "id": "xai"}
   ],
   "t0_listed_tickers": ["MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "ORCL", "AAPL", "TSM", "SFTBY"]
