@@ -127,15 +127,18 @@ def _dedup_blocked(
     db: Session,
     beneficiary_ticker: str,
     is_update: bool,
+    anchor_key: str | None = None,
 ) -> bool:
+    """同一受益标的 7 日内不重复入库（覆盖 compute_deal / ai_platform_deal）。"""
+    del anchor_key  # 预留：若以后按锚点细分可再用
     if is_update:
         return False
     since = now_beijing() - timedelta(days=DEAL_DEDUP_DAYS)
+    # 不能只按 compute_deal 过滤，否则 ai_platform_deal 会互相挡不住（Claudeforce 刷屏根因）
     existing = (
         db.query(DealEvent)
         .filter(
             DealEvent.beneficiary_ticker == beneficiary_ticker,
-            DealEvent.event_type == EVENT_TYPE,
             DealEvent.published_at >= since,
             DealEvent.is_update.is_(False),
         )
@@ -242,6 +245,11 @@ async def retry_unpushed_events(db: Session, limit: int = 20) -> int:
     )
     n = 0
     for event in pending:
+        # 同受益标的 24h 内已成功推过 → 不再补推转载稿，避免刷屏
+        if _push_rate_limited(db, event.beneficiary_ticker):
+            event.push_channel = "rate_limited"
+            db.add(event)
+            continue
         await _maybe_push(db, event, roles_should_push=True)
         if _push_succeeded(event):
             n += 1
@@ -409,6 +417,7 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
     event_type = (
         (llm_decision.event_type if llm_decision else None) or EVENT_TYPE
     )
+    anchor_key = (roles.anchor.ticker or roles.anchor.name or "").strip() or None
     saved = []
     for beneficiary in beneficiaries:
         ticker = beneficiary.ticker
@@ -418,8 +427,8 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         if _is_duplicate(db, item.source_url, h_hash, ticker):
             stats["reason"] = "URL/标题去重"
             continue
-        if _dedup_blocked(db, ticker, is_update):
-            logger.info("7 天去重跳过 %s", ticker)
+        if _dedup_blocked(db, ticker, is_update, anchor_key=anchor_key):
+            logger.info("7 天去重跳过 %s (anchor=%s)", ticker, anchor_key)
             continue
 
         event = _save_event(
