@@ -59,8 +59,21 @@ SERVERCHAN_SENDKEY = os.getenv("SERVERCHAN_SENDKEY", "")
 TURSO_DATABASE_URL = _normalize_turso_url(os.getenv("TURSO_DATABASE_URL", "")) if os.getenv("TURSO_DATABASE_URL") else ""
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 USE_TURSO = bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)
+def _resolve_funds_source_file() -> str:
+    if env_path := os.getenv("FUNDS_SOURCE_FILE"):
+        return env_path
+    candidates = (
+        BASE_DIR / "文档" / "额度数据来源.txt",
+        BASE_DIR / "额度数据来源.txt",
+    )
+    for path in candidates:
+        if path.is_file():
+            return str(path)
+    return str(candidates[0])
+
+
 DATABASE_URL = _resolve_database_url()
-FUNDS_SOURCE_FILE = os.getenv("FUNDS_SOURCE_FILE", str(BASE_DIR / "额度数据来源.txt"))
+FUNDS_SOURCE_FILE = _resolve_funds_source_file()
 TIMEZONE = os.getenv("TIMEZONE", "Asia/Shanghai")
 ENABLE_SCHEDULER = os.getenv("ENABLE_SCHEDULER", "true").lower() == "true"
 SCRAPE_SECRET = os.getenv("SCRAPE_SECRET", "")
