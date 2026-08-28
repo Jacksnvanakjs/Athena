@@ -39,6 +39,7 @@ class Entity:
 class EntityRegistry:
     def __init__(self):
         self._aliases: list[tuple[str, str | None, str | None]] = []
+        self._channel_partners: list[tuple[str, str | None]] = []
         self._t0_listed: set[str] = set()
         self._loaded = False
 
@@ -59,6 +60,11 @@ class EntityRegistry:
             for name in item.get("names", []):
                 self._aliases.append((name.lower(), None, uid))
         self._t0_listed = {t.upper() for t in data.get("t0_listed_tickers", [])}
+        self._channel_partners = []
+        for item in data.get("channel_partners", []):
+            ticker = item.get("ticker")
+            for name in item.get("names", []):
+                self._channel_partners.append((name.lower(), ticker))
         self._aliases.sort(key=lambda x: len(x[0]), reverse=True)
         self._loaded = True
 
@@ -83,6 +89,19 @@ class EntityRegistry:
     def is_t0_listed_seed(self, ticker: str | None) -> bool:
         self.load_seed()
         return bool(ticker and ticker.upper() in self._t0_listed)
+
+    def is_channel_partner(self, name: str = "", ticker: str | None = None) -> bool:
+        """IT 渠道商/分销商，不应作为合作双方入库。"""
+        self.load_seed()
+        lower = (name or "").strip().lower()
+        norm = self._normalize_alias_key(name) if name else ""
+        tick = (ticker or "").upper()
+        for alias, pticker in self._channel_partners:
+            if tick and pticker and tick == pticker.upper():
+                return True
+            if lower == alias or norm == alias:
+                return True
+        return False
 
     def lookup_name(self, name: str) -> Entity | None:
         """按公司名查种子库（精确/去后缀匹配），不依赖 LLM ticker。"""

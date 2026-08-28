@@ -37,6 +37,13 @@ TICKER_IN_TEXT_RE = re.compile(
     re.I,
 )
 
+# 「available through X, Y, and Z」类渠道名单语境
+CHANNEL_CUE_RE = re.compile(
+    r"\b(?:available|sold|distributed|offered|carried)\s+through\b|"
+    r"\b(?:authorized\s+)?(?:reseller|distributor|channel\s+partner)s?\b",
+    re.I,
+)
+
 
 def _normalize_name(name: str) -> str:
     name = name.strip()
@@ -85,6 +92,16 @@ def extract_tickers_from_text(text: str) -> list[str]:
         if ticker and ticker not in found:
             found.append(ticker)
     return found
+
+
+def is_channel_partner_entity(entity: Entity, context: str = "") -> bool:
+    """判断实体是否为渠道商（含 MSI 稿里裸写的 ASI）。"""
+    if registry.is_channel_partner(entity.name, entity.ticker):
+        return True
+    norm = registry._normalize_alias_key(entity.name or "")
+    if norm == "asi" and CHANNEL_CUE_RE.search(context):
+        return True
+    return False
 
 
 def _lookup_seed(name: str) -> Entity | None:

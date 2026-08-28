@@ -21,7 +21,11 @@ from app.deal_monitor.config import (
     DEAL_USE_LLM,
 )
 from app.deal_monitor.entities import Entity, registry
-from app.deal_monitor.entity_resolver import parse_sec_filer, resolve_entity
+from app.deal_monitor.entity_resolver import (
+    is_channel_partner_entity,
+    parse_sec_filer,
+    resolve_entity,
+)
 from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
 from app.deal_monitor.fetchers.company_ir import fetch_company_ir_and_aggregators
@@ -57,6 +61,10 @@ def _same_company(a: Entity, b: Entity) -> bool:
     na = (a.name or "").strip().lower()
     nb = (b.name or "").strip().lower()
     return bool(na and nb and na == nb)
+
+
+def _exclude_channel_partners(entities: list[Entity], context: str) -> list[Entity]:
+    return [e for e in entities if not is_channel_partner_entity(e, context)]
 
 
 def _cap_billions(cap: float | None) -> str:
@@ -334,7 +342,10 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             stats["reason"] = "SEC 8-K 未解析申报方"
             return stats
         entity_a = await resolve_entity(filer, context=text)
-        entities = [e for e in registry.extract_entities(text) if not _same_company(e, entity_a)]
+        entities = _exclude_channel_partners(
+            [e for e in registry.extract_entities(text) if not _same_company(e, entity_a)],
+            text,
+        )
         if entities:
             pair = infer_partnership_pair(item.headline, item.summary, [entity_a, *entities])
             entity_b = pair[1] if pair else entities[0]
@@ -348,7 +359,7 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             _, b_name = pair_text
             entity_b = await resolve_entity(b_name, context=text)
     else:
-        entities = registry.extract_entities(text)
+        entities = _exclude_channel_partners(registry.extract_entities(text), text)
         if len(entities) < 2:
             pair_text = infer_partnership_pair_text(item.headline, item.summary)
             if not pair_text:
@@ -376,6 +387,10 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
 
     if _same_company(entity_a, entity_b):
         stats["reason"] = "双方为同一公司，不是合作事件"
+        return stats
+
+    if is_channel_partner_entity(entity_a, text) or is_channel_partner_entity(entity_b, text):
+        stats["reason"] = "含渠道商/分销商，非合作方"
         return stats
 
     await enrich_entity_tiers(db, [entity_a, entity_b])

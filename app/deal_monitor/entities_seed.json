@@ -47,5 +47,17 @@
     {"names": ["Anthropic", "Claude"], "id": "anthropic"},
     {"names": ["xAI", "X.AI"], "id": "xai"}
   ],
-  "t0_listed_tickers": ["MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "ORCL", "AAPL", "TSM", "SFTBY"]
+  "t0_listed_tickers": ["MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "ORCL", "AAPL", "TSM", "SFTBY"],
+  "channel_partners": [
+    {"names": ["Newegg"], "ticker": "NEGG"},
+    {"names": ["D&H", "D&H Distributing", "D H Distributing"], "ticker": null},
+    {"names": ["ASI Corporation", "ASI Computer Systems"], "ticker": null},
+    {"names": ["Ingram Micro"], "ticker": "INGM"},
+    {"names": ["TD Synnex", "Synnex", "SYNNEX"], "ticker": "SNX"},
+    {"names": ["CDW", "CDW Corporation"], "ticker": "CDW"},
+    {"names": ["Arrow Electronics"], "ticker": "ARW"},
+    {"names": ["Avnet"], "ticker": "AVT"},
+    {"names": ["Tech Data"], "ticker": null},
+    {"names": ["WESCO International", "WESCO"], "ticker": "WCC"}
+  ]
 }
