@@ -22,6 +22,9 @@
     {"names": ["Micron Technology", "Micron"], "ticker": "MU"},
     {"names": ["Broadcom"], "ticker": "AVGO"},
     {"names": ["Marvell Technology", "Marvell"], "ticker": "MRVL"},
+    {"names": ["Lumentum", "LITE"], "ticker": "LITE"},
+    {"names": ["Coherent", "COHR"], "ticker": "COHR"},
+    {"names": ["Best Buy"], "ticker": "BBY"},
     {"names": ["Equinix"], "ticker": "EQIX"},
     {"names": ["Digital Realty"], "ticker": "DLR"},
     {"names": ["IREN", "Iris Energy"], "ticker": "IREN"},
@@ -45,6 +48,7 @@
   "unlisted_anchors": [
     {"names": ["OpenAI", "Open AI"], "id": "openai"},
     {"names": ["Anthropic", "Claude"], "id": "anthropic"},
+    {"names": ["Hugging Face", "HuggingFace"], "id": "huggingface"},
     {"names": ["xAI", "X.AI"], "id": "xai"}
   ],
   "t0_listed_tickers": ["MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "ORCL", "AAPL", "TSM", "SFTBY"],

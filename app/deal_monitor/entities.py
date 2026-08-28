@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
@@ -137,12 +138,20 @@ class EntityRegistry:
                 break
         return n
 
+    @staticmethod
+    def _alias_in_text(alias: str, norm: str) -> bool:
+        """短别名（如 bp）要求词边界，避免 URL 乱码误匹配。"""
+        if len(alias) <= 4:
+            return bool(re.search(rf"\b{re.escape(alias)}\b", norm))
+        return alias in norm
+
     def extract_entities(self, text: str) -> list[Entity]:
         self.load_seed()
         norm = text.lower()
         found: dict[str, Entity] = {}
         for alias, ticker, uid in self._aliases:
-            if alias in norm:
+            if not self._alias_in_text(alias, norm):
+                continue
                 key = ticker or uid or alias
                 if key not in found:
                     display = alias

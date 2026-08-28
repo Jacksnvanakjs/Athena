@@ -62,12 +62,13 @@ def _feed_url(query: str) -> str:
     return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
 
 
-async def fetch_google_news() -> list[RawItem]:
+async def fetch_google_news(queries: list[str] | None = None) -> list[RawItem]:
+    query_list = queries or GOOGLE_NEWS_QUERIES
     results: list[RawItem] = []
     seen: set[str] = set()
     headers = {"User-Agent": "AthenaDealMonitor/1.0"}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=40) as client:
-        for query in GOOGLE_NEWS_QUERIES:
+        for query in query_list:
             url = _feed_url(query)
             try:
                 resp = await client.get(url)

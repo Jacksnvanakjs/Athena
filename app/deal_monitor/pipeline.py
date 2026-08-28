@@ -36,6 +36,7 @@ from app.deal_monitor.materiality import score_materiality
 from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pair_text
 from app.deal_monitor.tiers import assign_roles, score_threshold
 from app.notifier import notify
+from app.source_url_guard import is_test_source_url
 from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
@@ -314,6 +315,9 @@ def _save_event(
 
 async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | None = None) -> dict:
     stats = {"skipped": True, "reason": ""}
+    if is_test_source_url(item.source_url):
+        stats["reason"] = "测试/占位链接，不入库"
+        return stats
     text = f"{item.headline}\n{item.summary}"
     matched: list[str] = []
 

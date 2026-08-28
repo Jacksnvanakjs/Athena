@@ -70,6 +70,49 @@ class DealEvent(Base):
     push_channel = Column(String(30), nullable=True)
 
 
+class NvdaSignalEvent(Base):
+    __tablename__ = "nvda_signal_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    published_at = Column(DateTime, nullable=False, index=True)
+    fetched_at = Column(DateTime, nullable=False)
+    headline = Column(String(500), nullable=False)
+    summary = Column(Text, nullable=True)
+    source = Column(String(50), nullable=False)
+    source_url = Column(String(500), nullable=False, index=True)
+    headline_hash = Column(String(32), nullable=False, index=True)
+    beneficiary_ticker = Column(String(20), nullable=False, index=True)
+    beneficiary_name = Column(String(100), nullable=False)
+    beneficiary_tier = Column(String(10), nullable=False)
+    beneficiary_market_cap_usd = Column(Float, nullable=True)
+    beneficiary_role = Column(String(20), nullable=False, default="direct")
+    signal_tier = Column(String(20), nullable=False, index=True)
+    action_type = Column(String(40), nullable=False)
+    materiality_score = Column(Integer, nullable=False)
+    confidence = Column(Integer, nullable=False, default=0)
+    status = Column(String(20), nullable=False, default="confirmed")
+    strategy = Column(String(40), nullable=False)
+    buy_window = Column(String(200), nullable=False, default="")
+    sell_window = Column(String(200), nullable=False, default="")
+    sell_plan_json = Column(Text, nullable=True)
+    prior_a_event_id = Column(Integer, nullable=True)
+    prior_a_days_ago = Column(Integer, nullable=True)
+    position_pct = Column(Float, nullable=False, default=1.0)
+    buy_ok = Column(Boolean, nullable=False, default=True)
+    chase_risk = Column(String(20), nullable=False, default="low")
+    pushed_at = Column(DateTime, nullable=True)
+    push_channel = Column(String(30), nullable=True)
+
+
+class NvdaSignalSeenUrl(Base):
+    __tablename__ = "nvda_signal_seen_urls"
+
+    source_url = Column(String(500), primary_key=True)
+    headline_hash = Column(String(32), nullable=True, index=True)
+    seen_at = Column(DateTime, nullable=False)
+    relevant = Column(Boolean, nullable=True)
+
+
 class DealSeenUrl(Base):
     """已分析过的稿件 URL，避免每轮重复送 LLM，也避免漏掉窗口外的旧稿。"""
 

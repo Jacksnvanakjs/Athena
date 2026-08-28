@@ -6,6 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.config import CHANGE_HIGHLIGHT_DAYS, FUNDS_SOURCE_FILE, SCRAPE_SECRET, SCRAPE_TIMES, TIMEZONE, USE_TURSO
 from app.database import Fund, QuotaRecord, run_with_db_retry
+from app.nvda_signal.trade_window import strategy_label
+from app.source_url_guard import is_test_source_url
 from app.service import run_scrape_and_notify
 from app.utils import is_trading_day, now_beijing
 
@@ -151,13 +153,15 @@ async def cron_scrape(secret: str = Query(...)):
 
 @router.get("/status")
 def system_status():
-    from app.config import DEAL_POLL_INTERVAL_MIN, ENABLE_SCHEDULER
-    from app.database import DealEvent
+    from app.config import DEAL_POLL_INTERVAL_MIN, ENABLE_SCHEDULER, NVDA_SIGNAL_ENABLED
+    from app.database import DealEvent, NvdaSignalEvent
 
-    def _deal_count(db: Session):
-        return db.query(DealEvent).count()
+    def _counts(db: Session):
+        deals = [e for e in db.query(DealEvent).all() if not is_test_source_url(e.source_url)]
+        nvda = [e for e in db.query(NvdaSignalEvent).all() if not is_test_source_url(e.source_url)]
+        return len(deals), len(nvda)
 
-    deal_total = run_with_db_retry(_deal_count)
+    deal_total, nvda_total = run_with_db_retry(_counts)
     return {
         "is_trading_day": is_trading_day(),
         "scrape_times": [f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES],
@@ -168,6 +172,8 @@ def system_status():
         "deal_monitor": {
             "poll_interval_min": DEAL_POLL_INTERVAL_MIN,
             "events_total": deal_total,
+            "nvda_signal_total": nvda_total,
+            "nvda_signal_enabled": NVDA_SIGNAL_ENABLED,
         },
     }
 
@@ -198,12 +204,26 @@ async def heatmap_snapshot(force: bool = Query(default=True)):
     return await save_daily_snapshot(force=force)
 
 
-# ── AI 合作快讯 ──
+# ── AI 合作快讯 + 黄仁勋动向 ──
+
+FEED_AI = "ai_cooperation"
+FEED_NVDA = "nvda_signal"
+
+
+def _push_ok(event) -> bool:
+    return bool(
+        event.pushed_at
+        and event.push_channel
+        and event.push_channel
+        not in {"none", "failed", "unconfigured", "disabled", "rate_limited"}
+    )
 
 
 def _deal_to_dict(event) -> dict:
     return {
         "id": event.id,
+        "category": FEED_AI,
+        "category_label": "AI合作",
         "published_at": event.published_at.isoformat() if event.published_at else None,
         "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
         "headline": event.headline,
@@ -224,94 +244,198 @@ def _deal_to_dict(event) -> dict:
         "is_update": event.is_update,
         "pushed_at": event.pushed_at.isoformat() if event.pushed_at else None,
         "push_channel": event.push_channel,
-        "pushed": bool(
-            event.pushed_at
-            and event.push_channel
-            and event.push_channel
-            not in {"none", "failed", "unconfigured", "disabled", "rate_limited"}
-        ),
+        "pushed": _push_ok(event),
+        "signal_tier": None,
+        "strategy": None,
+        "buy_window": None,
+        "sell_window": None,
+        "buy_ok": None,
+        "confidence": None,
+    }
+
+
+def _nvda_to_dict(event) -> dict:
+    return {
+        "id": event.id,
+        "category": FEED_NVDA,
+        "category_label": "黄仁勋",
+        "published_at": event.published_at.isoformat() if event.published_at else None,
+        "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
+        "headline": event.headline,
+        "summary": event.summary,
+        "source": event.source,
+        "source_url": event.source_url,
+        "anchor_name": "NVIDIA",
+        "anchor_ticker": "NVDA",
+        "anchor_tier": "T0",
+        "beneficiary_ticker": event.beneficiary_ticker,
+        "beneficiary_name": event.beneficiary_name,
+        "beneficiary_tier": event.beneficiary_tier,
+        "beneficiary_market_cap_usd": event.beneficiary_market_cap_usd,
+        "tier_pair": event.signal_tier,
+        "materiality_score": event.materiality_score,
+        "matched_keywords": event.action_type,
+        "event_type": event.action_type,
+        "is_update": False,
+        "pushed_at": event.pushed_at.isoformat() if event.pushed_at else None,
+        "push_channel": event.push_channel,
+        "pushed": _push_ok(event),
+        "signal_tier": event.signal_tier,
+        "strategy": event.strategy,
+        "buy_window": event.buy_window,
+        "sell_window": event.sell_window,
+        "buy_ok": event.buy_ok,
+        "confidence": event.confidence,
+        "position_pct": event.position_pct,
+        "chase_risk": event.chase_risk,
+        "prior_a_days_ago": event.prior_a_days_ago,
+        "strategy_label": strategy_label(event.strategy),
     }
 
 
 @router.get("/deals")
 def list_deals(
     days: int = Query(default=7, ge=1, le=90),
+    category: str = Query(default="all"),
     tier_pair: str | None = Query(default=None),
+    signal_tier: str | None = Query(default=None),
     min_score: int = Query(default=0, ge=0, le=100),
     pushed_only: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
 ):
-    from sqlalchemy import desc
-
-    from app.database import DealEvent
-    from app.utils import now_beijing
+    from app.database import DealEvent, NvdaSignalEvent
 
     since = now_beijing() - timedelta(days=days)
+    if category not in ("all", FEED_AI, FEED_NVDA):
+        raise HTTPException(status_code=400, detail="category 支持: all, ai_cooperation, nvda_signal")
 
     def _query(db: Session):
-        q = db.query(DealEvent).filter(DealEvent.published_at >= since)
-        if tier_pair:
-            q = q.filter(DealEvent.tier_pair == tier_pair)
-        if min_score:
-            q = q.filter(DealEvent.materiality_score >= min_score)
-        if pushed_only:
-            q = q.filter(
-                DealEvent.pushed_at.isnot(None),
-                DealEvent.push_channel.isnot(None),
-                ~DealEvent.push_channel.in_(
-                    ["none", "failed", "unconfigured", "disabled", "rate_limited"]
-                ),
-            )
-        rows = q.order_by(desc(DealEvent.published_at)).limit(limit).all()
-        return [_deal_to_dict(r) for r in rows]
+        rows: list[dict] = []
+
+        if category in ("all", FEED_AI):
+            q = db.query(DealEvent).filter(DealEvent.published_at >= since)
+            if tier_pair:
+                q = q.filter(DealEvent.tier_pair == tier_pair)
+            if min_score:
+                q = q.filter(DealEvent.materiality_score >= min_score)
+            if pushed_only:
+                q = q.filter(
+                    DealEvent.pushed_at.isnot(None),
+                    DealEvent.push_channel.isnot(None),
+                    ~DealEvent.push_channel.in_(
+                        ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+                    ),
+                )
+            for r in q.order_by(desc(DealEvent.published_at)).limit(limit).all():
+                if is_test_source_url(r.source_url):
+                    continue
+                rows.append(_deal_to_dict(r))
+
+        if category in ("all", FEED_NVDA):
+            q = db.query(NvdaSignalEvent).filter(NvdaSignalEvent.published_at >= since)
+            if signal_tier:
+                q = q.filter(NvdaSignalEvent.signal_tier == signal_tier.upper())
+            if min_score:
+                q = q.filter(NvdaSignalEvent.materiality_score >= min_score)
+            if pushed_only:
+                q = q.filter(
+                    NvdaSignalEvent.pushed_at.isnot(None),
+                    NvdaSignalEvent.push_channel.isnot(None),
+                    ~NvdaSignalEvent.push_channel.in_(
+                        ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+                    ),
+                )
+            for r in q.order_by(desc(NvdaSignalEvent.published_at)).limit(limit).all():
+                if is_test_source_url(r.source_url):
+                    continue
+                rows.append(_nvda_to_dict(r))
+
+        rows.sort(key=lambda x: x.get("published_at") or "", reverse=True)
+        return rows[:limit]
 
     return run_with_db_retry(_query)
 
 
 @router.get("/deals/stats")
-def deals_stats(days: int = Query(default=7, ge=1, le=90)):
-    from sqlalchemy import func
-
-    from app.database import DealEvent
-    from app.utils import now_beijing
+def deals_stats(
+    days: int = Query(default=7, ge=1, le=90),
+    category: str = Query(default="all"),
+):
+    from app.database import DealEvent, NvdaSignalEvent
 
     since = now_beijing() - timedelta(days=days)
 
     def _query(db: Session):
-        total = db.query(DealEvent).filter(DealEvent.published_at >= since).count()
-        pushed = (
-            db.query(DealEvent)
-            .filter(
-                DealEvent.published_at >= since,
-                DealEvent.pushed_at.isnot(None),
-                DealEvent.push_channel.isnot(None),
-                ~DealEvent.push_channel.in_(
-                    ["none", "failed", "unconfigured", "disabled", "rate_limited"]
-                ),
+        ai_total = ai_pushed = 0
+        nvda_total = nvda_pushed = 0
+        by_tier_pair: dict[str, int] = {}
+
+        if category in ("all", FEED_AI):
+            ai_total = (
+                db.query(DealEvent)
+                .filter(DealEvent.published_at >= since)
+                .all()
             )
-            .count()
-        )
-        pairs = (
-            db.query(DealEvent.tier_pair, func.count(DealEvent.id))
-            .filter(DealEvent.published_at >= since)
-            .group_by(DealEvent.tier_pair)
-            .all()
-        )
+            ai_total = len([e for e in ai_total if not is_test_source_url(e.source_url)])
+            ai_pushed = (
+                db.query(DealEvent)
+                .filter(
+                    DealEvent.published_at >= since,
+                    DealEvent.pushed_at.isnot(None),
+                    DealEvent.push_channel.isnot(None),
+                    ~DealEvent.push_channel.in_(
+                        ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+                    ),
+                )
+                .all()
+            )
+            ai_pushed = len([e for e in ai_pushed if not is_test_source_url(e.source_url)])
+            pairs_raw = (
+                db.query(DealEvent)
+                .filter(DealEvent.published_at >= since)
+                .all()
+            )
+            by_tier_pair: dict[str, int] = {}
+            for e in pairs_raw:
+                if is_test_source_url(e.source_url):
+                    continue
+                by_tier_pair[e.tier_pair] = by_tier_pair.get(e.tier_pair, 0) + 1
+
+        if category in ("all", FEED_NVDA):
+            nvda_rows = db.query(NvdaSignalEvent).filter(NvdaSignalEvent.published_at >= since).all()
+            nvda_rows = [e for e in nvda_rows if not is_test_source_url(e.source_url)]
+            nvda_total = len(nvda_rows)
+            nvda_pushed = len([
+                e for e in nvda_rows
+                if e.pushed_at and e.push_channel
+                and e.push_channel not in {"none", "failed", "unconfigured", "disabled", "rate_limited"}
+            ])
+
         return {
             "days": days,
-            "total": total,
-            "pushed": pushed,
-            "by_tier_pair": {p: c for p, c in pairs},
+            "category": category,
+            "total": ai_total + nvda_total,
+            "pushed": ai_pushed + nvda_pushed,
+            "ai_cooperation_total": ai_total,
+            "ai_cooperation_pushed": ai_pushed,
+            "nvda_signal_total": nvda_total,
+            "nvda_signal_pushed": nvda_pushed,
+            "by_tier_pair": by_tier_pair,
         }
 
     return run_with_db_retry(_query)
 
 
 @router.get("/deals/{deal_id}")
-def get_deal(deal_id: int):
-    from app.database import DealEvent
+def get_deal(deal_id: int, category: str = Query(default=FEED_AI)):
+    from app.database import DealEvent, NvdaSignalEvent
 
     def _query(db: Session):
+        if category == FEED_NVDA:
+            event = db.query(NvdaSignalEvent).filter(NvdaSignalEvent.id == deal_id).first()
+            if not event:
+                raise HTTPException(status_code=404, detail="未找到")
+            return _nvda_to_dict(event)
         event = db.query(DealEvent).filter(DealEvent.id == deal_id).first()
         if not event:
             raise HTTPException(status_code=404, detail="未找到")
@@ -323,8 +447,15 @@ def get_deal(deal_id: int):
 @router.post("/deals/run")
 async def run_deals(token: str = Query(default="")):
     from app.config import DEAL_ADMIN_TOKEN
-    from app.deal_monitor.pipeline import run_pipeline
+    from app.deal_monitor.pipeline import run_pipeline as run_deal_pipeline
+    from app.nvda_signal.pipeline import run_pipeline as run_nvda_pipeline
 
     if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="无效 token")
-    return await run_pipeline()
+    deal_result = await run_deal_pipeline()
+    nvda_result = await run_nvda_pipeline()
+    return {
+        **deal_result,
+        "nvda_signal": nvda_result,
+        "saved": (deal_result.get("saved") or 0) + (nvda_result.get("saved") or 0),
+    }

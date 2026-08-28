@@ -23,17 +23,17 @@
       color: var(--text);
       min-height: 100vh;
     }
-    .container { max-width: 1280px; margin: 0 auto; padding: 24px 20px; }
+    .container { max-width: 1280px; margin: 0 auto; padding: 20px 24px 32px; }
     header {
       display: flex;
       justify-content: space-between;
-      align-items: center;
-      margin-bottom: 20px;
+      align-items: flex-start;
+      margin-bottom: 16px;
       flex-wrap: wrap;
       gap: 12px;
     }
-    h1 { font-size: 1.5rem; font-weight: 600; }
-    .sub { color: var(--text-muted); font-size: 0.85rem; margin-top: 4px; }
+    h1 { font-size: 1.45rem; font-weight: 600; line-height: 1.3; }
+    .sub { color: var(--text-muted); font-size: 0.84rem; margin-top: 6px; line-height: 1.5; }
     .btn {
       padding: 8px 16px;
       border: none;
@@ -53,40 +53,50 @@
       border-left: 4px solid var(--accent);
       border-radius: 10px;
       box-shadow: var(--shadow);
-      padding: 14px 16px;
-      margin-bottom: 16px;
+      padding: 12px 18px;
+      margin-bottom: 12px;
       font-size: 0.84rem;
-      line-height: 1.65;
+      line-height: 1.6;
     }
-    .info-box h3 { font-size: 0.95rem; margin-bottom: 8px; }
+    .info-box h3 { font-size: 0.92rem; margin-bottom: 6px; font-weight: 600; }
     .info-box .muted { color: var(--text-muted); font-size: 0.8rem; }
-    .info-box ul { margin: 6px 0 10px 1.1em; color: var(--text-muted); }
+    .info-box ul { margin: 4px 0 0 1.1em; color: var(--text-muted); }
+    .info-box li { margin-bottom: 2px; }
     .panel {
       background: var(--surface);
       border: 1px solid var(--border);
       border-radius: 12px;
       box-shadow: var(--shadow);
-      padding: 16px;
-      margin-bottom: 16px;
+      padding: 18px 20px;
+      margin-bottom: 12px;
+    }
+    .panel-title {
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: var(--text);
+      margin-bottom: 14px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
     }
     .filters {
-      display: flex;
-      gap: 16px;
-      flex-wrap: wrap;
-      align-items: flex-end;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+      gap: 14px 18px;
+      align-items: end;
     }
     .field {
       display: flex;
       flex-direction: column;
+      min-width: 0;
     }
     .field-label {
       display: flex;
       align-items: center;
       gap: 4px;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       color: var(--text-muted);
       margin-bottom: 6px;
-      min-height: 20px;
+      height: 22px;
       line-height: 1.2;
       white-space: nowrap;
     }
@@ -98,10 +108,13 @@
       padding: 0 10px;
       font-size: 0.85rem;
       height: 34px;
+      width: 100%;
       box-sizing: border-box;
     }
-    .field select { min-width: 200px; padding-right: 28px; }
-    .field input[type=number].short { width: 72px; min-width: 72px; }
+    .field select { padding-right: 28px; }
+    .field input[type=number].short { max-width: 100px; }
+    .field-category select { min-width: 0; }
+    .field-tier select { min-width: 0; }
     .check-row {
       display: flex;
       align-items: center;
@@ -109,6 +122,7 @@
       height: 34px;
       font-size: 0.85rem;
       color: var(--text);
+      white-space: nowrap;
     }
     .help {
       display: inline-block;
@@ -126,8 +140,24 @@
     .stats {
       font-size: 0.82rem;
       color: var(--text-muted);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 12px 20px;
       margin-bottom: 12px;
+      line-height: 1.5;
     }
+    .table-panel {
+      padding: 0;
+      overflow: hidden;
+    }
+    .table-panel .table-wrap { padding: 4px 0 0; }
+    .table-panel table { margin: 0; }
+    .table-panel th:first-child,
+    .table-panel td:first-child { padding-left: 20px; }
+    .table-panel th:last-child,
+    .table-panel td:last-child { padding-right: 20px; }
+    .table-panel .empty { padding: 40px 24px 48px; }
     .status-ok { color: var(--green); font-weight: 600; }
     .status-warn { color: var(--orange); font-weight: 600; }
     .table-wrap { overflow-x: auto; }
@@ -155,6 +185,13 @@
       color: #1d4ed8;
       font-weight: 500;
     }
+    .badge-cat-ai { background: #eff6ff; color: #1d4ed8; }
+    .badge-cat-nvda { background: #ecfdf5; color: #047857; }
+    .badge-tier-a { background: #dcfce7; color: #166534; }
+    .badge-tier-ab { background: #ffedd5; color: #c2410c; }
+    .row-nvda td { border-left: 3px solid #f97316; }
+    .row-nvda-a td { border-left: 3px solid #22c55e; }
+    .strategy-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
     .pushed { color: var(--green); font-weight: 600; }
     .empty {
       text-align: center;
@@ -185,18 +222,32 @@
     <div class="info-box">
       <h3>这个页面做什么？</h3>
       <p class="muted" style="margin-bottom:8px">
-        自动监控 PR 通稿 RSS，发现 <strong>AI 算力/数据中心类合作新闻</strong> 后，
-        识别合作双方（巨头锚点 ↔ 受益小票），打分、去重，并可选推送到微信。
+        监控两类信号：<strong>AI合作</strong>（产业链合作新闻，巨头锚点 ↔ 受益小票）与
+        <strong>黄仁勋</strong>（NVDA 投资/产能锁定/口头催化 → 买卖窗口提示）。
+        均可推送到微信，标签分别为 <span class="badge badge-cat-ai">AI合作</span> 与
+        <span class="badge badge-cat-nvda">黄仁勋</span>。
       </p>
       <ul>
-        <li><strong>没有消息是正常的</strong>：并非每分钟都有合格合作稿；系统还会过滤 MOU、纯研究合作等低质量内容。</li>
-        <li><strong>推送更严格</strong>：入库 ≠ 一定推送；需满足材料性分数门槛，且同一 ticker 7 天内同类事件只推一次。</li>
-        <li>鼠标悬停在筛选旁的 <span class="help">?</span> 可查看说明。</li>
+        <li><strong>没有消息是正常的</strong>：系统会过滤 MOU、渠道商、纯 B/C 档口头等低质量内容。</li>
+        <li><strong>黄仁勋 A 档</strong>：默认策略「尽早买 → 次日收盘卖」；<strong>A+B 二次催化</strong>：半仓快进快出。</li>
+        <li>入库 ≠ 一定推送；需满足材料性/置信度门槛与去重规则。</li>
       </ul>
     </div>
 
-    <div class="panel">
+    <div class="panel filter-panel">
+      <div class="panel-title">筛选条件</div>
       <div class="filters">
+        <div class="field field-category">
+          <div class="field-label">
+            分类
+            <span class="help" title="AI合作：原产业链合作快讯。黄仁勋：NVDA A/A+B 档产业动作与买卖窗口。">?</span>
+          </div>
+          <select id="category">
+            <option value="all">全部</option>
+            <option value="ai_cooperation">AI合作</option>
+            <option value="nvda_signal">黄仁勋</option>
+          </select>
+        </div>
         <div class="field">
           <div class="field-label">
             时间范围（天）
@@ -204,32 +255,43 @@
           </div>
           <input type="number" class="short" id="days" value="7" min="1" max="90">
         </div>
-        <div class="field">
+        <div class="field field-tier">
           <div class="field-label">
             合作类型
-            <span class="help" title="【分档含义】&#10;T0：市值 &gt; 5000 亿美元，或未上市 AI 巨头（OpenAI、Anthropic、xAI 等）及 MSFT/NVDA/ORCL 等，作新闻锚点。&#10;T1：50 亿～5000 亿美元，中型算力链（如 CRWV、SMCI、IREN）。&#10;T2：&lt; 50 亿美元，小市值受益方（矿转算力、小型云/数据中心等）。&#10;&#10;【组合含义 · 括号内为通常推送对象】&#10;T0_T2：巨头 ↔ 小票（推 T2）— 最常见，如 Anthropic ↔ RIOT。&#10;T0_T1：巨头 ↔ 中型（推 T1）— 如 OpenAI ↔ CoreWeave。&#10;T1_T2：中型 ↔ 小票（推 T2）— 如 CRWV ↔ 某矿工。&#10;T0_T0：双巨头（推市值较小者）— 弹性有限，分数门槛更高。&#10;T1_T1：双中型（推市值较小者）。&#10;T2_T2：双小票（推市值更小者）。">?</span>
+            <span class="help" title="T0/T1/T2 分档组合，详见帮助说明。">?</span>
           </div>
           <select id="tier_pair">
             <option value="">全部类型</option>
-            <option value="T0_T2" title="巨头/AI实验室 ↔ 小市值（&lt;50亿）。推送小票。例：Anthropic 与 RIOT 算力协议。">T0_T2 · 巨头↔小票</option>
-            <option value="T0_T1" title="巨头/AI实验室 ↔ 中型（50亿～5000亿）。推送中型。例：OpenAI 与 CoreWeave。">T0_T1 · 巨头↔中型</option>
-            <option value="T1_T2" title="中型 ↔ 小市值。推送小票。例：CoreWeave 与某矿工合作。">T1_T2 · 中型↔小票</option>
-            <option value="T0_T0" title="两家均为 T0（双巨头或未上市+巨头）。仍推送，但推市值较小一侧；材料性门槛 ≥70。">T0_T0 · 双巨头</option>
-            <option value="T1_T1" title="两家均为 T1 中型。推送市值较小者；材料性门槛 ≥65。">T1_T1 · 双中型</option>
-            <option value="T2_T2" title="两家均为 T2 小票。默认推送市值更小者。">T2_T2 · 双小票</option>
+            <option value="T0_T2">T0_T2 · 巨头↔小票</option>
+            <option value="T0_T1">T0_T1 · 巨头↔中型</option>
+            <option value="T1_T2">T1_T2 · 中型↔小票</option>
+            <option value="T0_T0">T0_T0 · 双巨头</option>
+            <option value="T1_T1">T1_T1 · 双中型</option>
+            <option value="T2_T2">T2_T2 · 双小票</option>
+          </select>
+        </div>
+        <div class="field" id="signalTierField" style="display:none">
+          <div class="field-label">
+            NVDA 档位
+            <span class="help" title="A：投资/产能锁定等硬条款。A_PLUS_B：90天内有A档后的口头催化。">?</span>
+          </div>
+          <select id="signal_tier">
+            <option value="">全部档位</option>
+            <option value="A">A · 硬条款</option>
+            <option value="A_PLUS_B">A+B · 二次催化</option>
           </select>
         </div>
         <div class="field">
           <div class="field-label">
             最低材料性分数
-            <span class="help" title="0～100 分，越高表示新闻越「实锤」（含金额、多年期、正式协议、算力/GW/MW 容量等）。低于系统门槛的稿件不会入库；此处可进一步筛高置信度条目。默认 0 表示显示全部已入库记录。">?</span>
+            <span class="help" title="0～100 分。默认 0 表示显示全部已入库记录。">?</span>
           </div>
           <input type="number" class="short" id="min_score" value="0" min="0" max="100">
         </div>
         <div class="field">
           <div class="field-label">
             推送筛选
-            <span class="help" title="勾选后只显示已通过 PushPlus / Server酱 发出微信通知的记录。未勾选则包含「已入库但未推送」的条目。">?</span>
+            <span class="help" title="勾选后只显示已通过微信推送的记录。">?</span>
           </div>
           <div class="check-row">
             <input type="checkbox" id="pushed_only">
@@ -241,22 +303,18 @@
 
     <div class="stats" id="stats"></div>
 
-    <div class="panel table-wrap">
+    <div class="panel table-panel">
+      <div class="table-wrap">
       <table>
         <thead>
           <tr>
+            <th>分类</th>
             <th>发布时间</th>
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
-            <th>
-              分数
-              <span class="help" title="材料性评分 0～100，综合金额、年限、协议类型、算力容量等信号。">?</span>
-            </th>
-            <th>
-              关系
-              <span class="help" title="双方市值分档组合。T0=巨头/未上市AI实验室，T1=中型算力链（50亿～5000亿），T2=小市值（&lt;50亿）。详见上方「合作类型」旁的 ?。">?</span>
-            </th>
+            <th>分数</th>
+            <th>关系/策略</th>
             <th>已推送</th>
             <th>来源</th>
           </tr>
@@ -267,6 +325,7 @@
         <strong>暂无快讯记录</strong><br>
         可能原因：① 近期没有符合条件的合作新闻；② 本地未开启定时扫描（见页头状态）；③ 稿件被关键词/分数过滤。<br>
         可点击右上角「立即扫描」手动拉取一轮。
+      </div>
       </div>
     </div>
   </div>
@@ -283,6 +342,34 @@
       return name;
     }
 
+    function fmtCategory(row) {
+      const cls = row.category === 'nvda_signal' ? 'badge-cat-nvda' : 'badge-cat-ai';
+      return `<span class="badge ${cls}">${row.category_label || 'AI合作'}</span>`;
+    }
+
+    function fmtRelation(row) {
+      if (row.category === 'nvda_signal') {
+        const tierCls = row.signal_tier === 'A_PLUS_B' ? 'badge-tier-ab' : 'badge-tier-a';
+        const tierLabel = row.signal_tier === 'A_PLUS_B' ? 'A+B' : 'A';
+        const buy = row.buy_ok === false ? ' · 仅观察' : '';
+        const strat = row.strategy_label || row.strategy || '';
+        return `<span class="badge ${tierCls}">${tierLabel}</span>${buy}
+          <div class="strategy-hint">${strat}</div>`;
+      }
+      return `<span class="badge">${row.tier_pair}</span>`;
+    }
+
+    function rowClass(row) {
+      if (row.category !== 'nvda_signal') return '';
+      return row.signal_tier === 'A' ? 'row-nvda-a' : 'row-nvda';
+    }
+
+    function updateFilterVisibility() {
+      const cat = document.getElementById('category').value;
+      document.getElementById('signalTierField').style.display =
+        (cat === 'nvda_signal' || cat === 'all') ? 'flex' : 'none';
+    }
+
     async function loadStatus() {
       try {
         const res = await fetch('/api/status');
@@ -290,10 +377,11 @@
         const dm = data.deal_monitor || {};
         const sched = data.scheduler_enabled;
         const el = document.getElementById('statusLine');
+        const nvda = dm.nvda_signal_enabled ? ` · 黄仁勋 ${dm.nvda_signal_total || 0} 条` : '';
         if (sched) {
-          el.innerHTML = `<span class="status-ok">● 监控运行中</span> · 每 ${dm.poll_interval_min || 3} 分钟扫描 · 累计入库 ${dm.events_total || 0} 条`;
+          el.innerHTML = `<span class="status-ok">● 监控运行中</span> · 每 ${dm.poll_interval_min || 3} 分钟扫描 · AI合作 ${dm.events_total || 0} 条${nvda}`;
         } else {
-          el.innerHTML = `<span class="status-warn">● 定时扫描未开启</span>（ENABLE_SCHEDULER=false）· 累计入库 ${dm.events_total || 0} 条 · 请用「立即扫描」手动触发`;
+          el.innerHTML = `<span class="status-warn">● 定时扫描未开启</span> · AI合作 ${dm.events_total || 0} 条${nvda} · 请用「立即扫描」`;
         }
       } catch (e) {
         document.getElementById('statusLine').textContent = '状态加载失败';
@@ -301,18 +389,27 @@
     }
 
     async function loadStats() {
-      const res = await fetch('/api/deals/stats?days=' + document.getElementById('days').value);
+      const cat = document.getElementById('category').value;
+      const res = await fetch('/api/deals/stats?days=' + document.getElementById('days').value + '&category=' + cat);
       const data = await res.json();
       const pairs = Object.entries(data.by_tier_pair || {}).map(([k, v]) => k + ' ' + v + '条').join(' · ');
+      let extra = '';
+      if (cat === 'all') {
+        extra = ` · AI合作 ${data.ai_cooperation_total || 0} · 黄仁勋 ${data.nvda_signal_total || 0}`;
+      }
       document.getElementById('stats').textContent =
-        `筛选范围内：共 ${data.total} 条 · 已推送 ${data.pushed} 条` + (pairs ? ' · ' + pairs : '');
+        `筛选范围内：共 ${data.total} 条 · 已推送 ${data.pushed} 条${extra}` + (pairs ? ' · ' + pairs : '');
     }
 
     async function loadDeals() {
+      updateFilterVisibility();
       const params = new URLSearchParams();
       params.set('days', document.getElementById('days').value);
+      params.set('category', document.getElementById('category').value);
       const tp = document.getElementById('tier_pair').value;
       if (tp) params.set('tier_pair', tp);
+      const st = document.getElementById('signal_tier').value;
+      if (st) params.set('signal_tier', st);
       params.set('min_score', document.getElementById('min_score').value);
       if (document.getElementById('pushed_only').checked) params.set('pushed_only', 'true');
 
@@ -330,13 +427,18 @@
       empty.style.display = 'none';
       for (const row of items) {
         const tr = document.createElement('tr');
+        tr.className = rowClass(row);
+        const titleExtra = row.category === 'nvda_signal' && row.buy_window
+          ? `<div class="strategy-hint">买: ${row.buy_window} · 卖: ${row.sell_window || ''}</div>`
+          : '';
         tr.innerHTML = `
+          <td>${fmtCategory(row)}</td>
           <td>${fmtTime(row.published_at)}</td>
           <td><span class="ticker">${row.beneficiary_ticker}</span> <span class="badge">${row.beneficiary_tier}</span></td>
           <td>${fmtAnchor(row)}</td>
-          <td>${row.headline}</td>
-          <td class="score">${row.materiality_score}</td>
-          <td><span class="badge">${row.tier_pair}</span></td>
+          <td>${row.headline}${titleExtra}</td>
+          <td class="score">${row.materiality_score}${row.confidence != null ? '<div class="strategy-hint">置信' + row.confidence + '</div>' : ''}</td>
+          <td>${fmtRelation(row)}</td>
           <td class="${row.pushed ? 'pushed' : ''}">${row.pushed ? '✓' : (row.push_channel === 'unconfigured' || row.push_channel === 'failed' || row.push_channel === 'none' ? '未送达' : '—')}</td>
           <td><a class="link" href="${row.source_url}" target="_blank" rel="noopener">${row.source === 'sec_8k' ? 'SEC 8-K' : '原文'}</a></td>
         `;
@@ -355,9 +457,13 @@
         const data = await res.json();
         const llm = data.llm_enabled
           ? `，大模型 ${data.llm_hits || 0}/${data.llm_items_sent || 0} 条相关`
-          : '，未启用大模型';
-        const neu = data.fetched_new != null ? `，其中新稿 ${data.fetched_new} 条` : '';
-        alert(`扫描完成：抓取 ${data.fetched || 0} 条${neu}，入库 ${data.saved || 0} 条，推送 ${data.pushed || 0} 条${llm}`);
+          : '';
+        const neu = data.fetched_new != null ? `，AI合作新稿 ${data.fetched_new} 条` : '';
+        const nv = data.nvda_signal || {};
+        const nvPart = nv.enabled !== false
+          ? `；黄仁勋抓取 ${nv.fetched || 0} 新 ${nv.fetched_new || 0} 入库 ${nv.saved || 0}`
+          : '';
+        alert(`扫描完成：AI合作抓取 ${data.fetched || 0} 条${neu}，入库 ${data.saved || 0} 条${llm}${nvPart}`);
         await loadDeals();
       } catch (e) {
         alert('扫描失败，请查看服务端日志');
@@ -367,7 +473,7 @@
       }
     }
 
-    ['days', 'tier_pair', 'min_score', 'pushed_only'].forEach(id => {
+    ['days', 'category', 'tier_pair', 'signal_tier', 'min_score', 'pushed_only'].forEach(id => {
       document.getElementById(id).addEventListener('change', loadDeals);
     });
 

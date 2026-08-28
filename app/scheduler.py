@@ -34,12 +34,16 @@ async def scheduled_heatmap_snapshot():
 
 
 async def scheduled_deal_poll():
-    """AI 合作快讯 RSS 轮询。"""
-    from app.deal_monitor.pipeline import run_pipeline
+    """AI 合作快讯 + 黄仁勋动向 RSS 轮询。"""
+    from app.deal_monitor.pipeline import run_pipeline as run_deal_pipeline
+    from app.nvda_signal.pipeline import run_pipeline as run_nvda_pipeline
 
     logger.info("开始 deal_monitor RSS 轮询...")
-    result = await run_pipeline()
-    logger.info("deal_monitor 完成: %s", result)
+    deal_result = await run_deal_pipeline()
+    logger.info("deal_monitor 完成: %s", deal_result)
+    logger.info("开始 nvda_signal 轮询...")
+    nvda_result = await run_nvda_pipeline()
+    logger.info("nvda_signal 完成: %s", nvda_result)
 
 
 async def scheduled_deal_market_cap_refresh():
