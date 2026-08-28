@@ -123,28 +123,37 @@ def _is_duplicate(db: Session, url: str, h_hash: str, beneficiary_ticker: str) -
     return False
 
 
+def _anchor_dedup_key(anchor_ticker: str | None, anchor_name: str | None) -> str:
+    if anchor_ticker:
+        return anchor_ticker.upper()
+    return (anchor_name or "").strip().lower()
+
+
 def _dedup_blocked(
     db: Session,
     beneficiary_ticker: str,
     is_update: bool,
     anchor_key: str | None = None,
 ) -> bool:
-    """同一受益标的 7 日内不重复入库（覆盖 compute_deal / ai_platform_deal）。"""
-    del anchor_key  # 预留：若以后按锚点细分可再用
+    """同一受益方+锚点 7 日内不重复入库（覆盖 compute_deal / ai_platform_deal）。"""
     if is_update:
         return False
     since = now_beijing() - timedelta(days=DEAL_DEDUP_DAYS)
-    # 不能只按 compute_deal 过滤，否则 ai_platform_deal 会互相挡不住（Claudeforce 刷屏根因）
-    existing = (
-        db.query(DealEvent)
-        .filter(
-            DealEvent.beneficiary_ticker == beneficiary_ticker,
-            DealEvent.published_at >= since,
-            DealEvent.is_update.is_(False),
-        )
-        .first()
+    q = db.query(DealEvent).filter(
+        DealEvent.beneficiary_ticker == beneficiary_ticker,
+        DealEvent.fetched_at >= since,
+        DealEvent.is_update.is_(False),
     )
-    return existing is not None
+    if anchor_key:
+        ak = anchor_key.upper()
+        q = q.filter(
+            or_(
+                DealEvent.anchor_ticker == ak,
+                DealEvent.anchor_name.ilike(anchor_key),
+                DealEvent.anchor_name.ilike(ak),
+            )
+        )
+    return q.first() is not None
 
 
 def _push_succeeded(event: DealEvent) -> bool:
@@ -279,7 +288,7 @@ def _save_event(
         source_url=item.source_url,
         headline_hash=h_hash,
         anchor_name=roles.anchor.name,
-        anchor_ticker=roles.anchor.ticker,
+        anchor_ticker=roles.anchor.ticker if roles.anchor.ticker else None,
         anchor_tier=roles.anchor.tier,
         beneficiary_ticker=beneficiary.ticker.upper(),
         beneficiary_name=beneficiary.name,
@@ -317,16 +326,8 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
     h_hash = headline_hash(item.headline)
 
     if llm_decision and llm_decision.anchor_name and llm_decision.beneficiary_name:
-        entity_a = await resolve_entity(
-            llm_decision.anchor_name,
-            context=text,
-            ticker_hint=llm_decision.anchor_ticker,
-        )
-        entity_b = await resolve_entity(
-            llm_decision.beneficiary_name,
-            context=text,
-            ticker_hint=llm_decision.beneficiary_ticker,
-        )
+        entity_a = await resolve_entity(llm_decision.anchor_name, context=text)
+        entity_b = await resolve_entity(llm_decision.beneficiary_name, context=text)
     elif item.source == "sec_8k":
         filer = parse_sec_filer(item.headline)
         if not filer:
@@ -417,7 +418,7 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
     event_type = (
         (llm_decision.event_type if llm_decision else None) or EVENT_TYPE
     )
-    anchor_key = (roles.anchor.ticker or roles.anchor.name or "").strip() or None
+    anchor_key = _anchor_dedup_key(roles.anchor.ticker, roles.anchor.name)
     saved = []
     for beneficiary in beneficiaries:
         ticker = beneficiary.ticker

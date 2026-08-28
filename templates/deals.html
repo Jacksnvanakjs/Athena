@@ -277,6 +277,12 @@
       return new Date(iso).toLocaleString('zh-CN', { hour12: false });
     }
 
+    function fmtAnchor(row) {
+      const name = row.anchor_name || '—';
+      if (row.anchor_ticker) return `${name} (${row.anchor_ticker})`;
+      return name;
+    }
+
     async function loadStatus() {
       try {
         const res = await fetch('/api/status');
@@ -327,7 +333,7 @@
         tr.innerHTML = `
           <td>${fmtTime(row.published_at)}</td>
           <td><span class="ticker">${row.beneficiary_ticker}</span> <span class="badge">${row.beneficiary_tier}</span></td>
-          <td>${row.anchor_name} ${row.anchor_ticker ? '(' + row.anchor_ticker + ')' : '(未上市)'}</td>
+          <td>${fmtAnchor(row)}</td>
           <td>${row.headline}</td>
           <td class="score">${row.materiality_score}</td>
           <td><span class="badge">${row.tier_pair}</span></td>

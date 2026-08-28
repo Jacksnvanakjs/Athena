@@ -189,14 +189,17 @@ def _build_prompt(items: list[RawItem]) -> str:
         "无产品落地的咨询/营销战略合作；纯 ETF/杠杆产品发行 → false\n\n"
         "角色与打分：\n"
         "- anchor=更大/更核心方（常为云厂或大模型公司）；beneficiary=业务直接受益的美股公司；"
-        "禁止把小子公司映射成综合集团母公司；受益方无美股 ticker → false。\n"
+        "禁止把小子公司映射成综合集团母公司。\n"
+        "- 只输出 anchor_name / beneficiary_name（公司全称或常用名）；"
+        "不要输出 ticker，股票代码由系统根据种子库自动解析。\n"
+        "- 受益方必须是美股上市公司；若受益方无上市代码则 relevant=false。\n"
         "- llm_score：仪式/认证 0-40；弱合作 40-60；正式协议/命名产品整合且过三闸 ≥70；"
         "再有 warrant/金额/年限/容量 ≥80。\n"
         "- SEC 与通稿：过三闸时倾向 true，禁止因「没写美元」否决；"
         "不确定且非 T7 产品整合则 false。"
         "event_type：算力类用 compute_deal；T7 用 ai_platform_deal。\n\n"
         "只返回 JSON（不要 ```），格式：\n"
-        '{"items":[{"source_url":"...","is_relevant":true,"anchor_name":"...","beneficiary_name":"...","anchor_ticker":"NVDA","beneficiary_ticker":"RIOT","event_type":"compute_deal","llm_score":78,"reason":"..."}]}\n\n'
+        '{"items":[{"source_url":"...","is_relevant":true,"anchor_name":"...","beneficiary_name":"...","event_type":"compute_deal","llm_score":78,"reason":"..."}]}\n\n'
         f"待分析新闻：\n{json.dumps(payload, ensure_ascii=False)}"
     )
 
@@ -233,15 +236,14 @@ def _decisions_from_parsed(parsed, requested: list[RawItem]) -> dict[str, LlmDec
         source_url = item.get("source_url")
         if not source_url:
             continue
-        anchor_ticker = item.get("anchor_ticker")
-        beneficiary_ticker = item.get("beneficiary_ticker")
         result[source_url] = LlmDecision(
             source_url=source_url,
             is_relevant=bool(item.get("is_relevant")),
             anchor_name=item.get("anchor_name") or None,
             beneficiary_name=item.get("beneficiary_name") or None,
-            anchor_ticker=str(anchor_ticker).upper() if anchor_ticker else None,
-            beneficiary_ticker=str(beneficiary_ticker).upper() if beneficiary_ticker else None,
+            # ticker 不由 LLM 决定，入库前由 resolve_entity 解析
+            anchor_ticker=None,
+            beneficiary_ticker=None,
             event_type=item.get("event_type") or "compute_deal",
             llm_score=max(0, min(100, int(item.get("llm_score") or 0))),
             reason=str(item.get("reason") or ""),

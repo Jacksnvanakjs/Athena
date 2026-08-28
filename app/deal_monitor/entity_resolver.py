@@ -1,4 +1,4 @@
-"""公司名 / 文本片段 → 美股 ticker 解析。"""
+"""公司名 / 文本片段 → 美股 ticker 解析（不走 LLM 猜代码）。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from app.deal_monitor.config import FINNHUB_API_KEY
 from app.deal_monitor.entities import Entity, registry
 from app.deal_monitor.finnhub import search_symbol
 
-# 常见公司 → 美股 ticker（ADR 或主上市代码）
+# 种子库未覆盖时的补充映射（优先维护 entities_seed.json）
 STATIC_TICKER_MAP = {
     "nvidia": "NVDA",
     "lg electronics": "LPLCY",
@@ -28,6 +28,8 @@ STATIC_TICKER_MAP = {
     "applied digital": "APLD",
     "digital realty": "DLR",
     "equinix": "EQIX",
+    "verizon": "VZ",
+    "visa": "V",
 }
 
 TICKER_IN_TEXT_RE = re.compile(
@@ -85,37 +87,43 @@ def extract_tickers_from_text(text: str) -> list[str]:
     return found
 
 
-async def resolve_entity(name: str, context: str = "", ticker_hint: str | None = None) -> Entity:
-    """解析公司实体：种子库 → 静态映射 → 文本 ticker → Finnhub。"""
+def _lookup_seed(name: str) -> Entity | None:
+    """entities_seed.json 为权威来源。"""
+    registry.load_seed()
+    hit = registry.lookup_name(name)
+    if hit:
+        return hit
+    # 别名子串：如 "Marvell Technology Inc" → Marvell
+    for entity in registry.extract_entities(name):
+        if entity.unlisted_id:
+            return Entity(name=name, unlisted_id=entity.unlisted_id)
+        if entity.ticker:
+            return Entity(name=name, ticker=entity.ticker.upper())
+    return None
+
+
+async def resolve_entity(name: str, context: str = "") -> Entity:
+    """
+    公司名 → 实体。解析顺序固定，不使用 LLM 提供的 ticker：
+    1. entities_seed.json（含未上市锚点）
+    2. 静态补充表
+    3. 正文中的 (NYSE: XXX) 标注
+    4. Finnhub 符号搜索（仅兜底）
+    """
     name = (name or "").strip()
-    if not name and ticker_hint:
-        return Entity(name=ticker_hint, ticker=ticker_hint.upper())
+    if not name:
+        return Entity(name="")
 
-    if ticker_hint:
-        ticker = ticker_hint.upper()
-        seed = registry.extract_entities(name) if name else []
-        display = seed[0].name if seed else name or ticker
-        return Entity(name=display, ticker=ticker)
+    hit = _lookup_seed(name)
+    if hit:
+        return hit
 
-    # 名称本身就是 ticker
     if re.fullmatch(r"[A-Z]{1,5}", name.upper()):
         return Entity(name=name, ticker=name.upper())
 
     lower = _normalize_name(name).lower()
     if lower in STATIC_TICKER_MAP:
         return Entity(name=name, ticker=STATIC_TICKER_MAP[lower])
-
-    for variant in _name_variants(name):
-        seed = registry.extract_entities(variant)
-        if seed:
-            for entity in seed:
-                if entity.ticker or entity.unlisted_id:
-                    return Entity(
-                        name=name,
-                        ticker=entity.ticker,
-                        unlisted_id=entity.unlisted_id,
-                    )
-            return Entity(name=name, ticker=seed[0].ticker, unlisted_id=seed[0].unlisted_id)
 
     for ticker in extract_tickers_from_text(f"{name}\n{context}"):
         return Entity(name=name, ticker=ticker)

@@ -84,6 +84,40 @@ class EntityRegistry:
         self.load_seed()
         return bool(ticker and ticker.upper() in self._t0_listed)
 
+    def lookup_name(self, name: str) -> Entity | None:
+        """按公司名查种子库（精确/去后缀匹配），不依赖 LLM ticker。"""
+        self.load_seed()
+        raw = (name or "").strip()
+        if not raw:
+            return None
+        lower = raw.lower()
+        norm = self._normalize_alias_key(raw)
+
+        best: tuple[str, str | None, str | None] | None = None
+        best_len = 0
+        for alias, ticker, uid in self._aliases:
+            if lower == alias or norm == alias:
+                if len(alias) > best_len:
+                    best = (alias, ticker, uid)
+                    best_len = len(alias)
+        if not best:
+            return None
+        _, ticker, uid = best
+        return Entity(name=raw, ticker=ticker, unlisted_id=uid)
+
+    @staticmethod
+    def _normalize_alias_key(name: str) -> str:
+        n = name.strip().lower().replace("&", " and ")
+        for suf in (
+            " inc", " corp", " corporation", " ltd", " limited", " llc",
+            " co", " company", " plc", " holdings", " holding",
+            " technologies", " technology", " systems", " group",
+        ):
+            if n.endswith(suf):
+                n = n[: -len(suf)].strip()
+                break
+        return n
+
     def extract_entities(self, text: str) -> list[Entity]:
         self.load_seed()
         norm = text.lower()

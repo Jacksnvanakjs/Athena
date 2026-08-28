@@ -85,7 +85,26 @@ COOPERATION_VERBS = [
     "expand", "deploy", "announce", "announced", "合作", "签署", "协议",
 ]
 
-UPDATE_KEYWORDS = ["amend", "expand", "extend", "追加", "上调"]
+UPDATE_KEYWORDS = ["amend", "extend", "追加", "上调"]
+
+
+def is_update_headline(headline: str) -> bool:
+    """
+    仅对「修订/延期/上调」类标题放行 7 天去重豁免。
+    「expand partnership/collaboration」是新合作通稿常见措辞，不算 update。
+    """
+    norm = _normalize(headline)
+    if "expand partnership" in norm or "expand collaboration" in norm:
+        return False
+    if "announc" in norm or "launch" in norm or " unveil" in norm:
+        return False
+    if "amend" in norm:
+        return True
+    if "extend" in norm and any(w in norm for w in ("agreement", "term", "capacity", "lease")):
+        return True
+    if "追加" in norm or "上调" in norm:
+        return True
+    return False
 
 
 def _normalize(text: str) -> str:
@@ -137,7 +156,3 @@ def passes_keyword_filter(text: str, source: str = "") -> tuple[bool, list[str]]
         return False, matched
     return True, matched
 
-
-def is_update_headline(headline: str) -> bool:
-    norm = _normalize(headline)
-    return any(kw in norm for kw in UPDATE_KEYWORDS)
