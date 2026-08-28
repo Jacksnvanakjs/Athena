@@ -22,7 +22,7 @@ async def scheduled_scrape():
 
 
 async def scheduled_heatmap_snapshot():
-    """美股收盘后（美东 16:30）保存当日热力图快照。"""
+    """美东每个交易日 16:30 保存收盘快照（北京次日凌晨 04:30/05:30）。"""
     if not is_us_trading_day():
         logger.info("非美股交易日，跳过热力图快照")
         return

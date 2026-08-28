@@ -265,15 +265,91 @@ THEMES: list[dict[str, Any]] = [
 ]
 
 
+# 收盘快照入库时刻说明（PERIODS「每日」等均指该时刻的美东交易日收盘数据）
+SNAPSHOT_TIME_DESC = (
+    "美东每个交易日 16:30 自动入库"
+    "（北京次日凌晨 04:30 冬令时 / 05:30 夏令时）"
+)
+
+
 PERIODS: dict[str, dict[str, Any]] = {
     # min_snapshots: 至少需要多少个交易日快照才展示该周期，否则留空
-    "1d": {"days": 1, "label": "每天", "min_snapshots": 1},
-    "1w": {"days": 7, "label": "每周", "min_snapshots": 5},
-    "15d": {"days": 15, "label": "每半月", "min_snapshots": 10},
-    "1m": {"days": 30, "label": "每月", "min_snapshots": 20},
-    "2m": {"days": 60, "label": "每2个月", "min_snapshots": 40},
-    "3m": {"days": 90, "label": "每3个月", "min_snapshots": 55},
+    # desc: 该周期的时间口径（展示在页面说明里）
+    # rank_label: 右侧排行标题前缀（如「当日资金流入最多」）
+    "1d": {
+        "days": 1,
+        "label": "每日",
+        "rank_label": "当日",
+        "min_snapshots": 1,
+        "desc": (
+            "最近一个美东交易日的收盘快照。"
+            f"入库时间：{SNAPSHOT_TIME_DESC}。"
+            "涨跌幅 = 相对上一美股交易日收盘价；成交额 = 该日全日成交量；非实时。"
+        ),
+    },
+    "1w": {
+        "days": 7,
+        "label": "每周",
+        "rank_label": "本周",
+        "min_snapshots": 5,
+        "desc": (
+            "累计最近约 7 个自然日内、各美东交易日的收盘快照"
+            "（至少需 5 个交易日；缺日则等补齐）。"
+            f"每条快照均为{SNAPSHOT_TIME_DESC}。"
+        ),
+    },
+    "15d": {
+        "days": 15,
+        "label": "每半月",
+        "rank_label": "半月",
+        "min_snapshots": 10,
+        "desc": (
+            "累计最近约 15 个自然日内、各美东交易日的收盘快照（至少需 10 个交易日）。"
+            f"每条快照均为{SNAPSHOT_TIME_DESC}。"
+        ),
+    },
+    "1m": {
+        "days": 30,
+        "label": "每月",
+        "rank_label": "本月",
+        "min_snapshots": 20,
+        "desc": (
+            "累计最近约 30 个自然日内、各美东交易日的收盘快照（至少需 20 个交易日）。"
+            f"每条快照均为{SNAPSHOT_TIME_DESC}。"
+        ),
+    },
+    "2m": {
+        "days": 60,
+        "label": "每2个月",
+        "rank_label": "近两月",
+        "min_snapshots": 40,
+        "desc": (
+            "累计最近约 60 个自然日内、各美东交易日的收盘快照（至少需 40 个交易日）。"
+            f"每条快照均为{SNAPSHOT_TIME_DESC}。"
+        ),
+    },
+    "3m": {
+        "days": 90,
+        "label": "每3个月",
+        "rank_label": "近三月",
+        "min_snapshots": 55,
+        "desc": (
+            "累计最近约 90 个自然日内、各美东交易日的收盘快照（至少需 55 个交易日）。"
+            f"每条快照均为{SNAPSHOT_TIME_DESC}。"
+        ),
+    },
 }
+
+
+def _periods_for_api() -> dict[str, dict[str, str]]:
+    return {
+        k: {
+            "label": v["label"],
+            "rank_label": v.get("rank_label", v["label"]),
+            "desc": v.get("desc", ""),
+        }
+        for k, v in PERIODS.items()
+    }
 
 
 def _to_float(value: Any) -> float | None:
@@ -373,29 +449,34 @@ def _us_market_session(now_et: datetime | None = None) -> dict[str, str]:
             "session": "closed",
             "session_label": "周末休市",
             "data_freshness": "休市中，显示最近一个交易日收盘/盘后价",
+            "change_pct_basis": "涨跌幅为最近一个交易日收盘价",
         }
     if 4 * 60 <= minutes < 9 * 60 + 30:
         return {
             "session": "pre",
             "session_label": "盘前交易",
             "data_freshness": "盘前实时（新浪延时行情，通常接近实时）",
+            "change_pct_basis": "涨跌幅相对上一交易日收盘价（盘前）",
         }
     if 9 * 60 + 30 <= minutes < 16 * 60:
         return {
             "session": "regular",
             "session_label": "盘中交易",
             "data_freshness": "盘中实时（新浪延时行情，通常接近实时）",
+            "change_pct_basis": "涨跌幅相对昨收（盘中）",
         }
     if 16 * 60 <= minutes < 20 * 60:
         return {
             "session": "post",
             "session_label": "盘后交易",
             "data_freshness": "盘后实时（新浪延时行情，通常接近实时）",
+            "change_pct_basis": "涨跌幅相对昨收（盘后）",
         }
     return {
         "session": "overnight",
         "session_label": "隔夜休市",
         "data_freshness": "隔夜休市，价格停在昨盘后；开盘前（美东04:00起）才会继续变动",
+        "change_pct_basis": "涨跌幅停在昨盘后",
     }
 
 
@@ -404,31 +485,43 @@ def _snapshot_time_hint() -> str:
     now_et = datetime.now(_US_TZ)
     close_et = now_et.replace(hour=16, minute=30, second=0, microsecond=0)
     close_bj = close_et.astimezone(_BJ_TZ)
-    return f"美东 16:30（北京时间 {close_bj.strftime('%H:%M')}）"
+    return (
+        f"北京 {close_bj.strftime('%H:%M')} · 美东 16:30"
+    )
 
 
 def _response_timestamps(by_symbol: dict[str, dict[str, Any]] | None = None) -> dict[str, str]:
-    """页面时间统一用北京时间；行情时间优先用新浪美东成交时间戳。"""
+    """页面时间以北京时间为主，同时附带美东时间。"""
+    from app.utils import today_us
+
     now_et = datetime.now(_US_TZ)
+    now_bj = now_et.astimezone(_BJ_TZ)
     session = _us_market_session(now_et)
     out: dict[str, str] = {
-        "updated_at": now_beijing().strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at": now_bj.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at_bj": now_bj.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at_et": now_et.strftime("%Y-%m-%d %H:%M:%S"),
         "updated_at_label": "北京时间",
-        "market_time_et": now_et.strftime("%Y-%m-%d %H:%M"),
-        "market_time_bj": now_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M"),
+        "market_time_et": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+        "market_time_bj": now_bj.strftime("%Y-%m-%d %H:%M:%S"),
+        "trade_date_us": today_us().isoformat(),
         "snapshot_hint": _snapshot_time_hint(),
         **session,
     }
     if not by_symbol:
         return out
 
-    # 优先用各标的 quote_time（已转北京时间的 ISO 字符串）取最新
     quote_times = sorted(
         {r["quote_time"] for r in by_symbol.values() if r.get("quote_time")}
     )
     if quote_times:
         out["quote_time"] = quote_times[-1]
         out["quote_time_label"] = "北京时间"
+    quote_times_et = sorted(
+        {r["quote_time_et"] for r in by_symbol.values() if r.get("quote_time_et")}
+    )
+    if quote_times_et:
+        out["quote_time_et"] = quote_times_et[-1]
     return out
 
 
@@ -944,13 +1037,16 @@ async def _build_heatmap() -> dict[str, Any]:
 
     note = (
         f"数据源 {source}（板块 {sector_hits}/{total_sector}，合计 {quote_count}/{len(symbols)} 只）。"
+        "「实时」= 当前刷新行情，排行随盘前/盘中/盘后变化；"
+        "「今日」= 当前美东交易日，收盘快照在美东 16:30 后入库用于周期统计。"
         "本站% = 占监控样本（约11个主要板块+龙头股）的资金活跃度比重，"
-        "非股价涨跌、非全市场资金占比；红流入绿流出。"
+        "非真实 Level2 资金流；红流入绿流出。"
         "主题涨跌幅 = 有代表性 ETF 的主题优先使用 ETF 实时价格，其余为成分股等权平均。"
     )
 
     return {
         "success": True,
+        "mode": "live",
         **_response_timestamps(by_symbol),
         "source": source,
         "quote_count": quote_count,
@@ -1006,7 +1102,11 @@ def _upsert_snapshot_rows(db, trade_date, rows: list[dict[str, Any]]) -> int:
 
 
 async def save_daily_snapshot(trade_date=None, force: bool = False) -> dict[str, Any]:
-    """拉取当日行情并写入每日快照（同一交易日可覆盖更新）。"""
+    """拉取行情并写入收盘快照（按美东交易日一条）。
+
+    自动任务在美东 16:30 触发；也可手动「存今日快照」补数据。
+    快照内容为该美东交易日收盘时点的涨跌幅与全日成交量，非盘前/盘中实时。
+    """
     from app.database import SessionLocal, is_turso_stream_error, reset_engine
     from app.utils import is_us_trading_day, today_us
 
@@ -1126,9 +1226,23 @@ def _aggregate_period(records: list, kind: str) -> list[dict[str, Any]]:
     return out
 
 
-def get_period_stats(period: str = "1w") -> dict[str, Any]:
-    """按周期统计板块/公司资金变化（依赖每日快照）。
+def _stats_timestamps() -> dict[str, str]:
+    now_et = datetime.now(_US_TZ)
+    now_bj = now_et.astimezone(_BJ_TZ)
+    return {
+        "updated_at": now_bj.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at_bj": now_bj.strftime("%Y-%m-%d %H:%M:%S"),
+        "updated_at_et": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+        "market_time_bj": now_bj.strftime("%Y-%m-%d %H:%M:%S"),
+        "market_time_et": now_et.strftime("%Y-%m-%d %H:%M:%S"),
+    }
 
+
+def get_period_stats(period: str = "1w") -> dict[str, Any]:
+    """按周期统计板块/公司资金变化（依赖美东交易日收盘快照）。
+
+    「每日」(1d) = 仅取最近一个美东交易日 16:30 入库的收盘快照。
+    更长周期 = 区间内各交易日收盘快照的 flow_score 累计。
     快照交易日数不足该周期最低要求时，不返回排行数据，页面留空并说明原因。
     """
     from datetime import timedelta
@@ -1144,6 +1258,8 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
     days = cfg["days"]
     min_snapshots = cfg["min_snapshots"]
     label = cfg["label"]
+    rank_label = cfg.get("rank_label", label)
+    period_desc = cfg.get("desc", "")
     since = today_us() - timedelta(days=days)
 
     def _query(db):
@@ -1174,6 +1290,11 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
     finally:
         db.close()
 
+    # 「每日」只展示最近一个美东交易日收盘快照，不累加多日
+    if period == "1d" and latest:
+        latest_date = latest[0]
+        records = [r for r in records if r.trade_date == latest_date]
+
     dates = sorted({r.trade_date.isoformat() for r in records})
     snapshot_count = len(dates)
     latest_trade_date = latest[0].isoformat() if latest else None
@@ -1182,6 +1303,10 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
     empty = {
         "period": period,
         "label": label,
+        "rank_label": rank_label,
+        "period_desc": period_desc,
+        "snapshot_time_desc": SNAPSHOT_TIME_DESC,
+        "mode": "period",
         "days": days,
         "min_snapshots": min_snapshots,
         "since": since.isoformat(),
@@ -1195,13 +1320,16 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
         "top_outflow_sectors": [],
         "top_inflow_companies": [],
         "top_outflow_companies": [],
-        "periods": {k: v["label"] for k, v in PERIODS.items()},
+        "periods": _periods_for_api(),
+        **_stats_timestamps(),
     }
 
     if snapshot_count == 0:
         empty["note"] = (
-            f"「{label}」暂无快照数据。请先点击「存今日快照」，"
-            "或等待美股收盘后（美东 16:30）自动保存；积累够天数后再查看该周期。"
+            f"「{label}」暂无收盘快照。"
+            f"{period_desc} "
+            "请先点击「存今日快照」，"
+            f"或等待{SNAPSHOT_TIME_DESC}；积累够天数后再查看更长周期。"
         )
         return empty
 
@@ -1209,9 +1337,9 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
         empty["note"] = (
             f"「{label}」数据还不足：该周期至少需要 {min_snapshots} 个交易日快照，"
             f"当前只有 {snapshot_count} 天"
-            + (f"（最新 {latest_trade_date}）" if latest_trade_date else "")
-            + "。有数据的周期（如「每天」或「今日实时」）可正常查看；"
-            "请继续每日保存快照，凑齐天数后再看周/月统计。"
+            + (f"（最新美东交易日 {latest_trade_date}）" if latest_trade_date else "")
+            + "。可先查看「每日」或「实时行情」；"
+            f"请继续每日在{SNAPSHOT_TIME_DESC}后自动积累，或手动存快照。"
         )
         return empty
 
@@ -1221,6 +1349,10 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
     return {
         "period": period,
         "label": label,
+        "rank_label": rank_label,
+        "period_desc": period_desc,
+        "snapshot_time_desc": SNAPSHOT_TIME_DESC,
+        "mode": "period",
         "days": days,
         "min_snapshots": min_snapshots,
         "since": since.isoformat(),
@@ -1229,9 +1361,15 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
         "latest_trade_date": latest_trade_date,
         "sufficient": True,
         "note": (
+            f"时间口径：{period_desc} "
             "本站% = 占监控样本（主要板块+龙头股）的资金活跃度比重，非全市场。"
-            "周期资金变化 = 区间内每日 flow_score 累计；悬停可看股价涨跌。"
+            + (
+                "排行 = 该交易日收盘快照的 flow_score。"
+                if period == "1d"
+                else "排行 = 区间内各交易日 flow_score 累计；悬停可看股价涨跌。"
+            )
         ),
+        **_stats_timestamps(),
         "sectors": sectors,
         "companies": companies,
         "top_inflow_sectors": [s for s in sectors if s["flow_score_sum"] > 0][:5],
@@ -1244,5 +1382,5 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
             [c for c in companies if c["flow_score_sum"] < 0],
             key=lambda x: x["flow_score_sum"],
         )[:10],
-        "periods": {k: v["label"] for k, v in PERIODS.items()},
+        "periods": _periods_for_api(),
     }

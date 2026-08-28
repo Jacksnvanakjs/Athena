@@ -188,7 +188,7 @@ async def heatmap_data(force: bool = Query(default=False)):
 
 @router.get("/heatmap/stats")
 def heatmap_stats(period: str = Query(default="1w")):
-    """多周期资金变化统计：1d / 1w / 15d / 1m / 2m / 3m"""
+    """多周期资金变化统计：1d=每日(最近美东收盘) / 1w / 15d / 1m / 2m / 3m"""
     from app.heatmap import PERIODS, get_period_stats
 
     if period not in PERIODS:

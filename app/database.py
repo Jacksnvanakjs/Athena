@@ -144,7 +144,12 @@ class MarketCapCache(Base):
 
 
 class HeatmapSnapshot(Base):
-    """美股热力图每日收盘快照（按美东交易日存一条）。"""
+    """美股热力图收盘快照（每个 symbol/sector 按美东交易日存一条）。
+
+    trade_date = 美东交易日（非北京时间）。
+    自动入库：美东 16:30（北京次日凌晨 04:30 冬令时 / 05:30 夏令时）。
+    change_pct / volume = 该交易日收盘相对昨收的涨跌幅与全日成交量。
+    """
 
     __tablename__ = "heatmap_snapshots"
     __table_args__ = (

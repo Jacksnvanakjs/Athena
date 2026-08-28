@@ -247,7 +247,7 @@
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <a class="btn btn-dark" href="/">基金监测</a>
         <a class="btn" href="/deals" style="background:#1e3a5f;color:#fff;text-decoration:none">AI 产业链合作快讯</a>
-        <button class="btn btn-dark" id="snapBtn" onclick="saveSnapshot()">存今日快照</button>
+        <button class="btn btn-dark" id="snapBtn" onclick="saveSnapshot()" title="保存当前美东交易日的收盘快照（美东16:30口径，北京次日凌晨入库），用于「每日/每周」等周期统计">存今日快照</button>
         <button class="btn btn-primary" id="refreshBtn" onclick="reloadAll(true)">刷新</button>
       </div>
     </header>
@@ -262,7 +262,7 @@
       <div class="theme-strip" id="themeStrip">
         <span class="muted">加载中...</span>
       </div>
-      <p class="section-foot" id="themeNote">仅「今日实时」模式展示 · 点击主题查看成分股</p>
+      <p class="section-foot" id="themeNote">仅「实时行情」模式展示 · 点击主题查看成分股</p>
     </div>
 
     <!-- 板块资金流向 -->
@@ -291,10 +291,10 @@
             <option value="sector">板块视图</option>
             <option value="company">公司视图</option>
           </select>
-          <select id="periodSelect" onchange="loadStats()">
-            <option value="live" selected>今日实时</option>
-            <option value="1d">每天</option>
-            <option value="1w">每周</option>
+          <select id="periodSelect" onchange="loadStats()" title="切换统计周期；除「实时行情」外均基于美东16:30收盘快照">
+            <option value="live" selected>实时行情</option>
+            <option value="1d" title="最近一个美东交易日16:30收盘快照">每日（美东收盘）</option>
+            <option value="1w" title="约7个自然日内各美东交易日收盘快照累计">每周</option>
             <option value="15d">每半月</option>
             <option value="1m">每月</option>
             <option value="2m">每2个月</option>
@@ -306,6 +306,7 @@
             <span class="up">流入</span>
           </div>
         </div>
+        <p class="section-foot" id="periodHint" style="margin:6px 0 0"></p>
         <div class="breadcrumb" id="breadcrumb"></div>
         <div id="treemap"><div class="loading">正在拉取美股数据...</div></div>
         <div class="small-labels" id="smallLabels"></div>
@@ -363,21 +364,64 @@
 
     function formatMetaLine(data, prefix) {
       if (!data) return prefix ? prefix + '加载中...' : '加载中...';
-      const tz = data.updated_at_label || '北京时间';
-      const refresh = `刷新 ${data.updated_at}（${tz}）`;
+      const bj = data.updated_at_bj || data.updated_at;
+      const et = data.updated_at_et || data.market_time_et;
+      const refresh = `刷新 ${bj}（北京） · 美东 ${et || '—'}`;
+      const tradeDay = data.trade_date_us ? ` · 美股交易日 ${data.trade_date_us}` : '';
       const session = data.session_label ? ` · ${data.session_label}` : '';
-      const quote = data.quote_time
-        ? ` · 最新行情 ${data.quote_time}（${data.quote_time_label || '北京时间'}）`
-        : '';
+      const basis = data.change_pct_basis ? ` · ${data.change_pct_basis}` : '';
+      let quote = '';
+      if (data.quote_time) {
+        quote = ` · 最新行情 ${data.quote_time}（北京）`;
+        if (data.quote_time_et) quote += ` / ${data.quote_time_et}（美东）`;
+      }
       const freshness = data.data_freshness ? ` · ${data.data_freshness}` : '';
       const src = ` · 数据源 ${data.source || '?'}`;
       const cov = data.quote_count != null ? `（${data.quote_count}/${data.quote_total || '?'}）` : '';
       const head = prefix ? prefix + ' · ' : '';
-      const snap = data.snapshot_hint || '美东 16:30（北京时间 04:30/05:30）';
+      const snap = data.snapshot_hint || '北京 04:30/05:30 · 美东 16:30';
       if (data.success === false) {
         return `${head}行情拉取失败 · ${refresh}${src}${cov}`;
       }
-      return `${head}${refresh}${session}${quote}${freshness}${src}${cov} · 每60秒自动刷新 · 收盘后自动存快照（${snap}）`;
+      return `${head}${refresh}${tradeDay}${session}${basis}${quote}${freshness}${src}${cov} · 每60秒自动刷新 · 收盘后自动存快照（${snap}）`;
+    }
+
+    function formatStatsMetaLine(data) {
+      if (!data) return '加载中...';
+      const label = data.label || data.period || '';
+      const bj = data.updated_at_bj || data.updated_at;
+      const et = data.updated_at_et || data.market_time_et;
+      const timePart = bj ? ` · 查询 ${bj}（北京） · 美东 ${et || '—'}` : '';
+      if (!data.sufficient) {
+        return `周期：${label}${timePart} · 数据还不足（${data.snapshot_count || 0}/${data.min_snapshots || '?'} 天）`;
+      }
+      const latest = data.latest_trade_date
+        ? ` · 快照交易日 ${data.latest_trade_date}（美东）`
+        : '';
+      const days = data.snapshot_count > 1 ? ` · 含 ${data.snapshot_count} 个交易日` : '';
+      return `周期：${label}${timePart}${latest}${days}`;
+    }
+
+    function updatePeriodHint() {
+      const el = document.getElementById('periodHint');
+      if (!el) return;
+      if (usingLive()) {
+        el.textContent =
+          '实时：当前刷新行情，每60秒更新，盘前/盘中/盘后均可变。' +
+          '「今日」= 当前美东交易日；收盘快照在美东 16:30 入库（北京次日凌晨 04:30/05:30）。';
+        return;
+      }
+      if (statsData && statsData.period_desc) {
+        let text = '时间口径：' + statsData.period_desc;
+        if (statsData.snapshot_time_desc) {
+          text += ' 入库：' + statsData.snapshot_time_desc + '。';
+        }
+        el.textContent = text;
+        return;
+      }
+      const sel = document.getElementById('periodSelect');
+      const opt = sel && sel.selectedOptions[0];
+      el.textContent = opt && opt.title ? opt.title : '';
     }
 
     function absFlowTotal(items, key) {
@@ -552,7 +596,9 @@
       const botS = document.getElementById('bottomSectors');
       const topC = document.getElementById('topCompanies');
       const botC = document.getElementById('bottomCompanies');
-      const periodLabel = usingLive() ? '今日' : ((statsData && statsData.label) || '');
+      const periodLabel = usingLive()
+        ? '实时'
+        : ((statsData && statsData.rank_label) || (statsData && statsData.label) || '');
 
       document.getElementById('rankTitle1').textContent = periodLabel + '资金流入最多板块';
       document.getElementById('rankTitleOutSectors').textContent = periodLabel + '资金流出最多板块';
@@ -753,9 +799,13 @@
       } else if (mode === 'company' && focusSector) {
         crumb.innerHTML = `<a href="#" onclick="focusSector=null;render();return false">全部板块</a> / ${focusSector}`;
       } else if (usingLive()) {
-        crumb.textContent = '今日实时：方块大小≈资金流强度；颜色与% = 占本站主要板块/龙头样本的资金活跃度比重（红流入绿流出，非股价、非全市场）';
+        crumb.textContent = '实时行情：方块大小≈资金流强度；涨跌幅随盘前/盘中/盘后变化（与收盘快照可能不同）';
       } else {
-        crumb.textContent = `${statsData.label}：颜色与% = 占本站样本的资金活跃度比重（红流入绿流出；共 ${statsData.snapshot_count} 个交易日快照）`;
+        const dayInfo = statsData.latest_trade_date
+          ? ` · 美东交易日 ${statsData.latest_trade_date}`
+          : '';
+        crumb.textContent =
+          `${statsData.rank_label || statsData.label}：收盘快照统计${dayInfo}（非实时；共 ${statsData.snapshot_count} 个交易日）`;
       }
 
       const el = document.getElementById('treemap');
@@ -934,6 +984,7 @@
       liveData = await res.json();
       document.getElementById('metaLine').textContent = formatMetaLine(liveData, '');
       if (usingLive()) document.getElementById('note').textContent = liveData.note || '';
+      updatePeriodHint();
       renderThemes();
       renderFlow();
       setTimerUI();
@@ -948,9 +999,10 @@
 
       if (usingLive()) {
         meta.textContent = liveData
-          ? formatMetaLine(liveData, '今日实时')
-          : '今日实时加载中...';
+          ? formatMetaLine(liveData, '实时行情')
+          : '实时行情加载中...';
         note.textContent = (liveData && liveData.note) || '';
+        updatePeriodHint();
         renderThemes();
         renderFlow();
         setTimerUI();
@@ -977,9 +1029,9 @@
 
         const label = statsData.label || period;
         if (!statsData.sufficient) {
-          meta.textContent =
-            `周期：${label} · 数据还不足（${statsData.snapshot_count || 0}/${statsData.min_snapshots || '?'} 天）`;
+          meta.textContent = formatStatsMetaLine(statsData);
           note.textContent = statsData.note || '数据还不足';
+          updatePeriodHint();
           document.getElementById('topSectors').innerHTML =
             `<li class="muted">${statsData.note || '数据还不足'}</li>`;
           document.getElementById('bottomSectors').innerHTML = '<li class="muted">暂无数据</li>';
@@ -990,10 +1042,9 @@
           return;
         }
 
-        meta.textContent =
-          `周期：${label} · 已有 ${statsData.snapshot_count} 个交易日快照` +
-          (statsData.latest_trade_date ? ` · 最新 ${statsData.latest_trade_date}` : '');
+        meta.textContent = formatStatsMetaLine(statsData);
         note.textContent = statsData.note || '';
+        updatePeriodHint();
         renderSidebar();
         render();
       } catch (e) {
