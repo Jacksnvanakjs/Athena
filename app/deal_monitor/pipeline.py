@@ -28,7 +28,8 @@ from app.deal_monitor.entity_resolver import (
 )
 from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
-from app.deal_monitor.fetchers.company_ir import fetch_company_ir_and_aggregators
+from app.deal_monitor.fetchers.company_ir import fetch_finnhub_and_google
+from app.deal_monitor.fetchers.company_ir_rss import fetch_company_ir_feeds
 from app.deal_monitor.keywords import is_update_headline, passes_keyword_filter
 from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
@@ -37,6 +38,7 @@ from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pa
 from app.deal_monitor.tiers import assign_roles, score_threshold
 from app.notifier import notify
 from app.source_url_guard import is_test_source_url
+from app.time_display import format_beijing_at_push, format_published_at_push
 from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
@@ -99,8 +101,9 @@ def build_push_content(
         f"<b>材料性</b>：{event.materiality_score}/100<br>",
         f"<b>关键词</b>：{kw_str}<br><br>",
         f"<b>标题</b>：{event.headline}<br>",
-        f"<b>时间</b>：{event.published_at.strftime('%Y-%m-%d %H:%M UTC')}<br>",
-        f"<b>来源</b>：<a href=\"{event.source_url}\">链接</a><br>",
+        f"<b>发布时间</b>：{format_published_at_push(event.published_at)}<br>",
+        f"<b>抓取时间</b>：{format_beijing_at_push(event.fetched_at)}<br>",
+        f"<b>来源</b>：<a href=\"{event.source_url}\">链接</a> ({event.source})<br>",
     ]
     if event.tier_pair == "T0_T0":
         lines.append("<br>⚠️ 双巨头合作，小票弹性有限，请谨慎。<br>")
@@ -473,12 +476,13 @@ async def run_pipeline() -> dict:
     """执行一轮 RSS / Finnhub / Google News / SEC 抓取与处理。"""
     registry.load_seed()
     pr_items = await fetch_pr_wires()
-    agg_items = await fetch_company_ir_and_aggregators()
+    ir_items = await fetch_company_ir_feeds()
+    agg_items = await fetch_finnhub_and_google()
     sec_items = await fetch_sec_8k()
-    # URL 去重：同一通稿可能同时出现在 PRN / Finnhub / Google
+    # URL 去重：同一通稿可能同时出现在 PRN / IR / Finnhub / Google
     items: list[RawItem] = []
     seen_fetch: set[str] = set()
-    for batch in (pr_items, agg_items, sec_items):
+    for batch in (pr_items, ir_items, agg_items, sec_items):
         for item in batch:
             url = (item.source_url or "").strip()
             if not url or url in seen_fetch:
@@ -488,6 +492,7 @@ async def run_pipeline() -> dict:
     summary = {
         "fetched": len(items),
         "fetched_pr": len(pr_items),
+        "fetched_ir": len(ir_items),
         "fetched_agg": len(agg_items),
         "fetched_sec_8k": len(sec_items),
         "fetched_new": 0,

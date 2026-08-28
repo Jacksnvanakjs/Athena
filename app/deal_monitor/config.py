@@ -25,6 +25,26 @@ from app.config import (
 )
 
 ENTITIES_SEED_FILE = Path(__file__).resolve().parent / "entities_seed.json"
+COMPANY_IR_FEEDS_FILE = Path(__file__).resolve().parent / "company_ir_feeds.json"
+
+
+def _load_company_ir_feeds() -> list[dict[str, str]]:
+    import json
+
+    if not COMPANY_IR_FEEDS_FILE.exists():
+        return []
+    data = json.loads(COMPANY_IR_FEEDS_FILE.read_text(encoding="utf-8"))
+    feeds = data.get("feeds") or []
+    return [
+        {
+            "ticker": str(item["ticker"]).upper(),
+            "name": item.get("name") or f"ir_{item['ticker'].lower()}",
+            "url": str(item["url"]).strip(),
+            "category": item.get("category") or "",
+        }
+        for item in feeds
+        if item.get("ticker") and item.get("url")
+    ]
 
 # Phase 1 RSS 源
 PR_WIRE_FEEDS = [
@@ -65,12 +85,28 @@ GOOGLE_NEWS_QUERIES = [
     '"strategic partnership" (Anthropic OR OpenAI OR Claude) when:3d',
 ]
 
-# Finnhub 公司新闻：覆盖 IR/Business Wire 通稿；仅粗筛后进 LLM
-FINNHUB_NEWS_TICKERS = [
-    "CRM", "MSFT", "GOOGL", "AMZN", "META", "ORCL", "NOW", "SNOW",
-    "ADBE", "PLTR", "IBM", "NVDA", "MRVL", "AVGO", "SMCI", "CRWV",
-]
+# Finnhub：无稳定 IR RSS 的标的走此通道（IR 失败时亦作备份）
+FINNHUB_NEWS_TICKERS = sorted(set([
+    # 大模型 / 云 / SaaS
+    "CRM", "MSFT", "GOOGL", "AMZN", "META", "ORCL", "NOW", "SNOW", "ADBE", "PLTR", "IBM", "AAPL",
+    # 芯片 / 半导体 / 设备
+    "NVDA", "AMD", "INTC", "AVGO", "MRVL", "MU", "QCOM", "TSM", "ASML", "ARM", "SMCI", "DELL",
+    "AMAT", "LRCX", "KLAC", "SNPS", "CDNS", "MCHP",
+    # 数据中心 / 网络
+    "EQIX", "DLR", "VRT", "ANET", "CSCO", "NTNX", "CIEN",
+    # 算力租赁 / 挖矿
+    "CRWV", "NBIS", "APLD", "CORZ", "WULF", "IREN", "RIOT", "MARA", "CLSK", "CIFR", "HUT", "BITF",
+    # 光模块
+    "LITE", "COHR",
+    # 企业 AI / 安全
+    "DDOG", "MDB", "PATH", "AI", "CRWD", "PANW", "FTNT", "ZS",
+    # 存储
+    "WDC", "STX", "PSTG", "NTAP",
+]))
 FINNHUB_NEWS_LOOKBACK_DAYS = 3
+
+# IR RSS 列表见 company_ir_feeds.json（AI 产业链官网直连，并行抓取，优先于 Finnhub）
+COMPANY_IR_FEEDS = _load_company_ir_feeds()
 
 # 未上市 T0 锚点视为极大市值
 UNLISTED_T0_MARKET_CAP = 1e12

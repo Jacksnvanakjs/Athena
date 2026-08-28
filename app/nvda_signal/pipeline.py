@@ -38,6 +38,7 @@ from app.nvda_signal.trade_window import build_trade_plan, strategy_label
 from app.notifier import notify
 from app.source_url_guard import is_test_source_url
 from app.text_clean import clean_article_text
+from app.time_display import format_beijing_at_push, format_published_at_push
 from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
@@ -188,6 +189,8 @@ def build_push_content(event: NvdaSignalEvent) -> tuple[str, str]:
         lines.append(f"<b>⚠️ 不建议追</b>：chase_risk={event.chase_risk}<br>")
     lines.extend([
         f"<br><b>标题</b>：{event.headline}<br>",
+        f"<b>发布时间</b>：{format_published_at_push(event.published_at)}<br>",
+        f"<b>抓取时间</b>：{format_beijing_at_push(event.fetched_at)}<br>",
         f"<b>来源</b>：<a href=\"{event.source_url}\">链接</a><br>",
         "<br>---<br>",
         "历史统计：A档尽早买+次日收盘卖胜率约85%；A+B为情绪催化，快进快出。",

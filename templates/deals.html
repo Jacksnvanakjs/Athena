@@ -176,6 +176,7 @@
     tr:hover td { background: #f8fafc; }
     .ticker { font-weight: 600; color: var(--accent); }
     .score { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .time-cell { font-size: 0.82rem; line-height: 1.35; max-width: 240px; display: inline-block; }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -309,7 +310,7 @@
         <thead>
           <tr>
             <th>分类</th>
-            <th>发布时间</th>
+            <th title="稿件原始发布时间（UTC入库）；悬停可看抓取/推送时间">发布时间</th>
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
@@ -334,6 +335,24 @@
     function fmtTime(iso) {
       if (!iso) return '-';
       return new Date(iso).toLocaleString('zh-CN', { hour12: false });
+    }
+
+    function fmtPublished(row) {
+      const pub = row.published_at_display || fmtTime(row.published_at);
+      const tips = [];
+      if (row.fetched_at_display) tips.push('抓取 ' + row.fetched_at_display);
+      if (row.pushed_at_display) tips.push('推送 ' + row.pushed_at_display);
+      const tip = tips.join(' · ').replace(/"/g, '&quot;');
+      return tip
+        ? `<span class="time-cell" title="${tip}">${pub}</span>`
+        : `<span class="time-cell">${pub}</span>`;
+    }
+
+    function fmtSource(row) {
+      const label = row.source && row.source.startsWith('ir:')
+        ? '官网 ' + row.source.slice(3)
+        : (row.source === 'sec_8k' ? 'SEC 8-K' : (row.source || '原文'));
+      return `<a class="link" href="${row.source_url}" target="_blank" rel="noopener">${label}</a>`;
     }
 
     function fmtAnchor(row) {
@@ -433,14 +452,14 @@
           : '';
         tr.innerHTML = `
           <td>${fmtCategory(row)}</td>
-          <td>${fmtTime(row.published_at)}</td>
+          <td>${fmtPublished(row)}</td>
           <td><span class="ticker">${row.beneficiary_ticker}</span> <span class="badge">${row.beneficiary_tier}</span></td>
           <td>${fmtAnchor(row)}</td>
           <td>${row.headline}${titleExtra}</td>
           <td class="score">${row.materiality_score}${row.confidence != null ? '<div class="strategy-hint">置信' + row.confidence + '</div>' : ''}</td>
           <td>${fmtRelation(row)}</td>
           <td class="${row.pushed ? 'pushed' : ''}">${row.pushed ? '✓' : (row.push_channel === 'unconfigured' || row.push_channel === 'failed' || row.push_channel === 'none' ? '未送达' : '—')}</td>
-          <td><a class="link" href="${row.source_url}" target="_blank" rel="noopener">${row.source === 'sec_8k' ? 'SEC 8-K' : '原文'}</a></td>
+          <td>${fmtSource(row)}</td>
         `;
         tbody.appendChild(tr);
       }

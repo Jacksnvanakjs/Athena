@@ -1,0 +1,33 @@
+{
+  "_comment": "AI产业链 IR RSS 直连（官网/新闻室，优先于 Finnhub）。单源失败不影响整轮扫描。",
+  "feeds": [
+    {"ticker": "CRM", "category": "cloud_saas", "name": "salesforce_news", "url": "https://www.salesforce.com/news/rss/"},
+    {"ticker": "MSFT", "category": "cloud_saas", "name": "microsoft_news", "url": "https://news.microsoft.com/source/feed/"},
+    {"ticker": "GOOGL", "category": "cloud_saas", "name": "google_blog", "url": "https://blog.google/rss/"},
+    {"ticker": "META", "category": "cloud_saas", "name": "meta_news", "url": "https://about.fb.com/news/feed/"},
+    {"ticker": "AMZN", "category": "cloud_saas", "name": "amazon_news", "url": "https://www.aboutamazon.com/news/feed"},
+    {"ticker": "IBM", "category": "cloud_saas", "name": "ibm_newsroom", "url": "https://newsroom.ibm.com/announcements?pagetemplate=rss"},
+    {"ticker": "AAPL", "category": "cloud_saas", "name": "apple_newsroom", "url": "https://www.apple.com/newsroom/rss-feed.rss"},
+    {"ticker": "MDB", "category": "enterprise_ai", "name": "mongodb_ir", "url": "https://investors.mongodb.com/rss/news-releases.xml"},
+    {"ticker": "DDOG", "category": "enterprise_ai", "name": "datadog_ir", "url": "https://investors.datadoghq.com/rss/news-releases.xml"},
+    {"ticker": "NTNX", "category": "enterprise_ai", "name": "nutanix_ir", "url": "https://ir.nutanix.com/rss/news-releases.xml"},
+    {"ticker": "CRWD", "category": "cyber_ai", "name": "crowdstrike_ir", "url": "https://ir.crowdstrike.com/rss/news-releases.xml"},
+    {"ticker": "PANW", "category": "cyber_ai", "name": "palo_alto_ir", "url": "https://investors.paloaltonetworks.com/rss/news-releases.xml"},
+    {"ticker": "FTNT", "category": "cyber_ai", "name": "fortinet_ir", "url": "https://investor.fortinet.com/rss/news-releases.xml"},
+    {"ticker": "ZS", "category": "cyber_ai", "name": "zscaler_ir", "url": "https://ir.zscaler.com/rss/news-releases.xml"},
+    {"ticker": "NVDA", "category": "chip", "name": "nvidia_newsroom", "url": "https://nvidianews.nvidia.com/releases.xml"},
+    {"ticker": "AMD", "category": "chip", "name": "amd_ir", "url": "https://ir.amd.com/news-events/press-releases/rss"},
+    {"ticker": "INTC", "category": "chip", "name": "intel_ir", "url": "https://www.intc.com/news-events/press-releases/rss"},
+    {"ticker": "AVGO", "category": "chip", "name": "broadcom_ir", "url": "https://investors.broadcom.com/rss/news-releases.xml"},
+    {"ticker": "MRVL", "category": "chip", "name": "marvell_ir", "url": "https://investor.marvell.com/news-events/press-releases/rss"},
+    {"ticker": "ARM", "category": "chip", "name": "arm_ir", "url": "https://investors.arm.com/rss/news-releases.xml"},
+    {"ticker": "KLAC", "category": "semi_equipment", "name": "kla_ir", "url": "https://ir.kla.com/news-events/press-releases/rss"},
+    {"ticker": "AMAT", "category": "semi_equipment", "name": "applied_materials_ir", "url": "https://ir.appliedmaterials.com/rss/news-releases.xml"},
+    {"ticker": "DELL", "category": "server", "name": "dell_ir", "url": "https://investors.delltechnologies.com/rss/news-releases.xml"},
+    {"ticker": "WDC", "category": "storage", "name": "wdc_ir", "url": "https://investor.wdc.com/rss/news-releases.xml"},
+    {"ticker": "EQIX", "category": "datacenter", "name": "equinix_ir", "url": "https://investor.equinix.com/news-events/press-releases/rss"},
+    {"ticker": "APLD", "category": "compute_hosting", "name": "applied_digital_ir", "url": "https://ir.applieddigital.com/news-events/press-releases/rss"},
+    {"ticker": "CORZ", "category": "compute_hosting", "name": "core_scientific_ir", "url": "https://investors.corescientific.com/news-events/press-releases/rss"},
+    {"ticker": "MARA", "category": "compute_hosting", "name": "marathon_ir", "url": "https://ir.marathondh.com/news-events/press-releases/rss"}
+  ]
+}

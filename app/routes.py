@@ -9,6 +9,7 @@ from app.database import Fund, QuotaRecord, run_with_db_retry
 from app.nvda_signal.trade_window import strategy_label
 from app.source_url_guard import is_test_source_url
 from app.service import run_scrape_and_notify
+from app.time_display import format_beijing_at_display, format_published_at_display
 from app.utils import is_trading_day, now_beijing
 
 router = APIRouter(prefix="/api")
@@ -225,7 +226,9 @@ def _deal_to_dict(event) -> dict:
         "category": FEED_AI,
         "category_label": "AI合作",
         "published_at": event.published_at.isoformat() if event.published_at else None,
+        "published_at_display": format_published_at_display(event.published_at),
         "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
+        "fetched_at_display": format_beijing_at_display(event.fetched_at),
         "headline": event.headline,
         "summary": event.summary,
         "source": event.source,
@@ -243,6 +246,7 @@ def _deal_to_dict(event) -> dict:
         "event_type": event.event_type,
         "is_update": event.is_update,
         "pushed_at": event.pushed_at.isoformat() if event.pushed_at else None,
+        "pushed_at_display": format_beijing_at_display(event.pushed_at) if event.pushed_at else None,
         "push_channel": event.push_channel,
         "pushed": _push_ok(event),
         "signal_tier": None,
@@ -260,7 +264,9 @@ def _nvda_to_dict(event) -> dict:
         "category": FEED_NVDA,
         "category_label": "黄仁勋",
         "published_at": event.published_at.isoformat() if event.published_at else None,
+        "published_at_display": format_published_at_display(event.published_at),
         "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
+        "fetched_at_display": format_beijing_at_display(event.fetched_at),
         "headline": event.headline,
         "summary": event.summary,
         "source": event.source,
@@ -278,6 +284,7 @@ def _nvda_to_dict(event) -> dict:
         "event_type": event.action_type,
         "is_update": False,
         "pushed_at": event.pushed_at.isoformat() if event.pushed_at else None,
+        "pushed_at_display": format_beijing_at_display(event.pushed_at) if event.pushed_at else None,
         "push_channel": event.push_channel,
         "pushed": _push_ok(event),
         "signal_tier": event.signal_tier,
