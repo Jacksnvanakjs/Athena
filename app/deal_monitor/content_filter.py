@@ -210,3 +210,33 @@ def reject_deal_item(item: RawItem) -> tuple[bool, str]:
                 return True, "Google News 低信源且非新签通稿"
 
     return False, ""
+
+
+def should_hide_deal_content(
+    headline: str,
+    summary: str | None,
+    source: str | None,
+    source_url: str | None,
+    published_at=None,
+) -> bool:
+    """列表/API 展示时隐藏应被拒的低信源、旧闻复述稿（不删库）。"""
+    from datetime import datetime, timezone
+
+    item = RawItem(
+        headline=headline or "",
+        summary=summary or "",
+        source=source or "",
+        source_url=source_url or "",
+        published_at=published_at or datetime.now(timezone.utc),
+    )
+    return reject_deal_item(item)[0]
+
+
+def should_hide_deal_event(event) -> bool:
+    return should_hide_deal_content(
+        event.headline,
+        event.summary,
+        event.source,
+        event.source_url,
+        event.published_at,
+    )

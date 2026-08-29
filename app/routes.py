@@ -166,9 +166,13 @@ def system_status():
         NVDA_SIGNAL_ENABLED,
     )
     from app.database import DealEvent, EarningsEvent, NvdaSignalEvent
+    from app.deal_monitor.content_filter import should_hide_deal_event
 
     def _counts(db: Session):
-        deals = [e for e in db.query(DealEvent).all() if not is_test_source_url(e.source_url)]
+        deals = [
+            e for e in db.query(DealEvent).all()
+            if not is_test_source_url(e.source_url) and not should_hide_deal_event(e)
+        ]
         nvda = [e for e in db.query(NvdaSignalEvent).all() if not is_test_source_url(e.source_url)]
         earn = db.query(EarningsEvent).filter(EarningsEvent.status.in_(["upcoming", "pushed"])).count()
         return len(deals), len(nvda), earn
@@ -332,6 +336,7 @@ def list_deals(
     limit: int = Query(default=100, ge=1, le=500),
 ):
     from app.database import DealEvent, NvdaSignalEvent
+    from app.deal_monitor.content_filter import should_hide_deal_event
 
     since = now_beijing() - timedelta(days=days)
     if category not in ("all", FEED_AI, FEED_NVDA):
@@ -353,7 +358,7 @@ def list_deals(
                     ~DealEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
             for r in q.order_by(desc(DealEvent.published_at)).limit(limit).all():
-                if is_test_source_url(r.source_url):
+                if is_test_source_url(r.source_url) or should_hide_deal_event(r):
                     continue
                 rows.append(_deal_to_dict(r))
 
@@ -386,6 +391,7 @@ def deals_stats(
     category: str = Query(default="all"),
 ):
     from app.database import DealEvent, NvdaSignalEvent
+    from app.deal_monitor.content_filter import should_hide_deal_event
 
     since = now_beijing() - timedelta(days=days)
 
@@ -395,32 +401,17 @@ def deals_stats(
         by_tier_pair: dict[str, int] = {}
 
         if category in ("all", FEED_AI):
-            ai_total = (
-                db.query(DealEvent)
-                .filter(DealEvent.published_at >= since)
-                .all()
-            )
-            ai_total = len([e for e in ai_total if not is_test_source_url(e.source_url)])
-            ai_pushed = (
-                db.query(DealEvent)
-                .filter(
-                    DealEvent.published_at >= since,
-                    DealEvent.pushed_at.isnot(None),
-                    DealEvent.push_channel.isnot(None),
-                    ~DealEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
-                )
-                .all()
-            )
-            ai_pushed = len([e for e in ai_pushed if not is_test_source_url(e.source_url)])
-            pairs_raw = (
-                db.query(DealEvent)
-                .filter(DealEvent.published_at >= since)
-                .all()
-            )
-            by_tier_pair: dict[str, int] = {}
-            for e in pairs_raw:
-                if is_test_source_url(e.source_url):
-                    continue
+            ai_rows = [
+                e for e in db.query(DealEvent).filter(DealEvent.published_at >= since).all()
+                if not is_test_source_url(e.source_url) and not should_hide_deal_event(e)
+            ]
+            ai_total = len(ai_rows)
+            ai_pushed = len([
+                e for e in ai_rows
+                if e.pushed_at and e.push_channel and e.push_channel not in _PUSH_OK_EXCLUDE
+            ])
+            by_tier_pair = {}
+            for e in ai_rows:
                 by_tier_pair[e.tier_pair] = by_tier_pair.get(e.tier_pair, 0) + 1
 
         if category in ("all", FEED_NVDA):
@@ -455,6 +446,7 @@ def deals_stats(
 @router.get("/deals/{deal_id}")
 def get_deal(deal_id: int, category: str = Query(default=FEED_AI)):
     from app.database import DealEvent, NvdaSignalEvent
+    from app.deal_monitor.content_filter import should_hide_deal_event
 
     def _query(db: Session):
         if category == FEED_NVDA:
@@ -463,7 +455,7 @@ def get_deal(deal_id: int, category: str = Query(default=FEED_AI)):
                 raise HTTPException(status_code=404, detail="未找到")
             return _nvda_to_dict(event)
         event = db.query(DealEvent).filter(DealEvent.id == deal_id).first()
-        if not event:
+        if not event or should_hide_deal_event(event):
             raise HTTPException(status_code=404, detail="未找到")
         return _deal_to_dict(event)
 

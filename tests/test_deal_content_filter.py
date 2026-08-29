@@ -44,5 +44,17 @@ def test_price_reaction_without_fresh_cues():
     assert is_price_reaction_rehash("Reddit stock jumps 13% after OpenAI partnership")
 
 
-def test_seo_spam_hash():
-    assert is_seo_spam_headline("Some headline (Glbua6qxBn) - Mshale")
+def test_should_hide_reddit_mshale_from_db_fields():
+    from app.deal_monitor.content_filter import should_hide_deal_content
+
+    headline = (
+        "Reddit Shares Up 11% After Announcing A Partnership With OpenAI "
+        "Below Deck Mediterranean Season 11 (Glbua6qxBn) - Mshale"
+    )
+    assert should_hide_deal_content(
+        headline,
+        summary="",
+        source="google_news:Mshale",
+        source_url="https://news.google.com/rss/articles/example",
+    )
+
