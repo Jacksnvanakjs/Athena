@@ -34,11 +34,11 @@ from app.nvda_signal.fetchers import fetch_all_nvda_items
 from app.nvda_signal.keywords import is_rumor, _norm
 from app.nvda_signal.materiality import score_a, score_a_plus_b
 from app.nvda_signal.prior_a_lookup import find_prior_a, prior_a_days_ago
-from app.nvda_signal.trade_window import build_trade_plan, strategy_label
+from app.nvda_signal.trade_window import build_trade_plan
 from app.notifier import notify
+from app.push_format import build_nvda_push_content
 from app.source_url_guard import is_test_source_url
 from app.text_clean import clean_article_text
-from app.time_display import format_beijing_at_push, format_published_at_push
 from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
@@ -161,44 +161,6 @@ def _push_rate_limited(db: Session, ticker: str) -> bool:
     return c1 >= DEAL_MAX_PUSH_PER_HOUR
 
 
-def build_push_content(event: NvdaSignalEvent) -> tuple[str, str]:
-    tag = "A+B" if event.signal_tier == "A_PLUS_B" else "A"
-    observe = "" if event.buy_ok else "·观察"
-    title = f"[黄仁勋] 【NVDA {tag}档{observe}】{event.beneficiary_ticker} 直接受益"
-
-    strat_cn = strategy_label(event.strategy)
-
-    cap_b = "N/A"
-    if event.beneficiary_market_cap_usd:
-        cap_b = f"{event.beneficiary_market_cap_usd / 1e9:.1f}"
-
-    lines = [
-        f"<b>🔔 黄仁勋 / NVDA 产业动作</b><br><br>",
-        f"<b>标的</b>：{event.beneficiary_name} "
-        f"(<code>{event.beneficiary_ticker}</code>, {event.beneficiary_tier}, 市值约 ${cap_b}B)<br>",
-        f"<b>档位</b>：{event.signal_tier} · {event.action_type}<br>",
-        f"<b>材料性</b>：{event.materiality_score}/100 · 置信度 {event.confidence}<br><br>",
-        f"<b>策略</b>：{strat_cn}<br>",
-        f"<b>买入</b>：{event.buy_window}<br>",
-        f"<b>卖出</b>：{event.sell_window}<br>",
-        f"<b>建议仓位</b>：{int(event.position_pct * 100)}%<br>",
-    ]
-    if event.prior_a_event_id:
-        lines.append(f"<b>前次 A</b>：{event.prior_a_days_ago} 天前 (#{event.prior_a_event_id})<br>")
-    if not event.buy_ok:
-        lines.append(f"<b>⚠️ 不建议追</b>：chase_risk={event.chase_risk}<br>")
-    lines.extend([
-        f"<br><b>标题</b>：{event.headline}<br>",
-        f"<b>发布时间</b>：{format_published_at_push(event.published_at)}<br>",
-        f"<b>抓取时间</b>：{format_beijing_at_push(event.fetched_at)}<br>",
-        f"<b>来源</b>：<a href=\"{event.source_url}\">链接</a><br>",
-        "<br>---<br>",
-        "历史统计：A档尽早买+次日收盘卖胜率约85%；A+B为情绪催化，快进快出。",
-        "非投资建议。跳空过大不追。",
-    ])
-    return title, "".join(lines)
-
-
 async def _maybe_push(db: Session, event: NvdaSignalEvent) -> None:
     if not NVDA_SIGNAL_PUSH_ENABLED:
         event.push_channel = "disabled"
@@ -217,7 +179,7 @@ async def _maybe_push(db: Session, event: NvdaSignalEvent) -> None:
         event.push_channel = "rate_limited"
         return
 
-    title, content = build_push_content(event)
+    title, content = build_nvda_push_content(event)
     results = await notify(title, content)
     if not results:
         event.push_channel = "unconfigured"

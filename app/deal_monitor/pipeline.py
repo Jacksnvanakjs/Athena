@@ -38,8 +38,8 @@ from app.deal_monitor.materiality import score_materiality
 from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pair_text
 from app.deal_monitor.tiers import assign_roles, score_threshold
 from app.notifier import notify
+from app.push_format import build_deal_push_content
 from app.source_url_guard import is_test_source_url
-from app.time_display import format_beijing_at_push, format_published_at_push
 from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
@@ -78,49 +78,6 @@ def _same_company(a: Entity, b: Entity) -> bool:
 
 def _exclude_channel_partners(entities: list[Entity], context: str) -> list[Entity]:
     return [e for e in entities if not is_channel_partner_entity(e, context)]
-
-
-def _cap_billions(cap: float | None) -> str:
-    if cap is None:
-        return "N/A"
-    return f"{cap / 1e9:.1f}"
-
-
-def build_push_content(
-    event: DealEvent,
-    anchor_ticker_display: str,
-) -> tuple[str, str]:
-    title = (
-        f"[AI合作] {event.beneficiary_ticker} ← {event.anchor_name} "
-        f"({event.tier_pair}) 分{event.materiality_score}"
-    )
-    cap_b = _cap_billions(event.beneficiary_market_cap_usd)
-    keywords = event.matched_keywords or "[]"
-    try:
-        kw_list = json.loads(keywords)
-        kw_str = ", ".join(kw_list) if kw_list else keywords
-    except json.JSONDecodeError:
-        kw_str = keywords
-
-    lines = [
-        "<b>🔔 AI 产业链合作快讯</b><br><br>",
-        f"<b>受益</b>：{event.beneficiary_name} "
-        f"(<code>{event.beneficiary_ticker}</code>, {event.beneficiary_tier}, 市值约 ${cap_b}B)<br>",
-        f"<b>锚点</b>：{event.anchor_name} ({anchor_ticker_display}, {event.anchor_tier})<br>",
-        f"<b>关系</b>：{event.tier_pair}<br><br>",
-        f"<b>材料性</b>：{event.materiality_score}/100<br>",
-        f"<b>关键词</b>：{kw_str}<br><br>",
-        f"<b>标题</b>：{event.headline}<br>",
-        f"<b>发布时间</b>：{format_published_at_push(event.published_at)}<br>",
-        f"<b>抓取时间</b>：{format_beijing_at_push(event.fetched_at)}<br>",
-        f"<b>来源</b>：<a href=\"{event.source_url}\">链接</a> ({event.source})<br>",
-    ]
-    if event.tier_pair == "T0_T0":
-        lines.append("<br>⚠️ 双巨头合作，小票弹性有限，请谨慎。<br>")
-    lines.append(
-        f"<br>---<br>⚠️ 非投资建议；7 日内 <code>{event.beneficiary_ticker}</code> 同类事件仅推一次。"
-    )
-    return title, "".join(lines)
 
 
 def _is_duplicate(db: Session, url: str, h_hash: str, beneficiary_ticker: str) -> bool:
@@ -231,8 +188,7 @@ async def _maybe_push(db: Session, event: DealEvent, roles_should_push: bool) ->
         event.push_channel = "rate_limited"
         return
 
-    anchor_display = event.anchor_ticker or "未上市"
-    title, content = build_push_content(event, anchor_display)
+    title, content = build_deal_push_content(event)
     results = await notify(title, content)
     if not results:
         logger.warning("推送通道未配置（PUSHPLUS/SERVERCHAN 为空），跳过 %s", event.beneficiary_ticker)

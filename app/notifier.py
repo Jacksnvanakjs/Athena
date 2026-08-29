@@ -18,7 +18,7 @@ async def send_pushplus(title: str, content: str) -> bool:
                     "token": PUSHPLUS_TOKEN,
                     "title": title,
                     "content": content,
-                    "template": "html",
+                    "template": "txt",
                 },
                 timeout=15,
             )
