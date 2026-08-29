@@ -9,7 +9,11 @@ from app.database import Fund, QuotaRecord, run_with_db_retry
 from app.nvda_signal.trade_window import strategy_label
 from app.source_url_guard import is_test_source_url
 from app.service import run_scrape_and_notify
-from app.time_display import format_beijing_at_display, format_published_at_display
+from app.time_display import (
+    format_beijing_at_display,
+    format_published_at_bj,
+    format_published_at_et,
+)
 from app.utils import is_trading_day, now_beijing
 
 router = APIRouter(prefix="/api")
@@ -216,7 +220,7 @@ def _push_ok(event) -> bool:
         event.pushed_at
         and event.push_channel
         and event.push_channel
-        not in {"none", "failed", "unconfigured", "disabled", "rate_limited"}
+        not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale"}
     )
 
 
@@ -226,7 +230,8 @@ def _deal_to_dict(event) -> dict:
         "category": FEED_AI,
         "category_label": "AI合作",
         "published_at": event.published_at.isoformat() if event.published_at else None,
-        "published_at_display": format_published_at_display(event.published_at),
+        "published_at_bj": format_published_at_bj(event.published_at),
+        "published_at_et": format_published_at_et(event.published_at),
         "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
         "fetched_at_display": format_beijing_at_display(event.fetched_at),
         "headline": event.headline,
@@ -264,7 +269,8 @@ def _nvda_to_dict(event) -> dict:
         "category": FEED_NVDA,
         "category_label": "黄仁勋",
         "published_at": event.published_at.isoformat() if event.published_at else None,
-        "published_at_display": format_published_at_display(event.published_at),
+        "published_at_bj": format_published_at_bj(event.published_at),
+        "published_at_et": format_published_at_et(event.published_at),
         "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
         "fetched_at_display": format_beijing_at_display(event.fetched_at),
         "headline": event.headline,
@@ -300,6 +306,11 @@ def _nvda_to_dict(event) -> dict:
     }
 
 
+_PUSH_OK_EXCLUDE = frozenset(
+    {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale"}
+)
+
+
 @router.get("/deals")
 def list_deals(
     days: int = Query(default=7, ge=1, le=90),
@@ -329,9 +340,7 @@ def list_deals(
                 q = q.filter(
                     DealEvent.pushed_at.isnot(None),
                     DealEvent.push_channel.isnot(None),
-                    ~DealEvent.push_channel.in_(
-                        ["none", "failed", "unconfigured", "disabled", "rate_limited"]
-                    ),
+                    ~DealEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
             for r in q.order_by(desc(DealEvent.published_at)).limit(limit).all():
                 if is_test_source_url(r.source_url):
@@ -348,9 +357,7 @@ def list_deals(
                 q = q.filter(
                     NvdaSignalEvent.pushed_at.isnot(None),
                     NvdaSignalEvent.push_channel.isnot(None),
-                    ~NvdaSignalEvent.push_channel.in_(
-                        ["none", "failed", "unconfigured", "disabled", "rate_limited"]
-                    ),
+                    ~NvdaSignalEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
             for r in q.order_by(desc(NvdaSignalEvent.published_at)).limit(limit).all():
                 if is_test_source_url(r.source_url):
@@ -390,9 +397,7 @@ def deals_stats(
                     DealEvent.published_at >= since,
                     DealEvent.pushed_at.isnot(None),
                     DealEvent.push_channel.isnot(None),
-                    ~DealEvent.push_channel.in_(
-                        ["none", "failed", "unconfigured", "disabled", "rate_limited"]
-                    ),
+                    ~DealEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
                 .all()
             )
@@ -409,13 +414,17 @@ def deals_stats(
                 by_tier_pair[e.tier_pair] = by_tier_pair.get(e.tier_pair, 0) + 1
 
         if category in ("all", FEED_NVDA):
-            nvda_rows = db.query(NvdaSignalEvent).filter(NvdaSignalEvent.published_at >= since).all()
+            nvda_rows = (
+                db.query(NvdaSignalEvent)
+                .filter(NvdaSignalEvent.published_at >= since)
+                .all()
+            )
             nvda_rows = [e for e in nvda_rows if not is_test_source_url(e.source_url)]
             nvda_total = len(nvda_rows)
             nvda_pushed = len([
                 e for e in nvda_rows
                 if e.pushed_at and e.push_channel
-                and e.push_channel not in {"none", "failed", "unconfigured", "disabled", "rate_limited"}
+                and e.push_channel not in _PUSH_OK_EXCLUDE
             ])
 
         return {

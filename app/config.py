@@ -105,6 +105,8 @@ POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DEAL_USE_LLM = os.getenv("DEAL_USE_LLM", "true").lower() == "true"
 DEAL_LLM_MODEL = os.getenv("DEAL_LLM_MODEL", "gemini-3.6-flash")
+# 发稿超过 N 天：仍入库观察，但不推送（防 IR RSS 历史稿误推）
+DEAL_PUSH_MAX_AGE_DAYS = int(os.getenv("DEAL_PUSH_MAX_AGE_DAYS", "3"))
 
 # ── 黄仁勋 / NVDA A 档产业动作监控 ──
 NVDA_SIGNAL_ENABLED = os.getenv("NVDA_SIGNAL_ENABLED", "true").lower() == "true"

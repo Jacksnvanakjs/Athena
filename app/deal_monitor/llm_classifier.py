@@ -186,7 +186,12 @@ def _build_prompt(items: list[RawItem]) -> str:
         "【模式负例】\n"
         "- 索引页仅 Item 1.01 无对方/无标的；仪式合作；validated/certified；"
         "机器人/消费电子；与大模型无关的普通软件功能更新；信贷/发债/并购/私募；"
-        "无产品落地的咨询/营销战略合作；纯 ETF/杠杆产品发行 → false\n\n"
+        "无产品落地的咨询/营销战略合作；纯 ETF/杠杆产品发行 → false\n"
+        "- 纯产品功能/整合发布（deepens integration、integrates with、product launch、"
+        "unveils、introduces、now available），无 definitive/commercial agreement、"
+        "无 multi-year、无金额/容量条款 → false。"
+        "例：安全厂商与芯片平台的 FortiAIGate/NVIDIA 产品整合、"
+        "SaaS 常规 Copilot 插件更新、旧闻重发 → false\n\n"
         "角色与打分：\n"
         "- anchor=更大/更核心方（常为云厂或大模型公司）；beneficiary=业务直接受益的美股公司；"
         "禁止把小子公司映射成综合集团母公司。\n"
@@ -272,6 +277,11 @@ def apply_heuristic_rescue(
             continue
         item = by_url.get(url)
         if not item or not heuristic_ai_deal_signal(item):
+            continue
+        from app.deal_monitor.keywords import is_product_only_integration
+
+        blob = f"{item.headline}\n{item.summary}"
+        if is_product_only_integration(blob):
             continue
         # 保留 LLM 已抽出的双方；没有则交给 pipeline 的 SEC/实体解析
         decisions[url] = LlmDecision(

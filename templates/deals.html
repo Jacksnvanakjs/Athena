@@ -176,7 +176,9 @@
     tr:hover td { background: #f8fafc; }
     .ticker { font-weight: 600; color: var(--accent); }
     .score { font-variant-numeric: tabular-nums; font-weight: 600; }
-    .time-cell { font-size: 0.82rem; line-height: 1.35; max-width: 240px; display: inline-block; }
+    .time-cell { font-size: 0.82rem; line-height: 1.35; max-width: 148px; display: inline-block; white-space: nowrap; }
+    .time-main { color: var(--text); }
+    .time-et { font-size: 0.72rem; color: var(--text-muted); margin-top: 2px; font-weight: 400; }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -213,7 +215,7 @@
         <div class="sub" id="statusLine">加载状态…</div>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <a class="btn btn-dark" href="/">基金监测</a>
+        <a class="btn btn-dark" href="/funds">基金监测</a>
         <a class="btn btn-dark" href="/heatmap">美股资金变化</a>
         <button class="btn btn-dark" id="scanBtn" onclick="triggerScan()">立即扫描</button>
         <button class="btn btn-primary" onclick="loadDeals()">刷新列表</button>
@@ -252,7 +254,7 @@
         <div class="field">
           <div class="field-label">
             时间范围（天）
-            <span class="help" title="显示最近 N 天内抓取并入库的快讯。默认 7 天，与「同一受益 ticker 7 天内只推一次」的去重窗口一致。">?</span>
+            <span class="help" title="按稿件发布时间筛选，列表默认按最新发布时间排序。">?</span>
           </div>
           <input type="number" class="short" id="days" value="7" min="1" max="90">
         </div>
@@ -310,7 +312,7 @@
         <thead>
           <tr>
             <th>分类</th>
-            <th title="稿件原始发布时间（UTC入库）；悬停可看抓取/推送时间">发布时间</th>
+            <th title="按稿件发布时间降序；悬停可看抓取/推送时间">发布时间 ↓</th>
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
@@ -338,14 +340,22 @@
     }
 
     function fmtPublished(row) {
-      const pub = row.published_at_display || fmtTime(row.published_at);
+      const bj = row.published_at_bj;
+      const et = row.published_at_et;
+      let inner;
+      if (bj && bj !== '—') {
+        inner = `<div class="time-main">${bj}</div>`;
+        if (et) inner += `<div class="time-et">${et} 美东</div>`;
+      } else {
+        inner = fmtTime(row.published_at);
+      }
       const tips = [];
       if (row.fetched_at_display) tips.push('抓取 ' + row.fetched_at_display);
       if (row.pushed_at_display) tips.push('推送 ' + row.pushed_at_display);
       const tip = tips.join(' · ').replace(/"/g, '&quot;');
       return tip
-        ? `<span class="time-cell" title="${tip}">${pub}</span>`
-        : `<span class="time-cell">${pub}</span>`;
+        ? `<span class="time-cell" title="${tip}">${inner}</span>`
+        : `<span class="time-cell">${inner}</span>`;
     }
 
     function fmtSource(row) {
@@ -355,10 +365,18 @@
       return `<a class="link" href="${row.source_url}" target="_blank" rel="noopener">${label}</a>`;
     }
 
+    function fmtParty(name, ticker) {
+      const n = name || '—';
+      if (ticker) return `${n} (<span class="ticker">${ticker}</span>)`;
+      return n;
+    }
+
+    function fmtBeneficiary(row) {
+      return fmtParty(row.beneficiary_name, row.beneficiary_ticker);
+    }
+
     function fmtAnchor(row) {
-      const name = row.anchor_name || '—';
-      if (row.anchor_ticker) return `${name} (${row.anchor_ticker})`;
-      return name;
+      return fmtParty(row.anchor_name, row.anchor_ticker);
     }
 
     function fmtCategory(row) {
@@ -409,7 +427,11 @@
 
     async function loadStats() {
       const cat = document.getElementById('category').value;
-      const res = await fetch('/api/deals/stats?days=' + document.getElementById('days').value + '&category=' + cat);
+      const params = new URLSearchParams({
+        days: document.getElementById('days').value,
+        category: cat,
+      });
+      const res = await fetch('/api/deals/stats?' + params);
       const data = await res.json();
       const pairs = Object.entries(data.by_tier_pair || {}).map(([k, v]) => k + ' ' + v + '条').join(' · ');
       let extra = '';
@@ -453,12 +475,12 @@
         tr.innerHTML = `
           <td>${fmtCategory(row)}</td>
           <td>${fmtPublished(row)}</td>
-          <td><span class="ticker">${row.beneficiary_ticker}</span> <span class="badge">${row.beneficiary_tier}</span></td>
+          <td>${fmtBeneficiary(row)}</td>
           <td>${fmtAnchor(row)}</td>
           <td>${row.headline}${titleExtra}</td>
           <td class="score">${row.materiality_score}${row.confidence != null ? '<div class="strategy-hint">置信' + row.confidence + '</div>' : ''}</td>
           <td>${fmtRelation(row)}</td>
-          <td class="${row.pushed ? 'pushed' : ''}">${row.pushed ? '✓' : (row.push_channel === 'unconfigured' || row.push_channel === 'failed' || row.push_channel === 'none' ? '未送达' : '—')}</td>
+          <td class="${row.pushed ? 'pushed' : ''}">${row.pushed ? '✓' : (row.push_channel === 'stale' ? '过旧' : (row.push_channel === 'unconfigured' || row.push_channel === 'failed' || row.push_channel === 'none' ? '未送达' : '—'))}</td>
           <td>${fmtSource(row)}</td>
         `;
         tbody.appendChild(tr);

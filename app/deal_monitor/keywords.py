@@ -87,6 +87,42 @@ COOPERATION_VERBS = [
 
 UPDATE_KEYWORDS = ["amend", "extend", "追加", "上调"]
 
+_PRODUCT_ONLY_CUES = (
+    "deepens integration",
+    "product integration",
+    "integrates with",
+    "integration enables",
+    "launches new",
+    "unveils",
+    "introduces",
+    "now available",
+    "general availability",
+)
+_STRONG_DEAL_CUES = (
+    "definitive agreement",
+    "material definitive",
+    "entered into",
+    "enter into",
+    "commercial agreement",
+    "multi-year",
+    "capacity agreement",
+    "purchase agreement",
+    "supply agreement",
+    "item 1.01",
+)
+
+
+def is_product_only_integration(text: str) -> bool:
+    """纯产品整合/功能发布，无新商业条款。"""
+    norm = _normalize(text)
+    if not any(cue in norm for cue in _PRODUCT_ONLY_CUES):
+        return False
+    if any(cue in norm for cue in _STRONG_DEAL_CUES):
+        return False
+    if re.search(r"\$[\d,.]+\s*(million|billion|m\b|b\b)", norm, re.I):
+        return False
+    return True
+
 
 def is_update_headline(headline: str) -> bool:
     """

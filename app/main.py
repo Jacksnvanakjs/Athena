@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -75,8 +75,13 @@ def health():
     return {"status": "ok"}
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+@app.get("/")
+async def index():
+    return RedirectResponse(url="/deals", status_code=302)
+
+
+@app.get("/funds", response_class=HTMLResponse)
+async def funds_page(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
 
 

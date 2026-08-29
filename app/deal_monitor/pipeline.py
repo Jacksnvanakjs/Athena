@@ -6,7 +6,7 @@ import hashlib
 import json
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, desc, func, or_
 from sqlalchemy.orm import Session
@@ -18,6 +18,7 @@ from app.deal_monitor.config import (
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
     DEAL_PUSH_ENABLED,
+    DEAL_PUSH_MAX_AGE_DAYS,
     DEAL_USE_LLM,
 )
 from app.deal_monitor.entities import Entity, registry
@@ -30,7 +31,7 @@ from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
 from app.deal_monitor.fetchers.company_ir import fetch_finnhub_and_google
 from app.deal_monitor.fetchers.company_ir_rss import fetch_company_ir_feeds
-from app.deal_monitor.keywords import is_update_headline, passes_keyword_filter
+from app.deal_monitor.keywords import is_product_only_integration, is_update_headline, passes_keyword_filter
 from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
 from app.deal_monitor.materiality import score_materiality
@@ -54,6 +55,15 @@ def normalize_headline(headline: str) -> str:
 
 def headline_hash(headline: str) -> str:
     return hashlib.md5(normalize_headline(headline).encode()).hexdigest()
+
+
+def _published_too_stale_for_push(published_at: datetime) -> bool:
+    """published_at 为 UTC naive；超过 DEAL_PUSH_MAX_AGE_DAYS 则不推送。"""
+    if DEAL_PUSH_MAX_AGE_DAYS <= 0:
+        return False
+    aware = published_at.replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - aware).total_seconds() / 86400
+    return age_days > DEAL_PUSH_MAX_AGE_DAYS
 
 
 def _same_company(a: Entity, b: Entity) -> bool:
@@ -173,7 +183,7 @@ def _push_succeeded(event: DealEvent) -> bool:
     return bool(
         event.pushed_at
         and ch
-        and ch not in {"none", "failed", "unconfigured", "disabled", "rate_limited"}
+        and ch not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale"}
     )
 
 
@@ -400,6 +410,10 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         stats["reason"] = "含渠道商/分销商，非合作方"
         return stats
 
+    if is_product_only_integration(text):
+        stats["reason"] = "纯产品整合/功能发布，无新商业条款"
+        return stats
+
     await enrich_entity_tiers(db, [entity_a, entity_b])
 
     roles = assign_roles(entity_a, entity_b)
@@ -457,7 +471,17 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         event = _save_event(
             db, item, roles, score, matched, is_update, beneficiary, event_type=event_type
         )
-        await _maybe_push(db, event, roles.should_push)
+        if _published_too_stale_for_push(event.published_at):
+            event.push_channel = "stale"
+            event.pushed_at = None
+            logger.info(
+                "发稿过旧，入库不推送 %s published=%s age_limit=%sd",
+                ticker,
+                event.published_at,
+                DEAL_PUSH_MAX_AGE_DAYS,
+            )
+        else:
+            await _maybe_push(db, event, roles.should_push)
         saved.append(event.beneficiary_ticker)
 
     if not saved:
