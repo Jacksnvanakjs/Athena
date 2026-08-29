@@ -191,7 +191,11 @@ def _build_prompt(items: list[RawItem]) -> str:
         "unveils、introduces、now available），无 definitive/commercial agreement、"
         "无 multi-year、无金额/容量条款 → false。"
         "例：安全厂商与芯片平台的 FortiAIGate/NVIDIA 产品整合、"
-        "SaaS 常规 Copilot 插件更新、旧闻重发 → false\n\n"
+        "SaaS 常规 Copilot 插件更新 → false\n"
+        "- 旧闻复述/股价反应稿 → false：标题侧重「shares/stock up/jump/soar X% "
+        "after/following announcing partnership/deal」，而非今日新签署/新条款；"
+        "低质 SEO 站（如 Mshale）、标题混无关剧集/随机串 → false。"
+        "例：Reddit shares up 11% after announcing OpenAI partnership（2024 旧闻重发）→ false\n\n"
         "角色与打分：\n"
         "- anchor=更大/更核心方（常为云厂或大模型公司）；beneficiary=业务直接受益的美股公司；"
         "禁止把小子公司映射成综合集团母公司。\n"
@@ -278,8 +282,11 @@ def apply_heuristic_rescue(
         item = by_url.get(url)
         if not item or not heuristic_ai_deal_signal(item):
             continue
+        from app.deal_monitor.content_filter import reject_deal_item
         from app.deal_monitor.keywords import is_product_only_integration
 
+        if reject_deal_item(item)[0]:
+            continue
         blob = f"{item.headline}\n{item.summary}"
         if is_product_only_integration(blob):
             continue

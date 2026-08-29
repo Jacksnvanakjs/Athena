@@ -31,6 +31,7 @@ from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
 from app.deal_monitor.fetchers.company_ir import fetch_finnhub_and_google
 from app.deal_monitor.fetchers.company_ir_rss import fetch_company_ir_feeds
+from app.deal_monitor.content_filter import reject_deal_item
 from app.deal_monitor.keywords import is_product_only_integration, is_update_headline, passes_keyword_filter
 from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
@@ -287,6 +288,10 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
     if is_test_source_url(item.source_url):
         stats["reason"] = "测试/占位链接，不入库"
         return stats
+    reject, reject_reason = reject_deal_item(item)
+    if reject:
+        stats["reason"] = f"内容过滤: {reject_reason}"
+        return stats
     text = f"{item.headline}\n{item.summary}"
     matched: list[str] = []
 
@@ -491,6 +496,28 @@ async def run_pipeline() -> dict:
         }
         new_items = [item for item in items if item.source_url not in seen_urls]
         summary["fetched_new"] = len(new_items)
+
+        content_rejected = 0
+        eligible_items: list[RawItem] = []
+        for item in new_items:
+            reject, reason = reject_deal_item(item)
+            if reject:
+                content_rejected += 1
+                logger.info("内容过滤跳过: %s — %s", item.headline[:80], reason)
+                db.merge(
+                    DealSeenUrl(
+                        source_url=item.source_url,
+                        headline_hash=headline_hash(item.headline),
+                        seen_at=now_beijing(),
+                        llm_relevant=False,
+                    )
+                )
+                continue
+            eligible_items.append(item)
+        if content_rejected:
+            db.commit()
+            summary["content_filtered"] = content_rejected
+        new_items = eligible_items
 
         if DEAL_USE_LLM:
             llm_decisions = await classify_items(new_items)
