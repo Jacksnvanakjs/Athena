@@ -172,6 +172,82 @@ class HeatmapSnapshot(Base):
     created_at = Column(DateTime, nullable=False, default=now_beijing)
 
 
+class EarningsEvent(Base):
+    """小公司财报日历：每家公司 × 一次财报。"""
+
+    __tablename__ = "earnings_events"
+    __table_args__ = (UniqueConstraint("unique_key", name="uq_earnings_unique_key"),)
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    unique_key = Column(String(40), nullable=False, index=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    company_name = Column(String(100), nullable=False, default="")
+    sector = Column(String(20), nullable=False, default="")
+    tier = Column(String(10), nullable=False, default="T2")
+    market_cap_usd = Column(Float, nullable=True)
+    earnings_date = Column(Date, nullable=False, index=True)
+    session = Column(String(10), nullable=False, default="TBD")
+    confirmed = Column(Boolean, nullable=False, default=False)
+    score_total = Column(Integer, nullable=True)
+    score_detail_json = Column(Text, nullable=True)
+    eliminate_reason = Column(String(200), nullable=True)
+    push_eligible = Column(Boolean, nullable=False, default=False)
+    one_liner = Column(String(300), nullable=False, default="")
+    risk_oneliner = Column(String(300), nullable=False, default="")
+    strategy = Column(String(40), nullable=False, default="POST_ER_BUY_WITHIN_2D")
+    buy_window = Column(Text, nullable=False, default="")
+    sell_window = Column(Text, nullable=False, default="")
+    sell_deadline = Column(Text, nullable=False, default="")
+    buy_window_json = Column(Text, nullable=True)
+    hold_trading_days_max = Column(Integer, nullable=False, default=2)
+    status = Column(String(20), nullable=False, default="upcoming", index=True)
+    fetched_at = Column(DateTime, nullable=False)
+    scored_at = Column(DateTime, nullable=True)
+    pushed_at = Column(DateTime, nullable=True)
+    push_channel = Column(String(40), nullable=True)
+    push_batch_id = Column(Integer, nullable=True)
+    source = Column(String(30), nullable=False, default="finnhub")
+
+
+class EarningsPushBatch(Base):
+    """同日合并推送批次。"""
+
+    __tablename__ = "earnings_push_batches"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    earnings_date = Column(Date, nullable=False, index=True)
+    tickers_csv = Column(String(500), nullable=False, default="")
+    title = Column(String(300), nullable=False, default="")
+    content_html = Column(Text, nullable=False, default="")
+    pushed_at = Column(DateTime, nullable=False)
+    push_channel = Column(String(40), nullable=False, default="")
+    success = Column(Boolean, nullable=False, default=False)
+
+
+class AiMainlineDailySnapshot(Base):
+    """AI 主线每日快照：每子线一行；theme_key=_meta 存主线结论。"""
+
+    __tablename__ = "ai_mainline_daily_snapshots"
+    __table_args__ = (
+        UniqueConstraint("trade_date", "theme_key", name="uq_ai_mainline_day_theme"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    theme_key = Column(String(40), nullable=False, index=True)
+    ret_1d = Column(Float, nullable=True)
+    ret_5d = Column(Float, nullable=True)
+    ret_20d = Column(Float, nullable=True)
+    rel_1d = Column(Float, nullable=True)
+    rel_5d = Column(Float, nullable=True)
+    rel_20d = Column(Float, nullable=True)
+    breadth = Column(Float, nullable=True)
+    rank_5d = Column(Integer, nullable=True)
+    n_valid = Column(Integer, nullable=False, default=0)
+    payload_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=now_beijing)
+
+
 def is_turso_stream_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in STREAM_ERROR_MARKERS)

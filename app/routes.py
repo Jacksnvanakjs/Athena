@@ -1,7 +1,7 @@
 from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import desc
+from sqlalchemy import desc, or_
 from sqlalchemy.orm import Session
 
 from app.config import CHANGE_HIGHLIGHT_DAYS, FUNDS_SOURCE_FILE, SCRAPE_SECRET, SCRAPE_TIMES, TIMEZONE, USE_TURSO
@@ -158,15 +158,22 @@ async def cron_scrape(secret: str = Query(...)):
 
 @router.get("/status")
 def system_status():
-    from app.config import DEAL_POLL_INTERVAL_MIN, ENABLE_SCHEDULER, NVDA_SIGNAL_ENABLED
-    from app.database import DealEvent, NvdaSignalEvent
+    from app.config import (
+        AI_MAINLINE_ENABLED,
+        DEAL_POLL_INTERVAL_MIN,
+        ENABLE_SCHEDULER,
+        EARNINGS_MONITOR_ENABLED,
+        NVDA_SIGNAL_ENABLED,
+    )
+    from app.database import DealEvent, EarningsEvent, NvdaSignalEvent
 
     def _counts(db: Session):
         deals = [e for e in db.query(DealEvent).all() if not is_test_source_url(e.source_url)]
         nvda = [e for e in db.query(NvdaSignalEvent).all() if not is_test_source_url(e.source_url)]
-        return len(deals), len(nvda)
+        earn = db.query(EarningsEvent).filter(EarningsEvent.status.in_(["upcoming", "pushed"])).count()
+        return len(deals), len(nvda), earn
 
-    deal_total, nvda_total = run_with_db_retry(_counts)
+    deal_total, nvda_total, earnings_total = run_with_db_retry(_counts)
     return {
         "is_trading_day": is_trading_day(),
         "scrape_times": [f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES],
@@ -179,6 +186,9 @@ def system_status():
             "events_total": deal_total,
             "nvda_signal_total": nvda_total,
             "nvda_signal_enabled": NVDA_SIGNAL_ENABLED,
+            "earnings_total": earnings_total,
+            "earnings_enabled": EARNINGS_MONITOR_ENABLED,
+            "ai_mainline_enabled": AI_MAINLINE_ENABLED,
         },
     }
 
@@ -475,3 +485,166 @@ async def run_deals(token: str = Query(default="")):
         "nvda_signal": nvda_result,
         "saved": (deal_result.get("saved") or 0) + (nvda_result.get("saved") or 0),
     }
+
+
+# ── 小公司财报日历 ──
+
+
+@router.get("/earnings")
+def list_earnings(
+    days: int = Query(default=90, ge=1, le=180),
+    min_score: int = Query(default=0, ge=0, le=100),
+    sector: str | None = Query(default=None),
+    push_eligible: bool | None = Query(default=None),
+    status: str = Query(default="upcoming"),
+    limit: int = Query(default=200, ge=1, le=500),
+):
+    from datetime import timedelta
+
+    from app.database import EarningsEvent
+    from app.earnings_monitor.calendar_fetch import today_et
+    from app.earnings_monitor.pipeline import event_to_dict
+
+    today = today_et()
+    until = today + timedelta(days=days)
+
+    def _query(db: Session):
+        q = db.query(EarningsEvent).filter(
+            EarningsEvent.earnings_date >= today,
+            EarningsEvent.earnings_date <= until,
+        )
+        if status == "upcoming":
+            q = q.filter(EarningsEvent.status.in_(["upcoming", "pushed"]))
+        elif status:
+            q = q.filter(EarningsEvent.status == status)
+        if sector:
+            q = q.filter(EarningsEvent.sector == sector.upper())
+        if push_eligible is not None:
+            q = q.filter(EarningsEvent.push_eligible.is_(push_eligible))
+        if min_score:
+            q = q.filter(
+                or_(
+                    EarningsEvent.score_total.is_(None),
+                    EarningsEvent.score_total >= min_score,
+                )
+            )
+        rows = q.order_by(EarningsEvent.earnings_date.asc(), EarningsEvent.score_total.desc()).limit(limit).all()
+        # 同日得分降序：SQLAlchemy nulls last 因方言差异，再排一次
+        out = [event_to_dict(r) for r in rows]
+        out.sort(
+            key=lambda x: (
+                x.get("earnings_date") or "",
+                -(x.get("score_total") if x.get("score_total") is not None else -1),
+            )
+        )
+        return out
+
+    return run_with_db_retry(_query)
+
+
+@router.get("/earnings/stats")
+def earnings_stats(days: int = Query(default=90, ge=1, le=180)):
+    from datetime import timedelta
+
+    from app.database import EarningsEvent, EarningsPushBatch
+    from app.earnings_monitor.calendar_fetch import today_et
+    from app.earnings_monitor.config import EARNINGS_PUSH_DAYS_BEFORE, EARNINGS_PUSH_MIN_SCORE
+    from app.earnings_monitor.pipeline import days_to_earnings
+
+    today = today_et()
+    until = today + timedelta(days=days)
+
+    def _query(db: Session):
+        rows = (
+            db.query(EarningsEvent)
+            .filter(
+                EarningsEvent.earnings_date >= today,
+                EarningsEvent.earnings_date <= until,
+                EarningsEvent.status.in_(["upcoming", "pushed"]),
+            )
+            .all()
+        )
+        upcoming = len(rows)
+        t2 = sum(
+            1
+            for e in rows
+            if days_to_earnings(e.earnings_date, today) == EARNINGS_PUSH_DAYS_BEFORE
+            and e.push_eligible
+            and (e.score_total or 0) >= EARNINGS_PUSH_MIN_SCORE
+        )
+        pushed = sum(1 for e in rows if e.pushed_at and e.push_channel not in {"failed", "unconfigured", "too_early", "eliminated", "below_score", "disabled"})
+        batches = (
+            db.query(EarningsPushBatch)
+            .filter(EarningsPushBatch.pushed_at >= now_beijing() - timedelta(days=30))
+            .count()
+        )
+        return {
+            "days": days,
+            "upcoming": upcoming,
+            "t2_due": t2,
+            "pushed": pushed,
+            "batches_30d": batches,
+        }
+
+    return run_with_db_retry(_query)
+
+
+@router.get("/earnings/{event_id}")
+def get_earnings(event_id: int):
+    from app.database import EarningsEvent
+    from app.earnings_monitor.pipeline import event_to_dict
+
+    def _query(db: Session):
+        event = db.query(EarningsEvent).filter(EarningsEvent.id == event_id).first()
+        if not event:
+            raise HTTPException(status_code=404, detail="未找到")
+        return event_to_dict(event)
+
+    return run_with_db_retry(_query)
+
+
+@router.post("/earnings/run")
+async def run_earnings(token: str = Query(default="")):
+    from app.config import DEAL_ADMIN_TOKEN
+    from app.earnings_monitor.pipeline import run_calendar_refresh
+
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+    return await run_calendar_refresh()
+
+
+@router.post("/earnings/push-check")
+async def earnings_push_check(token: str = Query(default="")):
+    from app.config import DEAL_ADMIN_TOKEN
+    from app.earnings_monitor.pipeline import run_t2_push_check
+
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+    return await run_t2_push_check()
+
+
+# ── AI 主线（子板块相对强弱）──
+
+
+@router.get("/ai-mainline")
+async def ai_mainline_current(force: bool = Query(default=False)):
+    from app.ai_mainline.pipeline import compute_mainline
+
+    return await compute_mainline(force=force)
+
+
+@router.get("/ai-mainline/history")
+def ai_mainline_history(days: int = Query(default=30, ge=1, le=120)):
+    from app.ai_mainline.pipeline import history_primary
+
+    return {"days": days, "items": history_primary(days)}
+
+
+@router.post("/ai-mainline/run")
+async def ai_mainline_run(token: str = Query(default="")):
+    from app.ai_mainline.pipeline import run_ai_mainline_daily
+    from app.config import DEAL_ADMIN_TOKEN
+
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+    return await run_ai_mainline_daily(force=True)

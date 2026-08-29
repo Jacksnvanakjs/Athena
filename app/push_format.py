@@ -70,3 +70,6 @@ def build_nvda_push_content(event) -> tuple[str, str]:
         lines.extend(["", f"原文：{source_url}"])
 
     return title, "\n".join(lines)
+
+
+# 财报合并推送见 app.earnings_monitor.push.build_earnings_batch_push

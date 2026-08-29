@@ -889,6 +889,145 @@ async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], 
     return merged, label
 
 
+async def get_quotes_for_symbols(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
+    """按 symbols 拉取报价，供 ai_mainline 等复用。返回 ({sym: quote_row}, source)。"""
+    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    if not uniq:
+        return {}, "none"
+    return await _fetch_quotes(uniq)
+
+
+async def fetch_period_returns(
+    symbols: list[str],
+) -> dict[str, dict[str, float | None]]:
+    """近 5/20 交易日累计涨跌（%）。优先 HeatmapSnapshot 收盘价，不足则 Yahoo chart。"""
+    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    out: dict[str, dict[str, float | None]] = {
+        s: {"ret_5d": None, "ret_20d": None} for s in uniq
+    }
+    if not uniq:
+        return out
+
+    from_snap = _period_returns_from_snapshots(uniq)
+    for sym, vals in from_snap.items():
+        out[sym].update(vals)
+
+    missing = [
+        s
+        for s in uniq
+        if out[s].get("ret_5d") is None or out[s].get("ret_20d") is None
+    ]
+    if missing:
+        from_yahoo = await _period_returns_from_yahoo(missing)
+        for sym, vals in from_yahoo.items():
+            cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
+            if cur.get("ret_5d") is None and vals.get("ret_5d") is not None:
+                cur["ret_5d"] = vals["ret_5d"]
+            if cur.get("ret_20d") is None and vals.get("ret_20d") is not None:
+                cur["ret_20d"] = vals["ret_20d"]
+    return out
+
+
+def _period_ret_from_closes(closes: list[float], trading_days: int) -> float | None:
+    """closes 按时间升序；trading_days=5 表示约 5 个交易日涨跌。"""
+    if len(closes) < trading_days + 1:
+        return None
+    start = closes[-(trading_days + 1)]
+    end = closes[-1]
+    if not start:
+        return None
+    return round((end - start) / start * 100, 2)
+
+
+def _period_returns_from_snapshots(
+    symbols: list[str],
+) -> dict[str, dict[str, float | None]]:
+    out: dict[str, dict[str, float | None]] = {}
+    try:
+        from sqlalchemy import desc
+
+        from app.database import HeatmapSnapshot, SessionLocal
+
+        with SessionLocal() as db:
+            dates = [
+                r[0]
+                for r in (
+                    db.query(HeatmapSnapshot.trade_date)
+                    .order_by(desc(HeatmapSnapshot.trade_date))
+                    .distinct()
+                    .limit(25)
+                    .all()
+                )
+            ]
+            if len(dates) < 2:
+                return out
+            since = dates[-1]
+            rows = (
+                db.query(HeatmapSnapshot)
+                .filter(
+                    HeatmapSnapshot.kind == "company",
+                    HeatmapSnapshot.symbol.in_(symbols),
+                    HeatmapSnapshot.trade_date >= since,
+                )
+                .order_by(HeatmapSnapshot.trade_date)
+                .all()
+            )
+        by_sym: dict[str, list[float]] = {}
+        for row in rows:
+            if row.price and row.price > 0:
+                by_sym.setdefault(row.symbol.upper(), []).append(float(row.price))
+        for sym, closes in by_sym.items():
+            out[sym] = {
+                "ret_5d": _period_ret_from_closes(closes, 5),
+                "ret_20d": _period_ret_from_closes(closes, 20),
+            }
+    except Exception as exc:
+        logger.warning("period returns from snapshots failed: %s", exc)
+    return out
+
+
+async def _period_returns_from_yahoo(
+    symbols: list[str],
+) -> dict[str, dict[str, float | None]]:
+    import asyncio
+
+    out: dict[str, dict[str, float | None]] = {}
+    headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
+    sem = asyncio.Semaphore(6)
+
+    async def one(client: httpx.AsyncClient, symbol: str):
+        ysym = _yahoo_symbol(symbol)
+        try:
+            async with sem:
+                resp = await client.get(
+                    YAHOO_CHART.format(symbol=ysym),
+                    params={"interval": "1d", "range": "1mo"},
+                )
+            if resp.status_code != 200:
+                return symbol, None
+            result = ((resp.json().get("chart") or {}).get("result")) or []
+            if not result:
+                return symbol, None
+            quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+            closes = [float(c) for c in (quote.get("close") or []) if c is not None]
+            if len(closes) < 2:
+                return symbol, None
+            return symbol, {
+                "ret_5d": _period_ret_from_closes(closes, 5),
+                "ret_20d": _period_ret_from_closes(closes, 20),
+            }
+        except Exception as exc:
+            logger.debug("Yahoo period failed %s: %s", symbol, exc)
+            return symbol, None
+
+    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
+        results = await asyncio.gather(*[one(client, s) for s in symbols])
+    for sym, vals in results:
+        if vals:
+            out[sym] = vals
+    return out
+
+
 def _heatmap_failure(source: str, quote_count: int, total: int) -> dict[str, Any]:
     note = (
         f"行情拉取失败（{source} 仅 {quote_count}/{total}）。"

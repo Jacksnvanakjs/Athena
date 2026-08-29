@@ -4,7 +4,16 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from app.config import DEAL_POLL_INTERVAL_MIN, ENABLE_SCHEDULER, FUNDS_SOURCE_FILE, SCRAPE_TIMES, TIMEZONE
+from app.config import (
+    AI_MAINLINE_ENABLED,
+    DEAL_POLL_INTERVAL_MIN,
+    ENABLE_SCHEDULER,
+    EARNINGS_CALENDAR_REFRESH_HOURS,
+    EARNINGS_MONITOR_ENABLED,
+    FUNDS_SOURCE_FILE,
+    SCRAPE_TIMES,
+    TIMEZONE,
+)
 from app.service import run_scrape_and_notify
 from app.utils import is_trading_day, is_us_trading_day
 
@@ -31,6 +40,26 @@ async def scheduled_heatmap_snapshot():
     logger.info("开始保存美股热力图每日快照...")
     result = await save_daily_snapshot(force=True)
     logger.info("热力图快照完成: %s", result)
+    if AI_MAINLINE_ENABLED:
+        from app.ai_mainline.pipeline import run_ai_mainline_daily
+
+        logger.info("开始 AI 主线日快照...")
+        ml = await run_ai_mainline_daily(force=True)
+        logger.info("AI 主线日快照完成: %s", ml)
+
+
+async def scheduled_ai_mainline_daily():
+    """美东 16:35：AI 主线日快照（heatmap 之后的兜底）。"""
+    if not AI_MAINLINE_ENABLED:
+        return
+    if not is_us_trading_day():
+        logger.info("非美股交易日，跳过 AI 主线快照")
+        return
+    from app.ai_mainline.pipeline import run_ai_mainline_daily
+
+    logger.info("开始 AI 主线日快照（16:35）...")
+    result = await run_ai_mainline_daily(force=True)
+    logger.info("AI 主线日快照完成: %s", result)
 
 
 async def scheduled_deal_poll():
@@ -57,6 +86,26 @@ async def scheduled_deal_market_cap_refresh():
     logger.info("市值缓存刷新完成: %d tickers", count)
 
 
+async def scheduled_earnings_calendar():
+    if not EARNINGS_MONITOR_ENABLED:
+        return
+    from app.earnings_monitor.pipeline import run_calendar_refresh
+
+    logger.info("开始 earnings 日历刷新...")
+    result = await run_calendar_refresh()
+    logger.info("earnings 日历完成: %s", result)
+
+
+async def scheduled_earnings_t2_push():
+    if not EARNINGS_MONITOR_ENABLED:
+        return
+    from app.earnings_monitor.pipeline import run_t2_push_check
+
+    logger.info("开始 earnings T-2 推送检查...")
+    result = await run_t2_push_check()
+    logger.info("earnings T-2 推送完成: %s", result)
+
+
 def start_scheduler():
     if not ENABLE_SCHEDULER:
         logger.info("内置调度器已禁用（ENABLE_SCHEDULER=false），请使用外部 cron 触发 /api/cron/scrape")
@@ -68,13 +117,19 @@ def start_scheduler():
             id=f"scrape_{hour:02d}_{minute:02d}",
             replace_existing=True,
         )
-    # 美东收盘 16:00 后约 30 分钟落库，覆盖盘后修正
     scheduler.add_job(
         scheduled_heatmap_snapshot,
         CronTrigger(hour=16, minute=30, timezone="America/New_York"),
         id="heatmap_snapshot_us_close",
         replace_existing=True,
     )
+    if AI_MAINLINE_ENABLED:
+        scheduler.add_job(
+            scheduled_ai_mainline_daily,
+            CronTrigger(hour=16, minute=35, timezone="America/New_York"),
+            id="ai_mainline_daily_et_1635",
+            replace_existing=True,
+        )
     scheduler.add_job(
         scheduled_deal_poll,
         IntervalTrigger(minutes=DEAL_POLL_INTERVAL_MIN),
@@ -87,14 +142,41 @@ def start_scheduler():
         id="deal_monitor_market_cap",
         replace_existing=True,
     )
+    if EARNINGS_MONITOR_ENABLED:
+        scheduler.add_job(
+            scheduled_earnings_calendar,
+            IntervalTrigger(hours=max(1, EARNINGS_CALENDAR_REFRESH_HOURS)),
+            id="earnings_calendar_refresh",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            scheduled_earnings_calendar,
+            CronTrigger(hour=8, minute=0, timezone="America/New_York"),
+            id="earnings_calendar_et_0800",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            scheduled_earnings_calendar,
+            CronTrigger(hour=8, minute=30, timezone="America/New_York"),
+            id="earnings_score_et_0830",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            scheduled_earnings_t2_push,
+            CronTrigger(hour=9, minute=0, timezone="America/New_York"),
+            id="earnings_t2_push_et_0900",
+            replace_existing=True,
+        )
     scheduler.start()
     times = ", ".join(f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES)
     logger.info(
         "调度器已启动，时区: %s，基金抓取: %s；美股热力图快照: 美东 16:30；"
-        "deal_monitor: 每 %d 分钟",
+        "deal_monitor: 每 %d 分钟；earnings: %s；ai_mainline: %s",
         TIMEZONE,
         times,
         DEAL_POLL_INTERVAL_MIN,
+        "开启" if EARNINGS_MONITOR_ENABLED else "关闭",
+        "开启" if AI_MAINLINE_ENABLED else "关闭",
     )
 
 

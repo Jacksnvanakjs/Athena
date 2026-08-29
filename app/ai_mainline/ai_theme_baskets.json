@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "benchmark_key": "ai_bench",
+  "themes": [
+    {
+      "key": "gpu_semi",
+      "name": "算力芯片",
+      "heatmap_theme_key": "semi",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "NVDA", "name": "英伟达", "weight": 1.0},
+        {"symbol": "AMD", "name": "AMD", "weight": 1.0},
+        {"symbol": "AVGO", "name": "博通", "weight": 1.0},
+        {"symbol": "MRVL", "name": "Marvell", "weight": 1.0},
+        {"symbol": "TSM", "name": "台积电", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "optics_cpo",
+      "name": "光互联/CPO",
+      "heatmap_theme_key": "cpo",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "LITE", "name": "Lumentum", "weight": 1.0},
+        {"symbol": "COHR", "name": "Coherent", "weight": 1.0},
+        {"symbol": "AAOI", "name": "Applied Opto", "weight": 1.0},
+        {"symbol": "CIEN", "name": "Ciena", "weight": 1.0},
+        {"symbol": "FN", "name": "Fabrinet", "weight": 1.0},
+        {"symbol": "GLW", "name": "康宁", "weight": 1.0},
+        {"symbol": "MTSI", "name": "MACOM", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "memory",
+      "name": "存储/HBM链",
+      "heatmap_theme_key": "storage",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "MU", "name": "美光", "weight": 1.0},
+        {"symbol": "WDC", "name": "西部数据", "weight": 1.0},
+        {"symbol": "STX", "name": "希捷", "weight": 1.0},
+        {"symbol": "PSTG", "name": "Pure Storage", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "neo_cloud",
+      "name": "GPU云/租赁",
+      "heatmap_theme_key": "ai_compute",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "CRWV", "name": "CoreWeave", "weight": 1.0},
+        {"symbol": "NBIS", "name": "Nebius", "weight": 1.0},
+        {"symbol": "IREN", "name": "IREN", "weight": 1.0},
+        {"symbol": "APLD", "name": "Applied Digital", "weight": 1.0},
+        {"symbol": "CORZ", "name": "Core Scientific", "weight": 1.0},
+        {"symbol": "WULF", "name": "TeraWulf", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "dc_infra",
+      "name": "数据中心基建",
+      "heatmap_theme_key": "datacenter",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "EQIX", "name": "Equinix", "weight": 1.0},
+        {"symbol": "DLR", "name": "Digital Realty", "weight": 1.0},
+        {"symbol": "VRT", "name": "Vertiv", "weight": 1.0},
+        {"symbol": "ANET", "name": "Arista", "weight": 1.0},
+        {"symbol": "SMCI", "name": "超微", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "power",
+      "name": "AI电力",
+      "heatmap_theme_key": "dc_power",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "VST", "name": "Vistra", "weight": 1.0},
+        {"symbol": "CEG", "name": "Constellation", "weight": 1.0},
+        {"symbol": "NRG", "name": "NRG", "weight": 1.0},
+        {"symbol": "GEV", "name": "GE Vernova", "weight": 1.0},
+        {"symbol": "OKLO", "name": "Oklo", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "grid_cooling",
+      "name": "电网/电气/液冷",
+      "heatmap_theme_key": "grid",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "ETN", "name": "Eaton", "weight": 1.0},
+        {"symbol": "PWR", "name": "Quanta", "weight": 1.0},
+        {"symbol": "EMR", "name": "艾默生", "weight": 1.0},
+        {"symbol": "GNRC", "name": "Generac", "weight": 1.0},
+        {"symbol": "VRT", "name": "Vertiv", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "cloud_saas",
+      "name": "云与平台软件",
+      "heatmap_theme_key": "cloud_saas",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "MSFT", "name": "微软", "weight": 1.0},
+        {"symbol": "ORCL", "name": "甲骨文", "weight": 1.0},
+        {"symbol": "CRM", "name": "Salesforce", "weight": 1.0},
+        {"symbol": "NOW", "name": "ServiceNow", "weight": 1.0},
+        {"symbol": "SNOW", "name": "Snowflake", "weight": 1.0},
+        {"symbol": "AMZN", "name": "亚马逊", "weight": 1.0},
+        {"symbol": "GOOGL", "name": "谷歌", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "ai_app",
+      "name": "AI应用/数据",
+      "heatmap_theme_key": "ai_software",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "PLTR", "name": "Palantir", "weight": 1.0},
+        {"symbol": "DDOG", "name": "Datadog", "weight": 1.0},
+        {"symbol": "MDB", "name": "MongoDB", "weight": 1.0},
+        {"symbol": "PATH", "name": "UiPath", "weight": 1.0},
+        {"symbol": "AI", "name": "C3.ai", "weight": 1.0},
+        {"symbol": "ADBE", "name": "Adobe", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "ai_sec",
+      "name": "AI安全/身份",
+      "heatmap_theme_key": "cybersecurity",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "CRWD", "name": "CrowdStrike", "weight": 1.0},
+        {"symbol": "OKTA", "name": "Okta", "weight": 1.0},
+        {"symbol": "ZS", "name": "Zscaler", "weight": 1.0},
+        {"symbol": "PANW", "name": "Palo Alto", "weight": 1.0},
+        {"symbol": "FTNT", "name": "Fortinet", "weight": 1.0},
+        {"symbol": "S", "name": "SentinelOne", "weight": 1.0}
+      ]
+    }
+  ]
+}
