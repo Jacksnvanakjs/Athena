@@ -27,7 +27,50 @@ _EXTRA_BLOCKED = {
 }
 BLOCKED_NEWS_SOURCES = _DEFAULT_BLOCKED_SOURCES | _EXTRA_BLOCKED
 
-# 股价反应稿：报道「宣布合作后涨了 X%」，多为旧闻复述而非新协议
+# Google News / 转载源名白名单（路透、WSJ 等；小写匹配 source 冒号后名称）
+_TRUSTED_NEWS_TOKENS = frozenset(
+    {
+        "reuters",
+        "wsj",
+        "wall street journal",
+        "bloomberg",
+        "bloomberg.com",
+        "cnbc",
+        "financial times",
+        "ft.com",
+        "the information",
+        "yahoo finance",
+        "ap news",
+        "associated press",
+        "business wire",
+        "pr newswire",
+        "globenewswire",
+        "channel news asia",
+        "benzinga",
+        "marketwatch",
+        "barron",
+        "investing.com",
+        "afp",
+    }
+)
+
+# sign(s/ed) + 金额 + deal/agreement（中间可夹修饰语）
+_MATERIAL_SIGNED_DEAL = re.compile(
+    r"\b(?:signs?|signed|signing)\b.{0,80}?"
+    r"(?:\$[\d,.]+\s*(?:billion|million|bn|m\b)|[\d,.]+\s*(?:billion|million)\s+dollars?)"
+    r".{0,60}?\b(?:deal|agreement|contract|lease)\b",
+    re.I,
+)
+_MATERIAL_SIGNED_DEAL_REV = re.compile(
+    r"\b(?:deal|agreement|contract|lease)\b.{0,60}?"
+    r"(?:worth|valued at|for)\s+"
+    r"(?:\$[\d,.]+\s*(?:billion|million|bn|m\b)|[\d,.]+\s*(?:billion|million)\s+dollars?)",
+    re.I,
+)
+_SIGN_DEAL_FLEX = re.compile(
+    r"\b(?:signs?|signed|signing|has signed|have signed)\b.{0,120}?\b(?:deal|agreement|contract)\b",
+    re.I,
+)
 _PRICE_REACTION = re.compile(
     r"(?:"
     r"(?:shares?|stock|equity)\s+(?:up|jumps?|surges?|soars?|rally|rises?|gains?|climbs?|adds?|leaps?)"
@@ -107,6 +150,30 @@ def is_blocked_news_source(item: RawItem) -> bool:
     return False
 
 
+def is_trusted_news_source(item: RawItem) -> bool:
+    tokens = _source_tokens(item)
+    for tok in tokens:
+        for trusted in _TRUSTED_NEWS_TOKENS:
+            if tok == trusted or trusted in tok or tok in trusted:
+                return True
+    return False
+
+
+def is_material_signed_deal(text: str) -> bool:
+    """大额签署/签约报道（含路透体 sign $35 billion ... deal）。"""
+    norm = _norm(text)
+    if _MATERIAL_SIGNED_DEAL.search(norm) or _MATERIAL_SIGNED_DEAL_REV.search(norm):
+        return True
+    if _SIGN_DEAL_FLEX.search(norm) and re.search(
+        r"\$[\d,.]+\s*(?:billion|million|bn)\b|[\d,.]+\s*billion",
+        norm,
+    ):
+        return True
+    if re.search(r"\d+\s*亿", text) and re.search(r"签署|签约|协议", text):
+        return True
+    return False
+
+
 def is_price_reaction_rehash(text: str) -> bool:
     """旧闻复述：强调股价涨跌而非新签署/新条款。"""
     norm = _norm(text)
@@ -139,7 +206,11 @@ def is_seo_spam_headline(headline: str) -> bool:
 
 def is_fresh_deal_announcement(text: str) -> bool:
     """新合作通稿常见措辞；纯股价反应稿通常没有。"""
+    if is_material_signed_deal(text):
+        return True
     norm = _norm(text)
+    if _SIGN_DEAL_FLEX.search(norm):
+        return True
     fresh = (
         "enter into",
         "entered into",
@@ -155,7 +226,9 @@ def is_fresh_deal_announcement(text: str) -> bool:
         "multi-year agreement",
         "strategic partnership to",
         "announced today",
+        "today announced",
         "announced that it",
+        "announced the",
         "announced a partnership",
         "announced an agreement",
         "announces partnership",
@@ -190,10 +263,10 @@ def reject_deal_item(item: RawItem) -> tuple[bool, str]:
         if not is_fresh_deal_announcement(text):
             return True, "旧闻复述（股价反应稿）"
 
-    # Google News 非权威源：需更像新签通稿，否则不入库
-    if src.startswith("google_news:") and not src.startswith("google_news:pr "):
+    trusted = is_trusted_news_source(item)
+    # Google News 非权威源：需更像新签通稿；白名单媒体（路透/WSJ 等）豁免
+    if src.startswith("google_news:") and not src.startswith("google_news:pr ") and not trusted:
         if is_price_reaction_rehash(headline) or not is_fresh_deal_announcement(text):
-            # 允许强商业信号通过（definitive agreement 等已在 fresh 里）
             norm = _norm(text)
             strong = any(
                 p in norm
@@ -206,7 +279,7 @@ def reject_deal_item(item: RawItem) -> tuple[bool, str]:
                     "multi-year",
                 )
             )
-            if not strong:
+            if not strong and not is_material_signed_deal(text):
                 return True, "Google News 低信源且非新签通稿"
 
     return False, ""

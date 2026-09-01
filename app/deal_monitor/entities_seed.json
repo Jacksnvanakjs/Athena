@@ -43,11 +43,14 @@
     {"names": ["ServiceNow"], "ticker": "NOW"},
     {"names": ["Adobe", "Adobe Inc"], "ticker": "ADBE"},
     {"names": ["Snowflake"], "ticker": "SNOW"},
-    {"names": ["Palantir"], "ticker": "PLTR"}
+    {"names": ["Palantir"], "ticker": "PLTR"},
+    {"names": ["CrowdStrike", "CrowdStrike Holdings"], "ticker": "CRWD"}
   ],
   "unlisted_anchors": [
     {"names": ["OpenAI", "Open AI"], "id": "openai"},
     {"names": ["Anthropic", "Claude"], "id": "anthropic"},
+    {"names": ["Lambda", "Lambda Labs"], "id": "lambda"},
+    {"names": ["Nscale"], "id": "nscale"},
     {"names": ["Hugging Face", "HuggingFace"], "id": "huggingface"},
     {"names": ["xAI", "X.AI"], "id": "xai"}
   ],

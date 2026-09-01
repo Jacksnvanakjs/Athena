@@ -80,10 +80,18 @@ PR_WIRE_FEEDS = [
 ]
 
 # Google News：补抓 SaaS/Agent × 大模型合作（PRN/SEC 常漏）
+# 列表靠前 = 每轮优先查询（抢时效 when:1d/2d）
 GOOGLE_NEWS_QUERIES = [
+    # 大额算力 / DC 快讯（WSJ/Reuters 体，HUT 间接受益）
+    '("cloud deal" OR "compute deal" OR "cloud computing deal" OR "computing deal") '
+    '(Anthropic OR Lambda OR "Hut 8" OR HUT OR Nscale) when:1d',
+    '("billion" OR "$35" OR "$35B") (Anthropic AND Lambda) when:2d',
+    '("Hut 8" OR HUT) (Anthropic OR Lambda OR Nvidia OR Nueces OR "data center") when:3d',
     '(Anthropic OR OpenAI OR "AI agent" OR Agentforce OR Claudeforce) '
     "(partnership OR collaboration OR integration) when:3d",
     '"strategic partnership" (Anthropic OR OpenAI OR Claude) when:3d',
+    '("cloud deal" OR "compute deal" OR "capacity agreement") '
+    "(Anthropic OR Lambda OR Hut 8 OR CoreWeave OR Nscale) when:7d",
 ]
 
 # Finnhub：无稳定 IR RSS 的标的走此通道（IR 失败时亦作备份）

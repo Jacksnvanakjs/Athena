@@ -109,15 +109,37 @@ _STRONG_DEAL_CUES = (
     "purchase agreement",
     "supply agreement",
     "item 1.01",
+    "today announced",
+    "announced that",
+    "announced the",
+    "announces partnership",
+    "deepens partnership",
+)
+_HYPERSCALER_CLOUD_CUES = (
+    "google cloud",
+    "amazon web services",
+    "microsoft azure",
+    " aws ",
+    " azure ",
+)
+_PLATFORM_ON_CLOUD_RE = re.compile(
+    r"\b(?:now )?available on\b.{0,40}?\b(?:google cloud|aws|amazon web services|microsoft azure|azure)\b",
+    re.I,
 )
 
 
 def is_product_only_integration(text: str) -> bool:
     """纯产品整合/功能发布，无新商业条款。"""
     norm = _normalize(text)
+    if _PLATFORM_ON_CLOUD_RE.search(norm) and re.search(r"\bannounc\w+", norm):
+        return False
     if not any(cue in norm for cue in _PRODUCT_ONLY_CUES):
         return False
     if any(cue in norm for cue in _STRONG_DEAL_CUES):
+        return False
+    if any(cloud in norm for cloud in _HYPERSCALER_CLOUD_CUES) and re.search(
+        r"\b(?:platform|falcon|security)\b", norm
+    ) and re.search(r"\bannounc\w+", norm):
         return False
     if re.search(r"\$[\d,.]+\s*(million|billion|m\b|b\b)", norm, re.I):
         return False

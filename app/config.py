@@ -97,7 +97,7 @@ DEAL_MAX_PUSH_PER_BENEFICIARY_24H = int(os.getenv("DEAL_MAX_PUSH_PER_BENEFICIARY
 DEAL_T0_T0_PUSH_ENABLED = os.getenv("DEAL_T0_T0_PUSH_ENABLED", "true").lower() == "true"
 DEAL_T2_T2_PUSH_BOTH = os.getenv("DEAL_T2_T2_PUSH_BOTH", "false").lower() == "true"
 DEAL_PUSH_ENABLED = os.getenv("DEAL_PUSH_ENABLED", "true").lower() == "true"
-DEAL_POLL_INTERVAL_MIN = int(os.getenv("DEAL_POLL_INTERVAL_MIN", "3"))
+DEAL_POLL_INTERVAL_MIN = int(os.getenv("DEAL_POLL_INTERVAL_MIN", "2"))
 DEAL_ADMIN_TOKEN = os.getenv("DEAL_ADMIN_TOKEN", "")
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "AthenaDealMonitor contact@example.com")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")

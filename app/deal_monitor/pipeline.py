@@ -37,7 +37,7 @@ from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
 from app.deal_monitor.materiality import score_materiality
 from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pair_text
-from app.deal_monitor.tiers import assign_roles, score_threshold
+from app.deal_monitor.tiers import RoleAssignment, assign_roles, score_threshold
 from app.notifier import notify
 from app.push_format import build_deal_push_content
 from app.source_url_guard import is_test_source_url
@@ -283,6 +283,41 @@ def _save_event(
     return event
 
 
+async def _resolve_llm_anchor_and_beneficiaries(
+    db: Session,
+    llm_decision: LlmDecision,
+    text: str,
+) -> tuple[Entity | None, list[Entity], str | None]:
+    """LLM 指定锚点 + 一个或多个美股受益方（含产业链间接受益）。"""
+    anchor_name = (llm_decision.anchor_name or "").strip()
+    anchor = await resolve_entity(anchor_name, context=text) if anchor_name else Entity(name="")
+    if anchor.is_unknown:
+        for ent in registry.extract_entities(text):
+            if ent.unlisted_id or (ent.ticker and registry.is_t0_listed_seed(ent.ticker)):
+                anchor = ent
+                break
+    if anchor.is_unknown:
+        return None, [], "LLM 锚点无法解析"
+
+    beneficiaries: list[Entity] = []
+    seen: set[str] = set()
+    for name in llm_decision.all_beneficiary_names():
+        ent = await resolve_entity(name, context=text)
+        if not ent.ticker:
+            continue
+        tick = ent.ticker.upper()
+        if tick in seen:
+            continue
+        seen.add(tick)
+        beneficiaries.append(ent)
+
+    if not beneficiaries:
+        return anchor, [], "LLM 受益方无美股代码"
+
+    await enrich_entity_tiers(db, [anchor, *beneficiaries])
+    return anchor, beneficiaries, None
+
+
 async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | None = None) -> dict:
     stats = {"skipped": True, "reason": ""}
     if is_test_source_url(item.source_url):
@@ -303,6 +338,10 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             stats["reason"] = f"LLM 判定不相关: {llm_decision.reason}"
             return stats
         matched = ["LLM"]
+        if llm_decision and llm_decision.reason:
+            snippet = llm_decision.reason.strip()[:160]
+            if snippet:
+                matched.append(snippet)
     else:
         ok, matched = passes_keyword_filter(text, source=item.source)
         if not ok:
@@ -310,118 +349,140 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             return stats
 
     h_hash = headline_hash(item.headline)
+    role_pairs: list[tuple[RoleAssignment, Entity]] = []
 
-    if llm_decision and llm_decision.anchor_name and llm_decision.beneficiary_name:
-        entity_a = await resolve_entity(llm_decision.anchor_name, context=text)
-        entity_b = await resolve_entity(llm_decision.beneficiary_name, context=text)
-    elif item.source == "sec_8k":
-        filer = parse_sec_filer(item.headline)
-        if not filer:
-            stats["reason"] = "SEC 8-K 未解析申报方"
+    if DEAL_USE_LLM and llm_decision and llm_decision.is_relevant:
+        if not llm_decision.all_beneficiary_names():
+            stats["reason"] = "LLM 未给出美股受益方"
             return stats
-        entity_a = await resolve_entity(filer, context=text)
-        entities = _exclude_channel_partners(
-            [e for e in registry.extract_entities(text) if not _same_company(e, entity_a)],
-            text,
+        anchor, beneficiaries, err = await _resolve_llm_anchor_and_beneficiaries(
+            db, llm_decision, text
         )
-        if entities:
-            pair = infer_partnership_pair(item.headline, item.summary, [entity_a, *entities])
-            entity_b = pair[1] if pair else entities[0]
-            if not entity_b.ticker:
-                entity_b = await resolve_entity(entity_b.name, context=text)
-        else:
-            pair_text = infer_partnership_pair_text(item.headline, item.summary)
-            if not pair_text:
-                stats["reason"] = "SEC 8-K 未识别到协议对方"
-                return stats
-            _, b_name = pair_text
-            entity_b = await resolve_entity(b_name, context=text)
+        if err:
+            stats["reason"] = err
+            return stats
+        assert anchor is not None
+        for benef in beneficiaries:
+            if is_channel_partner_entity(benef, text):
+                continue
+            roles = assign_roles(anchor, benef)
+            if roles and roles.should_push:
+                role_pairs.append((roles, benef))
+        if not role_pairs:
+            stats["reason"] = "LLM 受益方规则不推送"
+            return stats
     else:
-        entities = _exclude_channel_partners(registry.extract_entities(text), text)
-        if len(entities) < 2:
-            pair_text = infer_partnership_pair_text(item.headline, item.summary)
-            if not pair_text:
-                stats["reason"] = "未识别到合作双方"
+        entity_a: Entity | None = None
+        entity_b: Entity | None = None
+        if item.source == "sec_8k":
+            filer = parse_sec_filer(item.headline)
+            if not filer:
+                stats["reason"] = "SEC 8-K 未解析申报方"
                 return stats
-            a_name, b_name = pair_text
-            entity_a = await resolve_entity(a_name, context=text)
-            entity_b = await resolve_entity(b_name, context=text)
-        else:
-            pair = infer_partnership_pair(item.headline, item.summary, entities)
-            if not pair:
+            entity_a = await resolve_entity(filer, context=text)
+            entities = _exclude_channel_partners(
+                [e for e in registry.extract_entities(text) if not _same_company(e, entity_a)],
+                text,
+            )
+            if entities:
+                pair = infer_partnership_pair(item.headline, item.summary, [entity_a, *entities])
+                entity_b = pair[1] if pair else entities[0]
+                if not entity_b.ticker:
+                    entity_b = await resolve_entity(entity_b.name, context=text)
+            else:
                 pair_text = infer_partnership_pair_text(item.headline, item.summary)
                 if not pair_text:
-                    stats["reason"] = "无法推断合作对"
+                    stats["reason"] = "SEC 8-K 未识别到协议对方"
+                    return stats
+                _, b_name = pair_text
+                entity_b = await resolve_entity(b_name, context=text)
+        else:
+            entities = _exclude_channel_partners(registry.extract_entities(text), text)
+            if len(entities) < 2:
+                pair_text = infer_partnership_pair_text(item.headline, item.summary)
+                if not pair_text:
+                    stats["reason"] = "未识别到合作双方"
                     return stats
                 a_name, b_name = pair_text
                 entity_a = await resolve_entity(a_name, context=text)
                 entity_b = await resolve_entity(b_name, context=text)
             else:
-                entity_a, entity_b = pair
-                if not entity_a.ticker:
-                    entity_a = await resolve_entity(entity_a.name, context=text)
-                if not entity_b.ticker:
-                    entity_b = await resolve_entity(entity_b.name, context=text)
+                pair = infer_partnership_pair(item.headline, item.summary, entities)
+                if not pair:
+                    pair_text = infer_partnership_pair_text(item.headline, item.summary)
+                    if not pair_text:
+                        stats["reason"] = "无法推断合作对"
+                        return stats
+                    a_name, b_name = pair_text
+                    entity_a = await resolve_entity(a_name, context=text)
+                    entity_b = await resolve_entity(b_name, context=text)
+                else:
+                    entity_a, entity_b = pair
+                    if not entity_a.ticker:
+                        entity_a = await resolve_entity(entity_a.name, context=text)
+                    if not entity_b.ticker:
+                        entity_b = await resolve_entity(entity_b.name, context=text)
 
-    if _same_company(entity_a, entity_b):
-        stats["reason"] = "双方为同一公司，不是合作事件"
-        return stats
+        if not entity_a or not entity_b:
+            stats["reason"] = "未识别到合作双方"
+            return stats
+        if _same_company(entity_a, entity_b):
+            stats["reason"] = "双方为同一公司，不是合作事件"
+            return stats
+        if is_channel_partner_entity(entity_a, text) or is_channel_partner_entity(entity_b, text):
+            stats["reason"] = "含渠道商/分销商，非合作方"
+            return stats
+        if is_product_only_integration(text):
+            stats["reason"] = "纯产品整合/功能发布，无新商业条款"
+            return stats
 
-    if is_channel_partner_entity(entity_a, text) or is_channel_partner_entity(entity_b, text):
-        stats["reason"] = "含渠道商/分销商，非合作方"
-        return stats
+        await enrich_entity_tiers(db, [entity_a, entity_b])
+        roles = assign_roles(entity_a, entity_b)
+        if not roles:
+            stats["reason"] = "角色判定失败"
+            return stats
+        if not roles.should_push:
+            stats["reason"] = roles.skip_reason or "规则不推送"
+            return stats
 
-    if is_product_only_integration(text):
+        role_pairs = [(roles, roles.beneficiary)]
+        if roles.push_both:
+            role_pairs = []
+            for ent in (entity_a, entity_b):
+                if ent.ticker:
+                    r = assign_roles(entity_a, entity_b)
+                    if r and r.should_push:
+                        role_pairs.append((r, ent))
+
+    if is_product_only_integration(text) and not (DEAL_USE_LLM and llm_decision and llm_decision.is_relevant):
         stats["reason"] = "纯产品整合/功能发布，无新商业条款"
         return stats
 
-    await enrich_entity_tiers(db, [entity_a, entity_b])
-
-    roles = assign_roles(entity_a, entity_b)
-    if not roles:
-        stats["reason"] = "角色判定失败"
-        return stats
-
-    if not roles.should_push:
-        stats["reason"] = roles.skip_reason or "规则不推送"
-        return stats
-
-    score = score_materiality(text, item.source, matched)
-    if llm_decision and llm_decision.llm_score:
-        # 不把营销稿的 LLM 高分抬上去；材料性仍以规则分为准，LLM 只作下限闸
-        if llm_decision.llm_score < 70:
-            stats["reason"] = f"LLM 材料性不足 {llm_decision.llm_score} < 70"
-            return stats
-        # 企业 AI 平台合作：规则分可能偏低，允许 LLM 分数更多参与
-        if (llm_decision.event_type or "") == "ai_platform_deal":
-            score = min(100, max(score, llm_decision.llm_score))
-        else:
-            score = min(100, max(score, min(llm_decision.llm_score, score + 10)))
-    threshold = score_threshold(roles.tier_pair)
-    if score < threshold:
-        stats["reason"] = f"材料性 {score} < {threshold}"
-        return stats
-
+    event_type = (llm_decision.event_type if llm_decision else None) or EVENT_TYPE
     is_update = is_update_headline(item.headline)
-    beneficiaries = [roles.beneficiary]
-    if roles.push_both:
-        cap_a = entity_a.market_cap_usd or 0
-        cap_b = entity_b.market_cap_usd or 0
-        if cap_a <= cap_b:
-            beneficiaries = [e for e in (entity_a, entity_b) if e.ticker]
-        else:
-            beneficiaries = [e for e in (entity_b, entity_a) if e.ticker]
+    saved: list[str] = []
+    last_score = 0
+    last_tier_pair = ""
 
-    event_type = (
-        (llm_decision.event_type if llm_decision else None) or EVENT_TYPE
-    )
-    anchor_key = _anchor_dedup_key(roles.anchor.ticker, roles.anchor.name)
-    saved = []
-    for beneficiary in beneficiaries:
-        ticker = beneficiary.ticker
+    for roles, beneficiary in role_pairs:
+        score = score_materiality(text, item.source, matched)
+        if llm_decision and llm_decision.llm_score:
+            if llm_decision.llm_score < 70:
+                stats["reason"] = f"LLM 材料性不足 {llm_decision.llm_score} < 70"
+                return stats
+            if (llm_decision.event_type or "") == "ai_platform_deal":
+                score = min(100, max(score, llm_decision.llm_score))
+            else:
+                score = min(100, max(score, min(llm_decision.llm_score, score + 10)))
+        threshold = score_threshold(roles.tier_pair)
+        if score < threshold:
+            stats["reason"] = f"材料性 {score} < {threshold}"
+            continue
+
+        ticker = (beneficiary.ticker or "").upper()
         if not ticker:
             continue
-        ticker = ticker.upper()
+        anchor_key = _anchor_dedup_key(roles.anchor.ticker, roles.anchor.name)
         if _is_duplicate(db, item.source_url, h_hash, ticker):
             stats["reason"] = "URL/标题去重"
             continue
@@ -444,16 +505,18 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         else:
             await _maybe_push(db, event, roles.should_push)
         saved.append(event.beneficiary_ticker)
+        last_score = score
+        last_tier_pair = roles.tier_pair
 
     if not saved:
-        stats["reason"] = roles.skip_reason or "去重或未推送"
+        stats["reason"] = stats.get("reason") or "去重或未推送"
         return stats
 
     db.commit()
     stats["skipped"] = False
     stats["saved"] = saved
-    stats["score"] = score
-    stats["tier_pair"] = roles.tier_pair
+    stats["score"] = last_score
+    stats["tier_pair"] = last_tier_pair
     return stats
 
 

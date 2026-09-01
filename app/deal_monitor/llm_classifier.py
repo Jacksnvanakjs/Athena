@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -22,11 +22,22 @@ class LlmDecision:
     is_relevant: bool
     anchor_name: str | None = None
     beneficiary_name: str | None = None
+    beneficiary_names: list[str] = field(default_factory=list)
     anchor_ticker: str | None = None
     beneficiary_ticker: str | None = None
     event_type: str = "compute_deal"
     llm_score: int = 0
     reason: str = ""
+
+    def all_beneficiary_names(self) -> list[str]:
+        out: list[str] = []
+        if self.beneficiary_name:
+            out.append(self.beneficiary_name.strip())
+        for name in self.beneficiary_names or []:
+            n = (name or "").strip()
+            if n and n not in out:
+                out.append(n)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +62,9 @@ THEME_TOKENS = (
     "large language model", "generative ai", "enterprise ai", "copilot",
     "claude", "gpt-4", "gpt-5", "model integration", "ai assistant",
     "product integration", "salesforce in claude",
+    # 云安全 / AI-native security 平台分销
+    "ai-native security", "cybersecurity", "security platform", "falcon platform",
+    "google cloud infrastructure", "available on google cloud",
 )
 
 # 强商业信号：有其一即可，不强制美元金额
@@ -153,6 +167,11 @@ def _build_prompt(items: list[RawItem]) -> str:
     return (
         "你是美股「AI 产业链」材料性商业合作筛选器（含算力供给链 + 企业 AI 平台合作）。"
         "只根据标题和摘要判断，禁止脑补未出现的金额/对方/条款。\n\n"
+        "【解读原则】像人一样读稿：很多通稿**表面是产品上架/now available/GA**，"
+        "实质是 hyperscaler×ISV 的**战略合作、分销渠道、联合发布**。"
+        "遇到此类稿：看是否双方联合宣布、是否改变渠道/部署方式/采购路径；"
+        "若是 → relevant=true，reason 开头写「实质：…合作；表面：…产品」；"
+        "若只是小版本功能更新、无新商业关系 → false。\n\n"
         "用三道闸门决定 relevant（必须全过才 true）：\n"
         "闸门1 双方：存在两家不同公司（申报方/买方/卖方/合作方）。"
         "只有 Item 标题、无对方名 → false。\n"
@@ -173,9 +192,10 @@ def _build_prompt(items: list[RawItem]) -> str:
         "T5 AI 存储与先进封装：HBM、近存算、存储/内存控制器、foundry/advanced packaging "
         "且服务 AI 加速器\n"
         "T6 其他算力供应：明确写给 AI 训练/推理/智算用的长期供应或 offtake\n"
-        "T7 企业 AI 平台合作：美股 SaaS/CRM/数据/安全软件公司与 OpenAI/Anthropic/Google/"
-        "Microsoft 等大模型方，推出 Agent/Copilot/插件/工作流整合，或扩大战略合作且有"
-        "明确产品名/上线计划（如 Claudeforce、Salesforce in Claude）。"
+        "T7 企业 AI / 云安全平台合作：美股 SaaS/CRM/数据/安全软件公司与 OpenAI/Anthropic/Google/"
+        "Microsoft/AWS 等云厂/hyperscaler，推出 Agent/Copilot/插件/工作流整合，"
+        "**或核心企业安全/AI-native 平台正式运行于对方云基础设施**（如 Falcon on Google Cloud、"
+        "Marketplace 分销），且有明确产品名/上线/区域计划。"
         "纯财报超预期、无新合作细节 → false；财报稿中若同时宣布上述产品合作 → true。\n\n"
         "【模式正例】（抽象模板）\n"
         "- 美股芯片/光模块/DC 公司 + 云厂/hyperscaler + 正式商业协议/Item 1.01 → true\n"
@@ -183,6 +203,11 @@ def _build_prompt(items: list[RawItem]) -> str:
         "- 供应链公司 + 采购挂钩 warrant/长期供应，标的是 AI 芯片或加速器生态 → true\n"
         "- 美股 SaaS + Anthropic/OpenAI + 命名产品整合/Agent 上线 → true "
         "(event_type=ai_platform_deal)\n"
+        "- CrowdStrike Falcon 平台正式运行于 Google Cloud 基础设施、双方 IR 联合宣布 → "
+        "relevant=true；beneficiary_name=CrowdStrike，anchor_name=Google；"
+        "event_type=ai_platform_deal；llm_score≥75\n"
+        "- Anthropic 与未上市 Lambda 签 $35B 算力协议、得州数据中心由上市 Hut 8 建设、"
+        "Nvidia 持租约 → relevant=true；beneficiary_name=Hut 8（或 HUT），anchor=NVIDIA 或 Anthropic\n"
         "【模式负例】\n"
         "- 索引页仅 Item 1.01 无对方/无标的；仪式合作；validated/certified；"
         "机器人/消费电子；与大模型无关的普通软件功能更新；信贷/发债/并购/私募；"
@@ -190,6 +215,7 @@ def _build_prompt(items: list[RawItem]) -> str:
         "- 纯产品功能/整合发布（deepens integration、integrates with、product launch、"
         "unveils、introduces、now available），无 definitive/commercial agreement、"
         "无 multi-year、无金额/容量条款 → false。"
+        "**例外**：命名安全平台首次/重大运行于 hyperscaler 云基础设施且双方联合宣布（Falcon on GCP）→ true。"
         "例：安全厂商与芯片平台的 FortiAIGate/NVIDIA 产品整合、"
         "SaaS 常规 Copilot 插件更新 → false\n"
         "- 旧闻复述/股价反应稿 → false：标题侧重「shares/stock up/jump/soar X% "
@@ -197,18 +223,23 @@ def _build_prompt(items: list[RawItem]) -> str:
         "低质 SEO 站（如 Mshale）、标题混无关剧集/随机串 → false。"
         "例：Reddit shares up 11% after announcing OpenAI partnership（2024 旧闻重发）→ false\n\n"
         "角色与打分：\n"
-        "- anchor=更大/更核心方（常为云厂或大模型公司）；beneficiary=业务直接受益的美股公司；"
-        "禁止把小子公司映射成综合集团母公司。\n"
-        "- 只输出 anchor_name / beneficiary_name（公司全称或常用名）；"
-        "不要输出 ticker，股票代码由系统根据种子库自动解析。\n"
-        "- 受益方必须是美股上市公司；若受益方无上市代码则 relevant=false。\n"
+        "- anchor=叙事核心/更大一方（云厂、大模型、Nvidia 等）；可以是未上市公司。\n"
+        "- beneficiary=最值得关注的**美股上市**标的，用于推送与交易；"
+        "**不要**因为标题签约方未上市就判 relevant=false。\n"
+        "- 若直接签约方未上市（如 Lambda、私有 Neocloud），从正文产业链中找**材料性受益**的美股："
+        "数据中心开发商/矿企转 AI（Hut 8）、GPU 云（CRWV/NBIS）、电力/机柜/光模块等。\n"
+        "- beneficiary_name=主推送标的；beneficiary_names=可选额外上市受益方（按重要性排序，最多 3 个）。\n"
+        "- 只输出公司常用名（不要 ticker）；系统用种子库解析代码。\n"
+        "- relevant=true 条件：能指出至少 1 个可映射的美股 beneficiary，且过三闸。\n"
+        "- 若只能想到未上市直接方、正文无任何上市供应链受益 → relevant=false。\n"
         "- llm_score：仪式/认证 0-40；弱合作 40-60；正式协议/命名产品整合且过三闸 ≥70；"
-        "再有 warrant/金额/年限/容量 ≥80。\n"
+        "再有 warrant/金额/年限/容量 ≥80；巨额多年算力/DC 协议 ≥85。\n"
         "- SEC 与通稿：过三闸时倾向 true，禁止因「没写美元」否决；"
         "不确定且非 T7 产品整合则 false。"
-        "event_type：算力类用 compute_deal；T7 用 ai_platform_deal。\n\n"
+        "event_type：算力/DC/租赁用 compute_deal；T7 用 ai_platform_deal。\n\n"
         "只返回 JSON（不要 ```），格式：\n"
-        '{"items":[{"source_url":"...","is_relevant":true,"anchor_name":"...","beneficiary_name":"...","event_type":"compute_deal","llm_score":78,"reason":"..."}]}\n\n'
+        '{"items":[{"source_url":"...","is_relevant":true,"anchor_name":"...","beneficiary_name":"...",'
+        '"beneficiary_names":["..."],"event_type":"compute_deal","llm_score":85,"reason":"..."}]}\n\n'
         f"待分析新闻：\n{json.dumps(payload, ensure_ascii=False)}"
     )
 
@@ -245,11 +276,23 @@ def _decisions_from_parsed(parsed, requested: list[RawItem]) -> dict[str, LlmDec
         source_url = item.get("source_url")
         if not source_url:
             continue
+        extra_names = item.get("beneficiary_names") or []
+        if not isinstance(extra_names, list):
+            extra_names = []
+        primary = (item.get("beneficiary_name") or "").strip() or None
+        names: list[str] = []
+        if primary:
+            names.append(primary)
+        for n in extra_names:
+            s = str(n).strip()
+            if s and s not in names:
+                names.append(s)
         result[source_url] = LlmDecision(
             source_url=source_url,
             is_relevant=bool(item.get("is_relevant")),
             anchor_name=item.get("anchor_name") or None,
-            beneficiary_name=item.get("beneficiary_name") or None,
+            beneficiary_name=names[0] if names else None,
+            beneficiary_names=names[1:] if len(names) > 1 else [],
             # ticker 不由 LLM 决定，入库前由 resolve_entity 解析
             anchor_ticker=None,
             beneficiary_ticker=None,
