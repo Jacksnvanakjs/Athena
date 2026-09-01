@@ -748,13 +748,20 @@
       }
     }
 
-    function fmtDaysTo(d) {
-      if (d == null) return '—';
-      if (d < 0) return '已过';
-      if (d === 0) return '今日财报';
-      if (d === 1) return '明日财报';
-      if (d === 2) return '还有 2 天（今日将推送）';
-      return `还有 ${d} 天`;
+    function fmtDaysTo(row) {
+      let label = row.days_to_label;
+      if (!label) {
+        const d = row.days_to;
+        if (d == null) return '—';
+        if (d < 0) return '已过';
+        if (d === 0) return '今日';
+        if (d === 1) return '明日';
+        return `还有 ${d} 天`;
+      }
+      if (row.days_to === 2 && row.push_status === 'due_today') {
+        label += '（今日推送）';
+      }
+      return label;
     }
 
     function fmtErPush(row) {
@@ -814,7 +821,7 @@
           <td><span class="ticker">${row.ticker}</span><div class="strategy-hint">${row.company_name || ''}</div></td>
           <td>${sectorCn}</td>
           <td>${score}</td>
-          <td>${fmtDaysTo(row.days_to)}</td>
+          <td>${fmtDaysTo(row)}</td>
           <td class="er-trade">${fmtDualTime(row.buy_window_bj, row.buy_window_et)}</td>
           <td class="er-trade">${fmtDualTime(row.sell_window_bj, row.sell_window_et)}</td>
           <td class="er-trade">${fmtDualTime(row.sell_deadline_bj, row.sell_deadline_et)}</td>

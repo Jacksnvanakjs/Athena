@@ -542,8 +542,9 @@ def earnings_stats(days: int = Query(default=90, ge=1, le=180)):
     from app.earnings_monitor.calendar_fetch import today_et
     from app.earnings_monitor.config import EARNINGS_PUSH_DAYS_BEFORE, EARNINGS_PUSH_MIN_SCORE
     from app.earnings_monitor.pipeline import days_to_earnings
+    from app.earnings_monitor.trade_window import today_bj
 
-    today = today_et()
+    today = today_bj()
     until = today + timedelta(days=days)
 
     def _query(db: Session):
@@ -560,7 +561,8 @@ def earnings_stats(days: int = Query(default=90, ge=1, le=180)):
         t2 = sum(
             1
             for e in rows
-            if days_to_earnings(e.earnings_date, today) == EARNINGS_PUSH_DAYS_BEFORE
+            if days_to_earnings(e.earnings_date, today, e.session or "TBD")
+            == EARNINGS_PUSH_DAYS_BEFORE
             and e.push_eligible
             and (e.score_total or 0) >= EARNINGS_PUSH_MIN_SCORE
         )

@@ -45,6 +45,56 @@ def _fmt_pair(et_dt: datetime) -> tuple[str, str]:
     return bj.strftime("%m-%d %H:%M"), et_dt.strftime("%m-%d %H:%M")
 
 
+def today_bj() -> date:
+    return datetime.now(_BJ).date()
+
+
+def earnings_release_dt_bj(earnings_date: date, session: str) -> datetime:
+    """财报揭晓时刻（北京时间）。"""
+    sess = (session or "TBD").upper()
+    if sess not in ("AMC", "BMO", "TBD"):
+        sess = "TBD"
+    sess_eff = "AMC" if sess == "TBD" else sess
+    if sess_eff == "AMC":
+        release_et = _et_at(earnings_date, 16, 5)
+    else:
+        release_et = _et_at(earnings_date, 9, 35)
+    return release_et.astimezone(_BJ)
+
+
+def relative_release_label_bj(
+    earnings_date: date,
+    session: str,
+    now: datetime | None = None,
+) -> str:
+    """距今（北京时间）：今日凌晨 / 明日凌晨 / 还有 N 天。"""
+    now = now or datetime.now(_BJ)
+    release = earnings_release_dt_bj(earnings_date, session)
+    if release <= now:
+        return "已过"
+    delta_days = (release.date() - now.date()).days
+    h = release.hour
+    if delta_days == 0:
+        if h < 6:
+            return "今日凌晨"
+        if h < 12:
+            return "今天上午"
+        if h < 18:
+            return "今日下午"
+        return "今晚"
+    if delta_days == 1:
+        if h < 6:
+            return "明日凌晨"
+        if h < 12:
+            return "明日上午"
+        return "明日"
+    if delta_days == 2:
+        if h < 12:
+            return "后日凌晨"
+        return "后日"
+    return f"还有{delta_days}天"
+
+
 @dataclass
 class EarningsTradeWindow:
     strategy: str

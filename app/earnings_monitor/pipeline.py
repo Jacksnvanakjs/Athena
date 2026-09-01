@@ -25,7 +25,13 @@ from app.earnings_monitor.config import (
 )
 from app.earnings_monitor.push import build_earnings_batch_push
 from app.earnings_monitor.scoring import fetch_pre_30d_gain, hard_eliminate, score_candidate
-from app.earnings_monitor.trade_window import compute_trade_window, session_label
+from app.earnings_monitor.trade_window import (
+    compute_trade_window,
+    earnings_release_dt_bj,
+    relative_release_label_bj,
+    session_label,
+    today_bj,
+)
 from app.earnings_monitor.universe import filter_by_market_cap, load_universe
 from app.notifier import notify
 from app.utils import now_beijing
@@ -39,8 +45,15 @@ def unique_key(ticker: str, earnings_date: date) -> str:
     return f"{ticker.upper()}:{earnings_date.isoformat()}"
 
 
-def days_to_earnings(earnings_date: date, today: date | None = None) -> int:
-    return (earnings_date - (today or today_et())).days
+def days_to_earnings(
+    earnings_date: date,
+    today: date | None = None,
+    session: str = "TBD",
+) -> int:
+    """距财报揭晓（北京时间日历日差）。"""
+    rel = earnings_release_dt_bj(earnings_date, session)
+    today = today or today_bj()
+    return (rel.date() - today).days
 
 
 def _localize_one_liner(text: str | None) -> str:
@@ -54,8 +67,10 @@ def _localize_one_liner(text: str | None) -> str:
 
 
 def push_status_for(event: EarningsEvent, today: date | None = None) -> str:
-    today = today or today_et()
-    if event.status == "archived" or event.earnings_date < today:
+    today = today or today_bj()
+    session = event.session or "TBD"
+    d = days_to_earnings(event.earnings_date, today, session)
+    if event.status == "archived" or d < 0:
         return "archived"
     if event.eliminate_reason:
         return "skipped"
@@ -66,7 +81,7 @@ def push_status_for(event: EarningsEvent, today: date | None = None) -> str:
         "disabled",
     }:
         return "pushed"
-    d = days_to_earnings(event.earnings_date, today)
+    d = days_to_earnings(event.earnings_date, today, session)
     if d == EARNINGS_PUSH_DAYS_BEFORE and event.push_eligible:
         return "due_today"
     if d > EARNINGS_PUSH_DAYS_BEFORE:
@@ -152,7 +167,7 @@ def _upsert_event(
 
 
 async def _apply_score(event: EarningsEvent) -> None:
-    days = days_to_earnings(event.earnings_date)
+    days = days_to_earnings(event.earnings_date, session=event.session or "TBD")
     pre_gain = None
     if days <= EARNINGS_SCORE_LOOKAHEAD_DAYS:
         pre_gain = await fetch_pre_30d_gain(event.ticker)
@@ -227,7 +242,7 @@ async def run_calendar_refresh() -> dict:
                 source=hit.source,
             )
             summary["upserted"] += 1
-            days = days_to_earnings(hit.earnings_date)
+            days = days_to_earnings(hit.earnings_date, session=hit.session)
             if days <= EARNINGS_SCORE_LOOKAHEAD_DAYS or event.score_total is None:
                 await _apply_score(event)
                 summary["scored"] += 1
@@ -275,7 +290,7 @@ def _eligible_for_push_today(event: EarningsEvent, today: date) -> bool:
     ):
         return False
 
-    d = days_to_earnings(event.earnings_date, today)
+    d = days_to_earnings(event.earnings_date, today, event.session or "TBD")
     if d == EARNINGS_PUSH_DAYS_BEFORE:
         return True
     # 补推：仅当曾失败或从未成功
@@ -293,8 +308,8 @@ async def run_t2_push_check() -> dict:
     if not EARNINGS_PUSH_ENABLED:
         return {"skipped": True, "reason": "push_disabled"}
 
-    today = today_et()
-    summary = {"today_et": today.isoformat(), "batches": 0, "pushed_events": 0, "skipped": 0}
+    today = today_bj()
+    summary = {"today_bj": today.isoformat(), "batches": 0, "pushed_events": 0, "skipped": 0}
 
     with db_session() as db:
         upcoming = (
@@ -378,8 +393,10 @@ async def run_pipeline() -> dict:
 
 
 def event_to_dict(event: EarningsEvent) -> dict:
-    today = today_et()
-    days = days_to_earnings(event.earnings_date, today)
+    today = today_bj()
+    session = event.session or "TBD"
+    days = days_to_earnings(event.earnings_date, today, session)
+    days_label = relative_release_label_bj(event.earnings_date, session)
     score_ok = event.score_total is None or event.score_total >= EARNINGS_WEB_MIN_SCORE
     # 展示用窗口统一重算，保证单时点 + 双时区
     tw = compute_trade_window(event.earnings_date, event.session or "TBD")
@@ -419,6 +436,7 @@ def event_to_dict(event: EarningsEvent) -> dict:
         "hold_trading_days_max": tw.hold_trading_days_max,
         "status": event.status,
         "days_to": days,
+        "days_to_label": days_label,
         "push_status": push_status_for(event, today),
         "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
         "scored_at": event.scored_at.isoformat() if event.scored_at else None,
