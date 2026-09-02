@@ -308,7 +308,7 @@
         </div>
         <p class="section-foot" id="periodHint" style="margin:6px 0 0"></p>
         <div class="breadcrumb" id="breadcrumb"></div>
-        <div id="treemap"><div class="loading">正在拉取美股数据...</div></div>
+        <div id="treemap"><div class="loading">正在拉取美股数据（约需 30–60 秒）...</div></div>
         <div class="small-labels" id="smallLabels"></div>
         <p class="note" id="note"></p>
       </div>
@@ -355,6 +355,12 @@
       return sign + n.toFixed(2) + '%';
     }
 
+    function fmtRankDual(pricePct, flowPct) {
+      return `<span class="rank-pcts">` +
+        `<span class="pct ${pctClass(pricePct)}" title="相对昨收涨跌">${fmtPct(pricePct)}</span>` +
+        `<span class="muted rank-flow" title="占监控样本的资金活跃度比重"> · 资金 ${fmtPct(flowPct)}</span></span>`;
+    }
+
     function fmtMoney(v) {
       const n = Number(v || 0);
       if (Math.abs(n) >= 1e9) return (n / 1e9).toFixed(2) + 'B';
@@ -383,7 +389,7 @@
       if (data.success === false) {
         return `${head}行情拉取失败 · ${refresh}${src}${cov}`;
       }
-      return `${head}${refresh}${tradeDay}${session}${basis}${quote}${freshness}${src}${cov} · 每60秒自动刷新 · 收盘后自动存快照（${snap}）`;
+      return `${head}${refresh}${tradeDay}${session}${basis}${quote}${freshness}${src}${cov} · 每3分钟自动刷新 · 收盘后自动存快照（${snap}）`;
     }
 
     function formatStatsMetaLine(data) {
@@ -407,7 +413,7 @@
       if (!el) return;
       if (usingLive()) {
         el.textContent =
-          '实时：当前刷新行情，每60秒更新，盘前/盘中/盘后均可变。' +
+          '实时：当前刷新行情，每3分钟更新，盘前/盘中/盘后均可变。' +
           '「今日」= 当前美东交易日；收盘快照在美东 16:30 入库（北京次日凌晨 04:30/05:30）。';
         return;
       }
@@ -621,7 +627,7 @@
           return `
           <li>
             <span><a href="#" onclick="focusSector='${s.key}';document.getElementById('viewMode').value='company';render();return false">${s.name}</a></span>
-            <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, s.flow_score, s.change_pct)}">${fmtPct(fp)}</span>
+            <span class="tip" title="${tipFlowShare(fp, s.flow_score, s.change_pct)}">${fmtRankDual(s.change_pct, fp)}</span>
           </li>`;
         }).join('') || '<li class="muted">暂无</li>';
         botS.innerHTML = (liveData.top_outflow_sectors || []).map(s => {
@@ -629,20 +635,20 @@
           return `
           <li>
             <span><a href="#" onclick="focusSector='${s.key}';document.getElementById('viewMode').value='company';render();return false">${s.name}</a></span>
-            <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, s.flow_score, s.change_pct)}">${fmtPct(fp)}</span>
+            <span class="tip" title="${tipFlowShare(fp, s.flow_score, s.change_pct)}">${fmtRankDual(s.change_pct, fp)}</span>
           </li>`;
         }).join('') || '<li class="muted">暂无</li>';
         topC.innerHTML = (liveData.top_inflow_companies || []).map(c => {
           const fp = flowSharePct(c.flow_score, cosTotal);
           return `
           <li><span>${c.cn_name || c.name} <span class="muted">${c.symbol}</span></span>
-          <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, c.flow_score, c.change_pct)}">${fmtPct(fp)}</span></li>`;
+          <span class="tip" title="${tipFlowShare(fp, c.flow_score, c.change_pct)}">${fmtRankDual(c.change_pct, fp)}</span></li>`;
         }).join('') || '<li class="muted">暂无</li>';
         botC.innerHTML = (liveData.top_outflow_companies || []).map(c => {
           const fp = flowSharePct(c.flow_score, cosTotal);
           return `
           <li><span>${c.cn_name || c.name} <span class="muted">${c.symbol}</span></span>
-          <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, c.flow_score, c.change_pct)}">${fmtPct(fp)}</span></li>`;
+          <span class="tip" title="${tipFlowShare(fp, c.flow_score, c.change_pct)}">${fmtRankDual(c.change_pct, fp)}</span></li>`;
         }).join('') || '<li class="muted">暂无</li>';
         return;
       }
@@ -665,7 +671,7 @@
         return `
         <li>
           <span><a href="#" onclick="focusSector='${s.sector_key}';document.getElementById('viewMode').value='company';render();return false">${s.cn_name || s.name}</a></span>
-          <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, s.flow_score_sum, s.period_change_pct)}">${fmtPct(fp)}</span>
+          <span class="tip" title="${tipFlowShare(fp, s.flow_score_sum, s.period_change_pct)}">${fmtRankDual(s.period_change_pct, fp)}</span>
         </li>`;
       }).join('') || '<li class="muted">暂无</li>';
       botS.innerHTML = (statsData.top_outflow_sectors || []).map(s => {
@@ -673,20 +679,20 @@
         return `
         <li>
           <span><a href="#" onclick="focusSector='${s.sector_key}';document.getElementById('viewMode').value='company';render();return false">${s.cn_name || s.name}</a></span>
-          <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, s.flow_score_sum, s.period_change_pct)}">${fmtPct(fp)}</span>
+          <span class="tip" title="${tipFlowShare(fp, s.flow_score_sum, s.period_change_pct)}">${fmtRankDual(s.period_change_pct, fp)}</span>
         </li>`;
       }).join('') || '<li class="muted">暂无</li>';
       topC.innerHTML = (statsData.top_inflow_companies || []).map(c => {
         const fp = flowSharePct(c.flow_score_sum, cosTotal);
         return `
         <li><span>${c.cn_name || c.name} <span class="muted">${c.symbol}</span></span>
-        <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, c.flow_score_sum, c.period_change_pct)}">${fmtPct(fp)}</span></li>`;
+        <span class="tip" title="${tipFlowShare(fp, c.flow_score_sum, c.period_change_pct)}">${fmtRankDual(c.period_change_pct, fp)}</span></li>`;
       }).join('') || '<li class="muted">暂无</li>';
       botC.innerHTML = (statsData.top_outflow_companies || []).map(c => {
         const fp = flowSharePct(c.flow_score_sum, cosTotal);
         return `
         <li><span>${c.cn_name || c.name} <span class="muted">${c.symbol}</span></span>
-        <span class="tip ${pctClass(fp)}" title="${tipFlowShare(fp, c.flow_score_sum, c.period_change_pct)}">${fmtPct(fp)}</span></li>`;
+        <span class="tip" title="${tipFlowShare(fp, c.flow_score_sum, c.period_change_pct)}">${fmtRankDual(c.period_change_pct, fp)}</span></li>`;
       }).join('') || '<li class="muted">暂无</li>';
     }
 
@@ -979,7 +985,19 @@
     }
 
     async function loadLive(force = false) {
-      const res = await fetch('/api/heatmap' + (force ? '?force=true' : ''));
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 150000);
+      let res;
+      try {
+        res = await fetch('/api/heatmap' + (force ? '?force=true' : ''), { signal: ctrl.signal });
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          throw new Error('拉取超时（>150秒），请稍后重试或点「刷新」');
+        }
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
       if (!res.ok) throw new Error('行情 HTTP ' + res.status);
       liveData = await res.json();
       document.getElementById('metaLine').textContent = formatMetaLine(liveData, '');
@@ -1095,7 +1113,7 @@
     let liveIntervalId = null;
     let countdownTickId = null;
     let countdownSec = 60;
-    let currentRefreshMs = 60_000;
+    let currentRefreshMs = 180_000;
 
     const LIVE_REFRESH_MS_OPEN = 60_000; // 盘前/盘中/盘后：1 分钟刷新
     const LIVE_REFRESH_MS_CLOSED = 300_000; // 休市：每 5 分钟检查一次
@@ -1173,7 +1191,7 @@
         liveReloading = true;
         setTimerUI();
         try {
-          await reloadAll(true);
+          await reloadAll(false);
         } finally {
           liveReloading = false;
           countdownSec = Math.floor(currentRefreshMs / 1000);
@@ -1185,7 +1203,7 @@
     }
 
     window.addEventListener('resize', () => { render(); renderFlow(); });
-    reloadAll(true);
+    reloadAll(false);
   </script>
 </body>
 </html>

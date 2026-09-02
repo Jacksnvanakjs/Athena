@@ -6,5 +6,10 @@ build:
 start:
   command: python run.py
 
+env:
+  ENABLE_SCHEDULER: "true"
+  DEAL_POLL_INTERVAL_MIN: "2"
+  TIMEZONE: "Asia/Shanghai"
+
 healthCheck:
   path: /health

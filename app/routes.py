@@ -10,7 +10,9 @@ from app.nvda_signal.trade_window import strategy_label
 from app.source_url_guard import is_test_source_url
 from app.service import run_scrape_and_notify
 from app.time_display import (
+    format_beijing_at_bj,
     format_beijing_at_display,
+    format_beijing_at_et,
     format_published_at_bj,
     format_published_at_et,
 )
@@ -177,7 +179,10 @@ def system_status():
         earn = db.query(EarningsEvent).filter(EarningsEvent.status.in_(["upcoming", "pushed"])).count()
         return len(deals), len(nvda), earn
 
+    from app.scheduler import scheduler_status
+
     deal_total, nvda_total, earnings_total = run_with_db_retry(_counts)
+    sched = scheduler_status()
     return {
         "is_trading_day": is_trading_day(),
         "scrape_times": [f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES],
@@ -185,6 +190,8 @@ def system_status():
         "database": "turso" if USE_TURSO else "sqlite",
         "now": now_beijing().isoformat(timespec="seconds"),
         "scheduler_enabled": ENABLE_SCHEDULER,
+        "scheduler_running": sched["running"],
+        "scheduler": sched,
         "deal_monitor": {
             "poll_interval_min": DEAL_POLL_INTERVAL_MIN,
             "events_total": deal_total,
@@ -247,6 +254,8 @@ def _deal_to_dict(event) -> dict:
         "published_at_bj": format_published_at_bj(event.published_at),
         "published_at_et": format_published_at_et(event.published_at),
         "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
+        "fetched_at_bj": format_beijing_at_bj(event.fetched_at),
+        "fetched_at_et": format_beijing_at_et(event.fetched_at),
         "fetched_at_display": format_beijing_at_display(event.fetched_at),
         "headline": event.headline,
         "summary": event.summary,
@@ -265,6 +274,8 @@ def _deal_to_dict(event) -> dict:
         "event_type": event.event_type,
         "is_update": event.is_update,
         "pushed_at": event.pushed_at.isoformat() if event.pushed_at else None,
+        "pushed_at_bj": format_beijing_at_bj(event.pushed_at) if event.pushed_at else None,
+        "pushed_at_et": format_beijing_at_et(event.pushed_at) if event.pushed_at else None,
         "pushed_at_display": format_beijing_at_display(event.pushed_at) if event.pushed_at else None,
         "push_channel": event.push_channel,
         "pushed": _push_ok(event),
@@ -286,6 +297,8 @@ def _nvda_to_dict(event) -> dict:
         "published_at_bj": format_published_at_bj(event.published_at),
         "published_at_et": format_published_at_et(event.published_at),
         "fetched_at": event.fetched_at.isoformat() if event.fetched_at else None,
+        "fetched_at_bj": format_beijing_at_bj(event.fetched_at),
+        "fetched_at_et": format_beijing_at_et(event.fetched_at),
         "fetched_at_display": format_beijing_at_display(event.fetched_at),
         "headline": event.headline,
         "summary": event.summary,
@@ -304,6 +317,8 @@ def _nvda_to_dict(event) -> dict:
         "event_type": event.action_type,
         "is_update": False,
         "pushed_at": event.pushed_at.isoformat() if event.pushed_at else None,
+        "pushed_at_bj": format_beijing_at_bj(event.pushed_at) if event.pushed_at else None,
+        "pushed_at_et": format_beijing_at_et(event.pushed_at) if event.pushed_at else None,
         "pushed_at_display": format_beijing_at_display(event.pushed_at) if event.pushed_at else None,
         "push_channel": event.push_channel,
         "pushed": _push_ok(event),

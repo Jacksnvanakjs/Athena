@@ -1,13 +1,18 @@
 """美股板块/个股热力图数据。
 
-主数据源：新浪财经美股批量行情（云端机房通常可用）；
-补充：Yahoo spark / CNBC / 东财。
-资金流入用「涨跌幅 × 成交额」代理指标；非 Level2 真实资金流。
+行情源（按序尝试，前者成功则后者仅补缺）：
+  1. TickDB（需环境变量 TICKDB_API_KEY，美股格式 SYMBOL.US）
+  2. Yahoo Finance（含盘前/盘后价量分离；本地可设 HEATMAP_SKIP_YAHOO=1 跳过）
+  3. AKShare：东财 ulist → 新浪 stock_us_daily 逐只 → 东财全表
+  4. Tushare us_daily（需 TUSHARE_TOKEN，日频收盘非实时）
+资金流入 = 涨跌幅 × 成交额 / 10亿；排行占比为样本内比重。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
 import time
 from datetime import datetime
@@ -20,8 +25,6 @@ from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
 
-CNBC_QUOTE = "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
-SINA_HQ = "https://hq.sinajs.cn/list={codes}"
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -33,12 +36,25 @@ HEADERS = {
 
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_SPARK = "https://query1.finance.yahoo.com/v7/finance/spark"
-EASTMONEY_ULIST = "https://push2.eastmoney.com/api/qt/ulist.np/get"
+TICKDB_TICKER = "https://api.tickdb.ai/v1/market/ticker"
+TICKDB_BATCH_SIZE = 25
+TICKDB_BATCH_PAUSE = 1.5  # 秒，避免免费额度 429
 
 # 成功样本过少时视为失败（避免「全 0」或「单板块 100%」）
 _MIN_QUOTE_RATIO = 0.55
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
-_CACHE_TTL = 120  # 秒
+_CACHE_TTL = 180  # 秒（3 分钟，减轻 Yahoo 429 与兜底源压力）
+_SINA_SPOT_CACHE: dict[str, Any] = {"ts": 0.0, "df": None}
+_SINA_SPOT_TTL = 180
+_SINA_SPOT_FETCH_TIMEOUT = 600  # 新浪全表约 900 页，本地网络需 7–10 分钟
+_BUILD_LOCK: asyncio.Lock | None = None
+
+
+def _heatmap_build_lock() -> asyncio.Lock:
+    global _BUILD_LOCK
+    if _BUILD_LOCK is None:
+        _BUILD_LOCK = asyncio.Lock()
+    return _BUILD_LOCK
 
 
 # 11 大 GICS 板块 → SPDR 行业 ETF + 代表性龙头股
@@ -455,21 +471,21 @@ def _us_market_session(now_et: datetime | None = None) -> dict[str, str]:
         return {
             "session": "pre",
             "session_label": "盘前交易",
-            "data_freshness": "盘前实时（新浪延时行情，通常接近实时）",
+            "data_freshness": "盘前实时（Yahoo Finance）",
             "change_pct_basis": "涨跌幅相对上一交易日收盘价（盘前）",
         }
     if 9 * 60 + 30 <= minutes < 16 * 60:
         return {
             "session": "regular",
             "session_label": "盘中交易",
-            "data_freshness": "盘中实时（新浪延时行情，通常接近实时）",
+            "data_freshness": "盘中实时（Yahoo Finance）",
             "change_pct_basis": "涨跌幅相对昨收（盘中）",
         }
     if 16 * 60 <= minutes < 20 * 60:
         return {
             "session": "post",
             "session_label": "盘后交易",
-            "data_freshness": "盘后实时（新浪延时行情，通常接近实时）",
+            "data_freshness": "盘后实时（Yahoo Finance）",
             "change_pct_basis": "涨跌幅相对昨收（盘后）",
         }
     return {
@@ -478,6 +494,50 @@ def _us_market_session(now_et: datetime | None = None) -> dict[str, str]:
         "data_freshness": "隔夜休市，价格停在昨盘后；开盘前（美东04:00起）才会继续变动",
         "change_pct_basis": "涨跌幅停在昨盘后",
     }
+
+
+def _parse_sina_row(parts: list[str], sym: str) -> dict[str, Any] | None:
+    """解析新浪 hq 字段；盘中勿用 [21] 盘前价覆盖 [1] 最新价。"""
+    if len(parts) < 11:
+        return None
+    price = _to_float(parts[1])
+    change_pct = _to_float(parts[2]) or 0.0
+    volume = _to_float(parts[10]) or 0.0
+    prev_close = _to_float(parts[26]) if len(parts) > 26 else None
+    ext_price = _to_float(parts[21]) if len(parts) > 21 else None
+    et_raw = parts[24].strip() if len(parts) > 24 else ""
+    et_dt = _parse_sina_et_time(et_raw)
+    ref_et = et_dt.astimezone(_US_TZ) if et_dt else datetime.now(_US_TZ)
+    session = _us_market_session(ref_et).get("session", "closed")
+
+    if session == "regular":
+        # 盘中：字段 [1] 为最新成交，[21] 可能仍是滞后盘前价
+        if price and prev_close and prev_close > 0:
+            change_pct = round((price - prev_close) / prev_close * 100, 2)
+    elif session in ("pre", "post"):
+        if ext_price and ext_price > 0 and prev_close and prev_close > 0:
+            price = ext_price
+            change_pct = round((ext_price - prev_close) / prev_close * 100, 2)
+    elif ext_price and ext_price > 0 and prev_close and prev_close > 0:
+        price = ext_price
+        change_pct = round((ext_price - prev_close) / prev_close * 100, 2)
+    elif price and prev_close and prev_close > 0:
+        change_pct = round((price - prev_close) / prev_close * 100, 2)
+
+    if price is None or price <= 0:
+        return None
+    quote_time = (
+        et_dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S") if et_dt else None
+    )
+    return _quote_row(
+        sym,
+        name=parts[0] or sym,
+        price=price,
+        change_pct=change_pct,
+        volume=volume,
+        quote_time=quote_time,
+        quote_time_et=et_raw or None,
+    )
 
 
 def _snapshot_time_hint() -> str:
@@ -525,137 +585,6 @@ def _response_timestamps(by_symbol: dict[str, dict[str, Any]] | None = None) -> 
     return out
 
 
-def _parse_quote(raw: dict[str, Any]) -> dict[str, Any] | None:
-    if raw.get("code") not in (0, "0", None):
-        # code=1 means not found
-        if raw.get("last") in (None, "", "0.00") and not raw.get("name"):
-            return None
-    price = _to_float(raw.get("last"))
-    if price is None:
-        return None
-    change_pct = _to_float(raw.get("change_pct")) or 0.0
-    volume = _to_float(raw.get("volume")) or 0.0
-    return _quote_row(
-        raw.get("symbol") or raw.get("shortName") or "",
-        name=raw.get("name") or raw.get("onAirName") or raw.get("symbol") or "",
-        price=price,
-        change_pct=change_pct,
-        volume=volume,
-        market_cap=_to_float(raw.get("mktcapView")),
-    )
-
-
-async def _fetch_cnbc(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """CNBC 批量报价；部分云主机 IP 会被拦截，失败时返回空。"""
-    out: dict[str, dict[str, Any]] = {}
-    chunk_size = 40
-    headers = {**HEADERS, "Referer": "https://www.cnbc.com/"}
-    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
-        for i in range(0, len(symbols), chunk_size):
-            chunk = symbols[i : i + chunk_size]
-            try:
-                resp = await client.get(
-                    CNBC_QUOTE,
-                    params={
-                        "symbols": "|".join(chunk),
-                        "requestMethod": "itv",
-                        "noform": "1",
-                        "partnerId": "2",
-                        "fund": "1",
-                        "exthrs": "1",
-                        "output": "json",
-                        "events": "1",
-                    },
-                )
-                resp.raise_for_status()
-                payload = resp.json()
-                quotes = (
-                    (payload.get("FormattedQuoteResult") or {}).get("FormattedQuote")
-                    or []
-                )
-                if isinstance(quotes, dict):
-                    quotes = [quotes]
-                for raw in quotes:
-                    parsed = _parse_quote(raw)
-                    if parsed and parsed.get("symbol"):
-                        out[parsed["symbol"]] = parsed
-            except Exception as exc:
-                logger.warning("CNBC batch failed: %s", exc)
-    return out
-
-
-def _sina_code(symbol: str) -> str:
-    return "gb_" + symbol.lower().replace("-", ".")
-
-
-async def _fetch_sina(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """新浪财经美股批量行情（hq.sinajs.cn），云端机房通常不被拦。"""
-    out: dict[str, dict[str, Any]] = {}
-    code_to_sym = {_sina_code(s): s for s in symbols}
-    headers = {
-        **HEADERS,
-        "Referer": "https://finance.sina.com.cn/",
-        "Accept": "*/*",
-    }
-    chunk_size = 40
-    codes = list(code_to_sym.keys())
-    async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True) as client:
-        for i in range(0, len(codes), chunk_size):
-            chunk = codes[i : i + chunk_size]
-            try:
-                resp = await client.get(SINA_HQ.format(codes=",".join(chunk)))
-                resp.raise_for_status()
-                raw = resp.content
-                try:
-                    text = raw.decode("gb18030")
-                except UnicodeDecodeError:
-                    text = raw.decode("utf-8", errors="ignore")
-                for code, sym in ((c, code_to_sym[c]) for c in chunk):
-                    match = re.search(
-                        rf'hq_str_{re.escape(code)}="([^"]*)"',
-                        text,
-                    )
-                    if not match or not match.group(1):
-                        continue
-                    parts = match.group(1).split(",")
-                    if len(parts) < 11:
-                        continue
-                    price = _to_float(parts[1])
-                    change_pct = _to_float(parts[2])
-                    volume = _to_float(parts[10])
-                    # 盘前/盘后: 字段[21]=延时价, [26]=昨收价
-                    # 用延时价相对昨收算总涨跌幅，与"市场魔法助手"等一致
-                    if len(parts) >= 27:
-                        ext_price = _to_float(parts[21])
-                        prev_close = _to_float(parts[26])
-                        if ext_price and ext_price > 0 and prev_close and prev_close > 0:
-                            price = ext_price
-                            change_pct = round((ext_price - prev_close) / prev_close * 100, 2)
-                    if price is None or price <= 0:
-                        continue
-                    # [24]=美东行情时间（对应当前使用的盘前/盘后/收盘价）
-                    # [3]=新浪服务器写入时间，隔夜常不更新，不能当行情时间
-                    et_raw = parts[24].strip() if len(parts) > 24 else ""
-                    et_dt = _parse_sina_et_time(et_raw)
-                    quote_time = (
-                        et_dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
-                        if et_dt
-                        else None
-                    )
-                    out[sym] = _quote_row(
-                        sym,
-                        name=parts[0] or sym,
-                        price=price,
-                        change_pct=change_pct or 0.0,
-                        volume=volume or 0.0,
-                        quote_time=quote_time,
-                        quote_time_et=et_raw or None,
-                    )
-            except Exception as exc:
-                logger.warning("Sina batch failed: %s", exc)
-    return out
-
-
 def _yahoo_symbol(symbol: str) -> str:
     # Yahoo 用 BRK-B，本站内部用 BRK.B
     return symbol.replace(".", "-")
@@ -670,43 +599,129 @@ def _from_yahoo_symbol(yahoo_symbol: str, wanted: set[str]) -> str:
     return yahoo_symbol
 
 
-def _parse_yahoo_spark_item(
-    item: dict[str, Any], wanted: set[str]
-) -> tuple[str, dict[str, Any]] | None:
-    yahoo_sym = item.get("symbol") or ""
-    resp = (item.get("response") or [{}])[0] or {}
-    meta = resp.get("meta") or {}
-    quote = ((resp.get("indicators") or {}).get("quote") or [{}])[0]
-    closes = [c for c in (quote.get("close") or []) if c is not None]
-    volumes = [v for v in (quote.get("volume") or []) if v is not None]
-    price = _to_float(meta.get("regularMarketPrice"))
-    if price is None and closes:
-        price = float(closes[-1])
+def _sum_yahoo_session_volume(result: dict[str, Any], *, state: str) -> float:
+    """从 1 分钟 K 汇总当前时段成交量（避免盘前误用昨安全天量）。"""
+    meta = result.get("meta") or {}
+    reg_open = meta.get("regularMarketTime")
+    ts = result.get("timestamp") or []
+    vols = ((result.get("indicators") or {}).get("quote") or [{}])[0].get("volume") or []
+    total = 0.0
+    for t, v in zip(ts, vols):
+        if not v:
+            continue
+        tv = float(v)
+        if state == "PRE":
+            if reg_open and t >= reg_open:
+                continue
+        elif state in ("POST", "POSTPOST"):
+            if reg_open and t < reg_open:
+                continue
+        total += tv
+    return total
+
+
+def _parse_yahoo_meta(
+    meta: dict[str, Any],
+    result: dict[str, Any] | None,
+    symbol: str,
+) -> dict[str, Any] | None:
+    """按 marketState 取价/涨跌/量，涨跌幅均相对 previousClose。"""
+    state = str(meta.get("marketState") or "").upper()
+    prev = _to_float(meta.get("previousClose")) or _to_float(
+        meta.get("chartPreviousClose")
+    )
+    price: float | None = None
+    change_pct: float | None = None
+    volume = 0.0
+
+    if state == "PRE":
+        price = _to_float(meta.get("preMarketPrice"))
+        change_pct = _to_float(meta.get("preMarketChangePercent"))
+        volume = _to_float(meta.get("preMarketVolume")) or 0.0
+        if result and volume <= 0:
+            volume = _sum_yahoo_session_volume(result, state="PRE")
+    elif state in ("POST", "POSTPOST"):
+        price = _to_float(meta.get("postMarketPrice"))
+        change_pct = _to_float(meta.get("postMarketChangePercent"))
+        volume = _to_float(meta.get("postMarketVolume")) or 0.0
+        if result and volume <= 0:
+            volume = _sum_yahoo_session_volume(result, state=state)
+    else:
+        price = _to_float(meta.get("regularMarketPrice"))
+        change_pct = _to_float(meta.get("regularMarketChangePercent"))
+        volume = _to_float(meta.get("regularMarketVolume")) or 0.0
+        if result and volume <= 0 and state == "REGULAR":
+            volume = _sum_yahoo_session_volume(result, state="REGULAR")
+
+    if price is None and result:
+        closes = [
+            c
+            for c in (
+                ((result.get("indicators") or {}).get("quote") or [{}])[0].get("close")
+                or []
+            )
+            if c is not None
+        ]
+        if closes:
+            price = float(closes[-1])
     if price is None:
         return None
-    change_pct = 0.0
-    if len(closes) >= 2 and closes[-2]:
-        change_pct = (float(closes[-1]) - float(closes[-2])) / float(closes[-2]) * 100
-        price = float(closes[-1])
-    else:
-        prev = _to_float(meta.get("previousClose")) or _to_float(
-            meta.get("chartPreviousClose")
-        )
-        if prev:
-            change_pct = (price - prev) / prev * 100
-    volume = float(volumes[-1]) if volumes else float(meta.get("regularMarketVolume") or 0)
-    symbol = _from_yahoo_symbol(str(yahoo_sym), wanted)
-    return symbol, _quote_row(
+    if change_pct is None:
+        if prev and prev > 0:
+            change_pct = round((price - prev) / prev * 100, 2)
+        else:
+            change_pct = 0.0
+
+    quote_time_et = None
+    quote_time = None
+    ts_key = {
+        "PRE": "preMarketTime",
+        "POST": "postMarketTime",
+        "POSTPOST": "postMarketTime",
+    }.get(state, "regularMarketTime")
+    raw_ts = meta.get(ts_key) or meta.get("regularMarketTime")
+    if raw_ts:
+        try:
+            dt = datetime.fromtimestamp(int(raw_ts), tz=_US_TZ)
+            quote_time_et = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+            quote_time = dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError):
+            pass
+
+    return _quote_row(
         symbol,
         name=meta.get("longName") or meta.get("shortName") or symbol,
         price=price,
         change_pct=change_pct,
         volume=volume,
+        quote_time=quote_time,
+        quote_time_et=quote_time_et,
     )
 
 
+def _parse_yahoo_chart_result(result: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    meta = result.get("meta") or {}
+    sym = _from_yahoo_symbol(
+        str(meta.get("symbol") or symbol),
+        {symbol, _yahoo_symbol(symbol), symbol.replace(".", "-")},
+    )
+    return _parse_yahoo_meta(meta, result, sym)
+
+
+def _parse_yahoo_spark_item(
+    item: dict[str, Any], wanted: set[str]
+) -> tuple[str, dict[str, Any]] | None:
+    yahoo_sym = item.get("symbol") or ""
+    resp = (item.get("response") or [{}])[0] or {}
+    sym = _from_yahoo_symbol(str(yahoo_sym), wanted)
+    row = _parse_yahoo_meta(resp.get("meta") or {}, resp, sym)
+    if not row:
+        return None
+    return sym, row
+
+
 async def _fetch_yahoo_spark(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """Yahoo spark 批量报价：一次最多约 20 只，云端比逐只 chart 稳得多。"""
+    """Yahoo spark 批量报价：一次最多约 20 只。"""
     out: dict[str, dict[str, Any]] = {}
     wanted = set(symbols)
     headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
@@ -720,10 +735,13 @@ async def _fetch_yahoo_spark(symbols: list[str]) -> dict[str, dict[str, Any]]:
                     YAHOO_SPARK,
                     params={
                         "symbols": ",".join(ysyms),
-                        "range": "5d",
-                        "interval": "1d",
+                        "range": "1d",
+                        "interval": "1m",
                     },
                 )
+                if resp.status_code == 429:
+                    logger.warning("Yahoo spark rate limited; skip remaining batches")
+                    break
                 if resp.status_code != 200:
                     logger.warning("Yahoo spark HTTP %s", resp.status_code)
                     continue
@@ -738,27 +756,31 @@ async def _fetch_yahoo_spark(symbols: list[str]) -> dict[str, dict[str, Any]]:
 
 
 async def _fetch_yahoo_one(
-    client: httpx.AsyncClient, symbol: str
+    client: httpx.AsyncClient, symbol: str, delay: float = 0.0
 ) -> tuple[str, dict[str, Any] | None]:
+    import asyncio
+
+    if delay:
+        await asyncio.sleep(delay)
     ysym = _yahoo_symbol(symbol)
-    try:
-        resp = await client.get(
-            YAHOO_CHART.format(symbol=ysym),
-            params={"interval": "1d", "range": "5d"},
-        )
-        if resp.status_code != 200:
-            return symbol, None
-        result = ((resp.json().get("chart") or {}).get("result")) or []
-        if not result:
-            return symbol, None
-        fake = {"symbol": ysym, "response": [result[0]]}
-        parsed = _parse_yahoo_spark_item(fake, {symbol, ysym, symbol.replace(".", "-")})
-        if not parsed:
-            return symbol, None
-        return symbol, parsed[1]
-    except Exception as exc:
-        logger.debug("Yahoo quote failed %s: %s", symbol, exc)
-        return symbol, None
+    params = {"interval": "1m", "range": "1d", "includePrePost": "true"}
+    for attempt in range(4):
+        try:
+            resp = await client.get(YAHOO_CHART.format(symbol=ysym), params=params)
+            if resp.status_code == 429:
+                await asyncio.sleep(1.2 * (attempt + 1))
+                continue
+            if resp.status_code != 200:
+                return symbol, None
+            result = ((resp.json().get("chart") or {}).get("result")) or []
+            if not result:
+                return symbol, None
+            row = _parse_yahoo_chart_result(result[0], symbol)
+            return symbol, row
+        except Exception as exc:
+            logger.debug("Yahoo quote failed %s: %s", symbol, exc)
+            await asyncio.sleep(0.8)
+    return symbol, None
 
 
 async def _fetch_yahoo_chart_missing(
@@ -771,14 +793,14 @@ async def _fetch_yahoo_chart_missing(
         return {}
     out: dict[str, dict[str, Any]] = {}
     headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
-    sem = asyncio.Semaphore(5)
-    async with httpx.AsyncClient(headers=headers, timeout=25, follow_redirects=True) as client:
+    sem = asyncio.Semaphore(2)
+    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
 
-        async def one(sym: str):
+        async def one(idx: int, sym: str):
             async with sem:
-                return await _fetch_yahoo_one(client, sym)
+                return await _fetch_yahoo_one(client, sym, delay=idx * 0.35)
 
-        results = await asyncio.gather(*[one(s) for s in missing])
+        results = await asyncio.gather(*[one(i, s) for i, s in enumerate(missing)])
     for sym, row in results:
         if row:
             out[sym] = row
@@ -787,17 +809,68 @@ async def _fetch_yahoo_chart_missing(
 
 async def _fetch_yahoo(symbols: list[str]) -> dict[str, dict[str, Any]]:
     out = await _fetch_yahoo_spark(symbols)
-    if len(out) < len(symbols):
+    missing = [s for s in symbols if s not in out]
+    if missing and (len(symbols) <= 40 or len(missing) <= 40):
         out.update(await _fetch_yahoo_chart_missing(symbols, out))
+    elif missing:
+        logger.warning(
+            "Yahoo partial %s/%s; skip chart for %s missing (fallback sources)",
+            len(out),
+            len(symbols),
+            len(missing),
+        )
     return out
 
 
-async def _fetch_eastmoney(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """东方财富美股列表接口（部分环境可用）。"""
+def _akshare_us_spot_table():
+    """同步拉 AKShare 东方财富美股现货表。"""
+    import os
+
+    import akshare as ak
+
+    saved = {
+        k: os.environ.pop(k, None)
+        for k in list(os.environ)
+        if "proxy" in k.lower()
+    }
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
+    try:
+        return ak.stock_us_spot_em()
+    finally:
+        os.environ.pop("NO_PROXY", None)
+        os.environ.pop("no_proxy", None)
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def _parse_akshare_row(row: Any, symbol: str) -> dict[str, Any] | None:
+    price = _to_float(row.get("最新价"))
+    if price is None:
+        return None
+    change_pct = _to_float(row.get("涨跌幅")) or 0.0
+    volume = _to_float(row.get("成交量")) or 0.0
+    dollar = _to_float(row.get("成交额")) or 0.0
+    if volume <= 0 and dollar and price:
+        volume = dollar / price
+    return _quote_row(
+        symbol,
+        name=str(row.get("名称") or symbol),
+        price=price,
+        change_pct=change_pct,
+        volume=volume,
+    )
+
+
+async def _fetch_akshare_em_direct(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """AKShare 同源的东财 ulist 接口（库调用失败时的兜底）。"""
     out: dict[str, dict[str, Any]] = {}
     headers = {**HEADERS, "Referer": "https://quote.eastmoney.com/"}
+    url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
     markets = (105, 106, 107)
-    async with httpx.AsyncClient(headers=headers, timeout=20, follow_redirects=True) as client:
+    fail_streak = 0
+    async with httpx.AsyncClient(headers=headers, timeout=12, follow_redirects=True) as client:
         for mkt in markets:
             missing = [s for s in symbols if s not in out]
             if not missing:
@@ -807,7 +880,7 @@ async def _fetch_eastmoney(symbols: list[str]) -> dict[str, dict[str, Any]]:
                 secids = ",".join(f"{mkt}.{s}" for s in chunk)
                 try:
                     resp = await client.get(
-                        EASTMONEY_ULIST,
+                        url,
                         params={
                             "fltt": "2",
                             "secids": secids,
@@ -816,15 +889,21 @@ async def _fetch_eastmoney(symbols: list[str]) -> dict[str, dict[str, Any]]:
                     )
                     resp.raise_for_status()
                     diff = ((resp.json().get("data") or {}).get("diff")) or []
+                    if not diff:
+                        fail_streak += 1
+                    else:
+                        fail_streak = 0
                     for item in diff:
-                        sym = item.get("f12")
+                        sym = str(item.get("f12") or "").upper()
+                        if sym not in symbols:
+                            continue
                         price = _to_float(item.get("f2"))
-                        if not sym or price is None:
+                        if price is None:
                             continue
                         change_pct = _to_float(item.get("f3")) or 0.0
                         dollar = _to_float(item.get("f6"))
                         volume = _to_float(item.get("f5")) or 0.0
-                        if dollar and price:
+                        if volume <= 0 and dollar and price:
                             volume = dollar / price
                         out[sym] = _quote_row(
                             sym,
@@ -834,7 +913,350 @@ async def _fetch_eastmoney(symbols: list[str]) -> dict[str, dict[str, Any]]:
                             volume=volume,
                         )
                 except Exception as exc:
-                    logger.warning("Eastmoney batch failed: %s", exc)
+                    fail_streak += 1
+                    logger.warning("AKShare EM direct batch failed: %s", exc)
+                if fail_streak >= 3:
+                    logger.warning(
+                        "AKShare EM direct abort after %s consecutive failures (%s/%s)",
+                        fail_streak,
+                        len(out),
+                        len(symbols),
+                    )
+                    return out
+    return out
+
+
+def _akshare_sina_spot_table():
+    """AKShare 新浪美股现货全表（较慢，作兜底）。"""
+    import os
+
+    import akshare as ak
+
+    saved = {k: os.environ.pop(k, None) for k in list(os.environ) if "proxy" in k.lower()}
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
+    try:
+        return ak.stock_us_spot()
+    finally:
+        os.environ.pop("NO_PROXY", None)
+        os.environ.pop("no_proxy", None)
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+def _parse_akshare_sina_row(row: Any, symbol: str) -> dict[str, Any] | None:
+    price = _to_float(row.get("price"))
+    if price is None:
+        return None
+    change_pct = _to_float(row.get("chg")) or 0.0
+    volume = _to_float(row.get("volume")) or 0.0
+    return _quote_row(
+        symbol,
+        name=str(row.get("name") or row.get("cname") or symbol),
+        price=price,
+        change_pct=change_pct,
+        volume=volume,
+    )
+
+
+def _akshare_sina_daily_one(symbol: str) -> dict[str, Any] | None:
+    """AKShare 新浪 stock_us_daily 单标的（日线收盘，本地网络较稳）。"""
+    import akshare as ak
+
+    try:
+        df = ak.stock_us_daily(symbol=symbol, adjust="")
+    except Exception as exc:
+        logger.debug("AKShare sina daily %s failed: %s", symbol, exc)
+        return None
+    if df is None or df.empty:
+        return None
+    last = df.iloc[-1]
+    price = _to_float(last.get("close"))
+    if price is None:
+        return None
+    volume = _to_float(last.get("volume")) or 0.0
+    change_pct = 0.0
+    if len(df) >= 2:
+        prev = _to_float(df.iloc[-2].get("close"))
+        if prev and prev > 0:
+            change_pct = round((price - prev) / prev * 100, 2)
+    return _quote_row(symbol, name=symbol, price=price, change_pct=change_pct, volume=volume)
+
+
+def _fetch_akshare_sina_daily_sync(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """同步逐只拉新浪日线（AKShare 不宜多线程，单线程约 40s/231 只）。"""
+    out: dict[str, dict[str, Any]] = {}
+    total = len(symbols)
+    for i, sym in enumerate(symbols):
+        if sym in out:
+            continue
+        parsed = _akshare_sina_daily_one(sym)
+        if parsed:
+            out[sym] = parsed
+        if total >= 20 and (i + 1) % 25 == 0:
+            logger.info("AKShare sina daily progress %s/%s", i + 1, total)
+    return out
+
+
+async def _fetch_akshare_sina_daily(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    if not symbols:
+        return {}
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_akshare_sina_daily_sync, symbols),
+            timeout=180,
+        )
+    except Exception as exc:
+        logger.warning("AKShare sina daily batch failed: %s", exc)
+        return {}
+
+
+async def _fetch_akshare_sina(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """AKShare stock_us_spot（新浪源）；全表缓存 120s 避免重复拉 900+ 页。"""
+    import asyncio
+    import time
+
+    wanted = set(symbols)
+    if not wanted:
+        return {}
+    now = time.time()
+    df = None
+    if (
+        _SINA_SPOT_CACHE.get("df") is not None
+        and now - float(_SINA_SPOT_CACHE.get("ts") or 0) < _SINA_SPOT_TTL
+    ):
+        df = _SINA_SPOT_CACHE["df"]
+    if df is None:
+        try:
+            df = await asyncio.wait_for(
+                asyncio.to_thread(_akshare_sina_spot_table),
+                timeout=_SINA_SPOT_FETCH_TIMEOUT,
+            )
+            _SINA_SPOT_CACHE["df"] = df
+            _SINA_SPOT_CACHE["ts"] = now
+        except Exception as exc:
+            logger.warning("AKShare sina spot failed: %s", exc)
+            return {}
+    out: dict[str, dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        sym = str(row.get("symbol") or "").strip().upper()
+        if sym not in wanted:
+            continue
+        parsed = _parse_akshare_sina_row(row, sym)
+        if parsed:
+            out[sym] = parsed
+    return out
+
+
+def _fetch_tushare_sync(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Tushare us_daily 最近交易日批量行情。"""
+    import os
+    from datetime import timedelta
+
+    token = (os.environ.get("TUSHARE_TOKEN") or "").strip()
+    if not token:
+        return {}
+    try:
+        import tushare as ts
+    except ImportError:
+        logger.warning("Tushare not installed")
+        return {}
+
+    wanted = set(symbols)
+    pro = ts.pro_api(token)
+    now_et = datetime.now(_US_TZ)
+    out: dict[str, dict[str, Any]] = {}
+    for delta in range(0, 8):
+        d = (now_et - timedelta(days=delta)).strftime("%Y%m%d")
+        try:
+            df = pro.us_daily(trade_date=d, fields="ts_code,close,pct_change,vol")
+        except Exception as exc:
+            logger.warning("Tushare us_daily %s failed: %s", d, exc)
+            continue
+        if df is None or df.empty:
+            continue
+        for _, row in df.iterrows():
+            code = str(row.get("ts_code") or "").upper().split(".")[0]
+            if code not in wanted or code in out:
+                continue
+            price = _to_float(row.get("close"))
+            if price is None:
+                continue
+            out[code] = _quote_row(
+                code,
+                name=code,
+                price=price,
+                change_pct=_to_float(row.get("pct_change")) or 0.0,
+                volume=_to_float(row.get("vol")) or 0.0,
+            )
+        if out:
+            break
+    return out
+
+
+def _tickdb_us_symbol(symbol: str) -> str:
+    sym = symbol.upper().strip()
+    return sym if sym.endswith(".US") else f"{sym}.US"
+
+
+def _symbol_from_tickdb(code: str) -> str:
+    text = str(code or "").upper().strip()
+    if text.endswith(".US"):
+        return text[:-3]
+    return text.split(".")[0]
+
+
+def _parse_tickdb_ticker(item: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    price = _to_float(item.get("last_price") or item.get("price") or item.get("last"))
+    if price is None:
+        return None
+    change_pct = _to_float(
+        item.get("price_change_percent_24h")
+        or item.get("change_percent")
+        or item.get("change_pct")
+    )
+    if change_pct is None:
+        change = _to_float(item.get("price_change_24h") or item.get("change"))
+        if change is not None and price:
+            base = price - change
+            change_pct = (change / base * 100) if base else 0.0
+        else:
+            change_pct = 0.0
+    volume = _to_float(item.get("volume_24h") or item.get("volume")) or 0.0
+    quote_time = None
+    quote_time_et = None
+    ts = item.get("timestamp")
+    if ts:
+        try:
+            dt = datetime.fromtimestamp(int(ts) / 1000, tz=_US_TZ)
+            quote_time_et = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+            quote_time = dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError):
+            pass
+    return _quote_row(
+        symbol,
+        name=str(item.get("name") or symbol),
+        price=price,
+        change_pct=change_pct,
+        volume=volume,
+        quote_time=quote_time,
+        quote_time_et=quote_time_et,
+    )
+
+
+async def _fetch_tickdb(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    from app.config import TICKDB_API_KEY
+
+    token = (TICKDB_API_KEY or "").strip()
+    if not token:
+        return {}
+    wanted = set(symbols)
+    out: dict[str, dict[str, Any]] = {}
+    headers = {"X-API-Key": token}
+    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
+        batch_count = (len(symbols) + TICKDB_BATCH_SIZE - 1) // TICKDB_BATCH_SIZE
+        for bi, i in enumerate(range(0, len(symbols), TICKDB_BATCH_SIZE)):
+            chunk = symbols[i : i + TICKDB_BATCH_SIZE]
+            tick_syms = ",".join(_tickdb_us_symbol(s) for s in chunk)
+            parsed_batch = False
+            for attempt in range(5):
+                try:
+                    resp = await client.get(
+                        TICKDB_TICKER,
+                        params={"symbols": tick_syms, "type": "stock"},
+                    )
+                    if resp.status_code == 429:
+                        wait = TICKDB_BATCH_PAUSE * (attempt + 2)
+                        logger.warning("TickDB rate limited, retry in %.1fs", wait)
+                        await asyncio.sleep(wait)
+                        continue
+                    if resp.status_code != 200:
+                        logger.warning("TickDB ticker HTTP %s", resp.status_code)
+                        break
+                    body = resp.json()
+                    code = body.get("code")
+                    if code not in (0, "0", None):
+                        logger.warning(
+                            "TickDB ticker error code=%s msg=%s",
+                            code,
+                            body.get("message") or body.get("error"),
+                        )
+                        break
+                    data = body.get("data") or []
+                    if not isinstance(data, list):
+                        break
+                    for item in data:
+                        if not isinstance(item, dict):
+                            continue
+                        sym = _symbol_from_tickdb(str(item.get("symbol") or ""))
+                        if sym not in wanted or sym in out:
+                            continue
+                        parsed = _parse_tickdb_ticker(item, sym)
+                        if parsed:
+                            out[sym] = parsed
+                    parsed_batch = True
+                    break
+                except Exception as exc:
+                    logger.warning("TickDB ticker batch failed: %s", exc)
+                    break
+            if not parsed_batch:
+                logger.warning("TickDB batch %s/%s skipped", bi + 1, batch_count)
+            if bi + 1 < batch_count:
+                await asyncio.sleep(TICKDB_BATCH_PAUSE)
+    return out
+
+
+async def _fetch_tushare(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    import asyncio
+
+    if not symbols:
+        return {}
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_tushare_sync, symbols),
+            timeout=45,
+        )
+    except Exception as exc:
+        logger.warning("Tushare fetch failed: %s", exc)
+        return {}
+
+
+async def warm_sina_spot_cache() -> bool:
+    """预热新浪行情缓存（逐只日线）。"""
+    got = await _fetch_akshare_sina_daily(["TSLA", "AAPL"])
+    return bool(got)
+
+
+async def _fetch_akshare(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """AKShare：东财 ulist → 新浪日线逐只 → 东财全表 →（可选）新浪全表。"""
+    import asyncio
+
+    if not symbols:
+        return {}
+    out = await _fetch_akshare_em_direct(symbols)
+    missing = [s for s in symbols if s not in out]
+    if missing:
+        out.update(await _fetch_akshare_sina_daily(missing))
+    missing = [s for s in symbols if s not in out]
+    if not missing:
+        return out
+    try:
+        df = await asyncio.wait_for(asyncio.to_thread(_akshare_us_spot_table), timeout=45)
+        sym_col = "代码" if "代码" in df.columns else "symbol"
+        for _, row in df.iterrows():
+            sym = str(row.get(sym_col) or "").strip().upper()
+            if sym not in missing:
+                continue
+            parsed = _parse_akshare_row(row, sym)
+            if parsed:
+                out[sym] = parsed
+    except Exception as exc:
+        logger.warning("AKShare em spot table failed: %s", exc)
+    missing = [s for s in symbols if s not in out]
+    if missing and os.environ.get("HEATMAP_SINA_FULL", "").strip().lower() in ("1", "true", "yes"):
+        sina = await _fetch_akshare_sina(missing)
+        out.update(sina)
     return out
 
 
@@ -845,38 +1267,39 @@ def _is_quality_ok(quote_count: int, total: int) -> bool:
 
 
 async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
-    """多源合并：新浪（主）→ Yahoo → CNBC → 东财。"""
+    """TickDB → Yahoo → AKShare → Tushare（仅补缺）。"""
+    from app.config import TICKDB_API_KEY
+
     sources_used: list[str] = []
     merged: dict[str, dict[str, Any]] = {}
 
-    sina = await _fetch_sina(symbols)
-    if sina:
-        merged.update(sina)
-        sources_used.append(f"Sina:{len(sina)}")
-    if _is_quality_ok(len(merged), len(symbols)):
-        return merged, "Sina"
+    if (TICKDB_API_KEY or "").strip():
+        tickdb = await _fetch_tickdb(symbols)
+        if tickdb:
+            merged.update(tickdb)
+            sources_used.append(f"TickDB:{len(tickdb)}")
 
-    yahoo = await _fetch_yahoo(symbols)
-    if yahoo:
-        for k, v in yahoo.items():
-            merged.setdefault(k, v)
-        sources_used.append(f"Yahoo:{len(yahoo)}")
-    if _is_quality_ok(len(merged), len(symbols)):
-        return merged, "+".join(sources_used) if len(sources_used) > 1 else "Yahoo"
+    missing = [s for s in symbols if s not in merged]
+    skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in ("1", "true", "yes")
+    if missing and not skip_yahoo:
+        yahoo = await _fetch_yahoo(missing)
+        if yahoo:
+            merged.update(yahoo)
+            sources_used.append(f"Yahoo:{len(yahoo)}")
+        missing = [s for s in symbols if s not in merged]
 
-    cnbc = await _fetch_cnbc(symbols)
-    if cnbc:
-        for k, v in cnbc.items():
-            merged.setdefault(k, v)
-        sources_used.append(f"CNBC:{len(cnbc)}")
-    if _is_quality_ok(len(merged), len(symbols)):
-        return merged, "+".join(sources_used) if len(sources_used) > 1 else "CNBC"
+    if missing:
+        ak = await _fetch_akshare(missing)
+        if ak:
+            merged.update(ak)
+            sources_used.append(f"AKShare:{len(ak)}")
+        missing = [s for s in symbols if s not in merged]
 
-    east = await _fetch_eastmoney(symbols)
-    if east:
-        for k, v in east.items():
-            merged.setdefault(k, v)
-        sources_used.append(f"Eastmoney:{len(east)}")
+    if missing:
+        ts = await _fetch_tushare(missing)
+        if ts:
+            merged.update(ts)
+            sources_used.append(f"Tushare:{len(ts)}")
 
     label = "+".join(sources_used) if sources_used else "none"
     if not _is_quality_ok(len(merged), len(symbols)):
@@ -886,7 +1309,8 @@ async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], 
             len(symbols),
             label,
         )
-    return merged, label
+    primary = label.split("+")[0].split(":")[0] if label != "none" else "none"
+    return merged, primary if len(sources_used) == 1 else label
 
 
 async def get_quotes_for_symbols(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
@@ -1029,10 +1453,14 @@ async def _period_returns_from_yahoo(
 
 
 def _heatmap_failure(source: str, quote_count: int, total: int) -> dict[str, Any]:
-    note = (
-        f"行情拉取失败（{source} 仅 {quote_count}/{total}）。"
-        "已尝试 新浪 / Yahoo / CNBC / 东财，请稍后点击刷新。"
+    from app.config import TICKDB_API_KEY
+
+    hint = (
+        "请在 .env 配置 TICKDB_API_KEY（https://tickdb.ai 免费注册）。"
+        if not (TICKDB_API_KEY or "").strip()
+        else "已尝试 TickDB / Yahoo / AKShare / Tushare，请稍后点击刷新。"
     )
+    note = f"行情拉取失败（{source} 仅 {quote_count}/{total}）。{hint}"
     return {
         "success": False,
         **_response_timestamps(),
@@ -1221,13 +1649,29 @@ async def get_heatmap_data(force: bool = False) -> dict[str, Any]:
     ):
         return cached
 
-    data = await _build_heatmap()
-    _CACHE["ts"] = now
-    if data.get("success"):
-        _CACHE["data"] = data
-    else:
-        _CACHE["data"] = None
-    return data
+    lock = _heatmap_build_lock()
+    async with lock:
+        now = time.time()
+        cached = _CACHE.get("data")
+        if (
+            not force
+            and cached is not None
+            and cached.get("success")
+            and now - _CACHE["ts"] < _CACHE_TTL
+            and _is_quality_ok(
+                int(cached.get("quote_count") or 0),
+                int(cached.get("quote_total") or 72),
+            )
+        ):
+            return cached
+
+        data = await _build_heatmap()
+        _CACHE["ts"] = time.time()
+        if data.get("success"):
+            _CACHE["data"] = data
+        else:
+            _CACHE["data"] = None
+        return data
 
 
 def _upsert_snapshot_rows(db, trade_date, rows: list[dict[str, Any]]) -> int:

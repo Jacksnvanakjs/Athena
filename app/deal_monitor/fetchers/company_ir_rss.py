@@ -9,6 +9,7 @@ import re
 import httpx
 
 from app.deal_monitor.config import COMPANY_IR_FEEDS
+from app.deal_monitor.fetchers.google_news import _feed_url as _google_feed_url
 from app.deal_monitor.fetchers.pr_wire import RawItem, _parse_rss
 
 logger = logging.getLogger(__name__)
@@ -38,11 +39,18 @@ async def fetch_company_ir_feeds() -> list[RawItem]:
         client: httpx.AsyncClient, feed: dict
     ) -> tuple[str, list[RawItem], str | None]:
         ticker = feed["ticker"]
-        url = str(feed["url"]).strip()
+        feed_type = feed.get("type") or "rss"
         name = feed.get("name") or f"ir_{ticker.lower()}"
         async with sem:
             try:
-                resp = await client.get(url, timeout=20)
+                if feed_type == "google_news":
+                    query = str(feed.get("query") or "").strip()
+                    if not query:
+                        return ticker, [], "empty query"
+                    resp = await client.get(_google_feed_url(query), timeout=30)
+                else:
+                    url = str(feed["url"]).strip()
+                    resp = await client.get(url, timeout=20)
                 resp.raise_for_status()
                 parsed = _parse_rss(resp.text, f"ir:{ticker}")
                 kept: list[RawItem] = []
@@ -65,7 +73,8 @@ async def fetch_company_ir_feeds() -> list[RawItem]:
                 )
                 return ticker, kept, None
             except Exception as exc:
-                logger.warning("IR RSS %s 失败 %s: %r", ticker, url[:60], exc)
+                src = feed.get("query") or feed.get("url") or ""
+                logger.warning("IR RSS %s 失败 %s: %r", ticker, str(src)[:60], exc)
                 return ticker, [], str(exc)[:120]
 
     async with httpx.AsyncClient(

@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -106,9 +107,38 @@ async def scheduled_earnings_t2_push():
     logger.info("earnings T-2 推送完成: %s", result)
 
 
+def scheduler_status() -> dict:
+    """供 /health 与 /api/status 展示调度器是否在跑。"""
+    jobs: list[dict] = []
+    if scheduler.running:
+        for job in scheduler.get_jobs():
+            nxt = job.next_run_time
+            jobs.append(
+                {
+                    "id": job.id,
+                    "next_run": nxt.isoformat(timespec="seconds") if nxt else None,
+                }
+            )
+    deal_next = None
+    for job in jobs:
+        if job["id"] == "deal_monitor_poll":
+            deal_next = job["next_run"]
+            break
+    return {
+        "enabled": ENABLE_SCHEDULER,
+        "running": scheduler.running,
+        "deal_poll_interval_min": DEAL_POLL_INTERVAL_MIN,
+        "deal_poll_next_run": deal_next,
+        "jobs": jobs,
+    }
+
+
 def start_scheduler():
     if not ENABLE_SCHEDULER:
-        logger.info("内置调度器已禁用（ENABLE_SCHEDULER=false），请使用外部 cron 触发 /api/cron/scrape")
+        logger.warning(
+            "内置调度器已禁用（ENABLE_SCHEDULER=false）；合作快讯不会自动扫描，"
+            "生产环境请设为 true 并保持进程 7×24 运行"
+        )
         return
     for hour, minute in SCRAPE_TIMES:
         scheduler.add_job(
@@ -135,6 +165,7 @@ def start_scheduler():
         IntervalTrigger(minutes=DEAL_POLL_INTERVAL_MIN),
         id="deal_monitor_poll",
         replace_existing=True,
+        next_run_time=datetime.now(),
     )
     scheduler.add_job(
         scheduled_deal_market_cap_refresh,

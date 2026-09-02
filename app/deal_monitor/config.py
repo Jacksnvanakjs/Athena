@@ -36,16 +36,29 @@ def _load_company_ir_feeds() -> list[dict[str, str]]:
         return []
     data = json.loads(COMPANY_IR_FEEDS_FILE.read_text(encoding="utf-8"))
     feeds = data.get("feeds") or []
-    return [
-        {
+    loaded: list[dict[str, str]] = []
+    for item in feeds:
+        if not item.get("ticker"):
+            continue
+        feed_type = str(item.get("type") or "rss").lower()
+        entry: dict[str, str] = {
             "ticker": str(item["ticker"]).upper(),
             "name": item.get("name") or f"ir_{item['ticker'].lower()}",
-            "url": str(item["url"]).strip(),
             "category": item.get("category") or "",
+            "type": feed_type,
         }
-        for item in feeds
-        if item.get("ticker") and item.get("url")
-    ]
+        if feed_type == "google_news":
+            query = str(item.get("query") or item.get("url") or "").strip()
+            if not query:
+                continue
+            entry["query"] = query
+        else:
+            url = str(item.get("url") or "").strip()
+            if not url:
+                continue
+            entry["url"] = url
+        loaded.append(entry)
+    return loaded
 
 # Phase 1 RSS 源
 PR_WIRE_FEEDS = [
@@ -82,6 +95,9 @@ PR_WIRE_FEEDS = [
 # Google News：补抓 SaaS/Agent × 大模型合作（PRN/SEC 常漏）
 # 列表靠前 = 每轮优先查询（抢时效 when:1d/2d）
 GOOGLE_NEWS_QUERIES = [
+    # Adobe 无官方 RSS，用 Google News 补官网新闻室
+    "site:news.adobe.com (partnership OR collaboration OR AI OR agent OR integration) when:3d",
+    '(Adobe OR ADBE) (partnership OR collaboration OR "strategic") (AI OR Agent OR Claude) when:2d',
     # 大额算力 / DC 快讯（WSJ/Reuters 体，HUT 间接受益）
     '("cloud deal" OR "compute deal" OR "cloud computing deal" OR "computing deal") '
     '(Anthropic OR Lambda OR "Hut 8" OR HUT OR Nscale) when:1d',

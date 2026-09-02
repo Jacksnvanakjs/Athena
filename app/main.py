@@ -1,4 +1,6 @@
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -10,7 +12,7 @@ from fastapi.templating import Jinja2Templates
 from app.config import FUNDS_SOURCE_FILE, USE_TURSO
 from app.database import QuotaRecord, SessionLocal, check_database, init_db, is_turso_stream_error, reset_engine
 from app.routes import router
-from app.scheduler import start_scheduler, stop_scheduler
+from app.scheduler import start_scheduler, stop_scheduler, scheduler_status
 from app.service import run_scrape_and_notify
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -40,6 +42,19 @@ async def lifespan(app: FastAPI):
             await run_scrape_and_notify(FUNDS_SOURCE_FILE)
     finally:
         db.close()
+
+    if os.environ.get("ENV", "").lower() != "development":
+        async def _warm_heatmap_sina() -> None:
+            try:
+                from app.heatmap import warm_sina_spot_cache
+
+                ok = await warm_sina_spot_cache()
+                if ok:
+                    logger.info("热力图新浪现货缓存预热完成")
+            except Exception as exc:
+                logger.warning("热力图新浪缓存预热跳过: %s", exc)
+
+        asyncio.create_task(_warm_heatmap_sina())
     yield
     stop_scheduler()
 
@@ -72,7 +87,11 @@ def health():
                 status_code=503,
                 content={"status": "error", "detail": str(exc)},
             )
-    return {"status": "ok"}
+    sched = scheduler_status()
+    body = {"status": "ok", "scheduler": sched}
+    if sched["enabled"] and not sched["running"]:
+        return JSONResponse(status_code=503, content={**body, "detail": "scheduler not running"})
+    return body
 
 
 @app.get("/")

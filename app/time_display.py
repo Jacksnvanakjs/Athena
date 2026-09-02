@@ -45,6 +45,21 @@ def format_published_at_push(dt: datetime | None) -> str:
     )
 
 
+def format_beijing_at_bj(dt: datetime | None) -> str:
+    """系统时间（北京时间入库）→ 北京主行。"""
+    if not dt:
+        return "—"
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
+def format_beijing_at_et(dt: datetime | None) -> str | None:
+    """系统时间（北京时间入库）→ 美东副行。"""
+    if not dt:
+        return None
+    aware = dt.replace(tzinfo=_BJ)
+    return aware.astimezone(_ET).strftime("%Y-%m-%d %H:%M")
+
+
 def format_beijing_at_display(dt: datetime | None) -> str:
     """系统时间（北京时间入库）→ 北京 + 美东。"""
     if not dt:

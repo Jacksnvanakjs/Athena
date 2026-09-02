@@ -181,9 +181,11 @@
     tr:hover td { background: #f8fafc; }
     .ticker { font-weight: 600; color: var(--accent); }
     .score { font-variant-numeric: tabular-nums; font-weight: 600; }
-    .time-cell { font-size: 0.82rem; line-height: 1.35; max-width: 148px; display: inline-block; white-space: nowrap; }
+    .time-cell { font-size: 0.82rem; line-height: 1.4; max-width: 172px; display: inline-block; white-space: normal; }
     .time-main { color: var(--text); }
-    .time-et { font-size: 0.72rem; color: var(--text-muted); margin-top: 2px; font-weight: 400; }
+    .time-sub { color: var(--text-muted); margin-top: 5px; font-size: 0.78rem; }
+    .time-label { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.02em; margin-right: 2px; }
+    .time-et { font-size: 0.72rem; color: var(--text-muted); margin-top: 1px; font-weight: 400; }
     .badge {
       display: inline-block;
       padding: 2px 8px;
@@ -498,7 +500,7 @@
         <thead>
           <tr>
             <th>分类</th>
-            <th title="按稿件发布时间降序；悬停可看抓取/推送时间">发布时间 ↓</th>
+            <th title="发稿=新闻发布时间；抓取=系统首次入库；推送=手机通知发出（未推显示 —）">发稿 / 抓取 / 推送 ↓</th>
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
@@ -661,23 +663,25 @@
       return new Date(iso).toLocaleString('zh-CN', { hour12: false });
     }
 
+    function fmtTimeBlock(label, bj, et, muted) {
+      if (!bj || bj === '—') return '';
+      const rowCls = muted ? 'time-sub' : 'time-main';
+      let html = `<div class="${rowCls}"><span class="time-label">${label}</span>${bj}</div>`;
+      if (et) html += `<div class="time-et">${et} 美东</div>`;
+      return html;
+    }
+
     function fmtPublished(row) {
-      const bj = row.published_at_bj;
-      const et = row.published_at_et;
-      let inner;
-      if (bj && bj !== '—') {
-        inner = `<div class="time-main">${bj}</div>`;
-        if (et) inner += `<div class="time-et">${et} 美东</div>`;
-      } else {
-        inner = fmtTime(row.published_at);
+      const pub = fmtTimeBlock('发稿', row.published_at_bj, row.published_at_et, false);
+      let inner = pub;
+      if (!inner) {
+        inner = `<div class="time-main">${fmtTime(row.published_at)}</div>`;
       }
-      const tips = [];
-      if (row.fetched_at_display) tips.push('抓取 ' + row.fetched_at_display);
-      if (row.pushed_at_display) tips.push('推送 ' + row.pushed_at_display);
-      const tip = tips.join(' · ').replace(/"/g, '&quot;');
-      return tip
-        ? `<span class="time-cell" title="${tip}">${inner}</span>`
-        : `<span class="time-cell">${inner}</span>`;
+      const fetch = fmtTimeBlock('抓取', row.fetched_at_bj, row.fetched_at_et, true);
+      const pushBj = row.pushed_at_bj && row.pushed_at_bj !== '—' ? row.pushed_at_bj : '—';
+      const push = fmtTimeBlock('推送', pushBj, row.pushed_at_et, true)
+        || '<div class="time-sub"><span class="time-label">推送</span>—</div>';
+      return `<span class="time-cell">${inner}${fetch}${push}</span>`;
     }
 
     function fmtSource(row) {
@@ -735,13 +739,16 @@
         const data = await res.json();
         const dm = data.deal_monitor || {};
         const sched = data.scheduler_enabled;
+        const schedRun = data.scheduler_running;
         const el = document.getElementById('statusLine');
         const nvda = dm.nvda_signal_enabled ? ` · 黄仁勋 ${dm.nvda_signal_total || 0}` : '';
         const er = dm.earnings_enabled ? ` · 财报 ${dm.earnings_total || 0}` : '';
-        if (sched) {
-          el.innerHTML = `<span class="status-ok">● 监控运行中</span> · 每 ${dm.poll_interval_min || 3} 分钟扫描 · AI合作 ${dm.events_total || 0}${nvda}${er}`;
+        if (sched && schedRun) {
+          el.innerHTML = `<span class="status-ok">● 监控运行中</span> · 每 ${dm.poll_interval_min || 2} 分钟扫描 · AI合作 ${dm.events_total || 0}${nvda}${er}`;
+        } else if (sched && !schedRun) {
+          el.innerHTML = `<span class="status-warn">● 调度器未启动</span> · 请检查进程是否 7×24 运行 · AI合作 ${dm.events_total || 0}${nvda}${er}`;
         } else {
-          el.innerHTML = `<span class="status-warn">● 定时扫描未开启</span> · AI合作 ${dm.events_total || 0}${nvda}${er} · 请用「立即扫描」`;
+          el.innerHTML = `<span class="status-warn">● 定时扫描未开启</span> · 生产请设 ENABLE_SCHEDULER=true · AI合作 ${dm.events_total || 0}${nvda}${er} · 可点「立即扫描」`;
         }
       } catch (e) {
         document.getElementById('statusLine').textContent = '状态加载失败';

@@ -47,7 +47,8 @@ turso db tokens create athena # 得到 TURSO_AUTH_TOKEN
 | `SERVERCHAN_SENDKEY` | 你的 SendKey | Server酱 推送密钥（必填） |
 | `SCRAPE_SECRET` | 随机字符串 | 保护 `/api/cron/scrape` 接口 |
 | `TIMEZONE` | `Asia/Shanghai` | 北京时间 |
-| `ENABLE_SCHEDULER` | `true` | 启用内置定时任务（额度抓取 + 合作快讯每 3 分钟扫描） |
+| `ENABLE_SCHEDULER` | `true` | **必填**：启用内置定时任务（合作快讯每 **2** 分钟扫描 + 基金额度抓取） |
+| `DEAL_POLL_INTERVAL_MIN` | `2` | 合作快讯轮询间隔（分钟），默认 2 |
 | `GEMINI_API_KEY` | 你的 Gemini Key | AI 合作快讯第一轮筛选（必填） |
 | `SEC_USER_AGENT` | `YourName your@email.com` | SEC 要求带联系邮箱，否则 8-K 抓不到 |
 | `FINNHUB_API_KEY` | 你的 Finnhub Key | 公司名 → 美股 ticker / 市值（建议填） |
@@ -93,16 +94,19 @@ https://athena-fund.app.belmo.io
 
 ## 注意事项
 
-1. **数据持久化**：推荐配置 **Turso**（见上文第三步），重新部署后图表历史不丢失。未配置时回退到 `/tmp` 本地库，Redeploy 会清空历史。
-2. **不要用 Dockerfile 部署**：免费版用 Python 自动检测即可（项目已含 `requirements.txt` 和 `.python-version`）。
-3. **密钥安全**：不要把 `.env` 提交到 GitHub，只在 Belmo 控制台填环境变量。
+1. **合作快讯 7×24 扫描**：务必保持 `ENABLE_SCHEDULER=true`，且**不要频繁手动重启/停服**（本地开发可设 `ENABLE_SCHEDULER=false`）。部署后访问 `/health`，应返回 `scheduler.running: true`；若为 `false` 会返回 503，Belmo 可能自动重启容器。
+2. **IR RSS 直连**：`app/deal_monitor/company_ir_feeds.json` 已配置 Adobe（Google News 补抓官网）及 60+ 公司 IR RSS，优先于 Finnhub 索引。
+3. **数据持久化**：推荐配置 **Turso**（见上文第三步），重新部署后图表历史不丢失。未配置时回退到 `/tmp` 本地库，Redeploy 会清空历史。
+4. **不要用 Dockerfile 部署**：免费版用 Python 自动检测即可（项目已含 `requirements.txt` 和 `.python-version`）。
+5. **密钥安全**：不要把 `.env` 提交到 GitHub，只在 Belmo 控制台填环境变量。
 
 ## 部署后验证
 
 1. 打开网站首页，应能看到基金额度卡片
 2. 访问 `/api/status`，确认 `is_trading_day` 和 `timezone` 正确
 3. 点击「立即抓取」测试（若设置了 `SCRAPE_SECRET`，需在请求头加 `X-Scrape-Secret`）
-4. 检查 Server酱 / Bark 是否收到测试通知
+4. 访问 `/health`，确认 `scheduler.enabled` 与 `scheduler.running` 均为 `true`
+5. 打开 `/deals` 快讯页，表头应显示「发稿 / 抓取 / 推送」三行时间
 
 ## 常见问题
 

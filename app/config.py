@@ -102,6 +102,7 @@ DEAL_ADMIN_TOKEN = os.getenv("DEAL_ADMIN_TOKEN", "")
 SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "AthenaDealMonitor contact@example.com")
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
+TICKDB_API_KEY = os.getenv("TICKDB_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 DEAL_USE_LLM = os.getenv("DEAL_USE_LLM", "true").lower() == "true"
 DEAL_LLM_MODEL = os.getenv("DEAL_LLM_MODEL", "gemini-3.6-flash")
