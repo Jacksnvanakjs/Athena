@@ -4,6 +4,7 @@ from pathlib import Path
 
 from app.config import (
     DEAL_DEDUP_DAYS,
+    DEAL_INGEST_MAX_AGE_DAYS,
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
     DEAL_LLM_MODEL,
@@ -22,6 +23,7 @@ from app.config import (
     DEAL_USE_LLM,
     FINNHUB_API_KEY,
     GEMINI_API_KEY,
+    GEMINI_API_KEYS,
     SEC_USER_AGENT,
 )
 
@@ -60,7 +62,7 @@ def _load_company_ir_feeds() -> list[dict[str, str]]:
         loaded.append(entry)
     return loaded
 
-# Phase 1 RSS 源
+# 通稿 RSS：PR Newswire + Business Wire（免费行业 feed）+ GlobeNewswire
 PR_WIRE_FEEDS = [
     {
         "name": "pr_newswire",
@@ -90,11 +92,46 @@ PR_WIRE_FEEDS = [
         "name": "telecom",
         "url": "https://www.prnewswire.com/rss/telecommunications-latest-news/telecommunications-latest-news-list.rss",
     },
+    # Business Wire 公开行业 RSS（feed.businesswire.com，无需付费）
+    {
+        "name": "business_wire",
+        "url": "https://feed.businesswire.com/rss/home/?rss=G1QFDERJXkJeEFpQWg==",
+    },
+    {
+        "name": "business_wire_iot",
+        "url": "https://feed.businesswire.com/rss/home/?rss=G1QFDERJXkJaF1hUVA==",
+    },
+    {
+        "name": "business_wire_ma",
+        "url": "https://feed.businesswire.com/rss/home/?rss=G1QFDERJXkJeEFtRWA==",
+    },
+    {
+        "name": "business_wire_funding",
+        "url": "https://feed.businesswire.com/rss/home/?rss=G1QFDERJXkJeEFtRXw==",
+    },
+    # GlobeNewswire 公开 subject RSS（失败则忽略，由 Google site: 兜底）
+    {
+        "name": "globenewswire",
+        "url": "https://www.globenewswire.com/RssFeed/subjectcode/13/feedTitle/GlobeNewswire%20-%20Technology",
+    },
 ]
 
 # Google News：补抓 SaaS/Agent × 大模型合作（PRN/SEC 常漏）
 # 列表靠前 = 每轮优先查询（抢时效 when:1d/2d）
 GOOGLE_NEWS_QUERIES = [
+    # 通稿站直连失败时的免费兜底（BW/GNW）
+    'site:businesswire.com (partnership OR collaboration OR "strategic") '
+    "(AI OR Anthropic OR OpenAI OR Nvidia OR Claude OR GPU) when:2d",
+    "site:globenewswire.com (partnership OR collaboration OR integration) "
+    "(AI OR Anthropic OR OpenAI OR Nvidia OR Claude) when:2d",
+    # 云厂/hyperscaler × 电力/地热/PPA（Fervo×Google 类一手通稿；勿只靠 AI 关键词）
+    'site:globenewswire.com (PPA OR "power purchase" OR geothermal OR "data center") '
+    "(Google OR Microsoft OR Amazon OR Meta OR Oracle OR Nvidia) when:3d",
+    '(Google OR Microsoft OR Amazon OR Meta OR "Alphabet") '
+    '(PPA OR "power purchase agreement" OR geothermal OR "carbon-free" OR offtake) '
+    '("data center" OR datacenter OR hyperscale) when:2d',
+    '(Fervo OR FRVO OR "Eos Energy" OR EOSE) '
+    '(Google OR Microsoft OR Amazon OR PPA OR geothermal OR "data center") when:3d',
     # Adobe 无官方 RSS，用 Google News 补官网新闻室
     "site:news.adobe.com (partnership OR collaboration OR AI OR agent OR integration) when:3d",
     '(Adobe OR ADBE) (partnership OR collaboration OR "strategic") (AI OR Agent OR Claude) when:2d',
@@ -127,6 +164,8 @@ FINNHUB_NEWS_TICKERS = sorted(set([
     "DDOG", "MDB", "PATH", "AI", "CRWD", "PANW", "FTNT", "ZS",
     # 存储
     "WDC", "STX", "PSTG", "NTAP",
+    # 云厂供电 / 地热 / 储能（AI 数据中心电力催化）
+    "FRVO", "EOSE", "BE", "FLNC", "CEG", "VST", "TLN", "GEV",
 ]))
 FINNHUB_NEWS_LOOKBACK_DAYS = 3
 

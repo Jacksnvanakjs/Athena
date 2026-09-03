@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.database import DealEvent, DealSeenUrl, db_session
 from app.deal_monitor.config import (
     DEAL_DEDUP_DAYS,
+    DEAL_INGEST_MAX_AGE_DAYS,
     DEAL_LLM_MODEL,
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
@@ -31,11 +33,16 @@ from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
 from app.deal_monitor.fetchers.company_ir import fetch_finnhub_and_google
 from app.deal_monitor.fetchers.company_ir_rss import fetch_company_ir_feeds
-from app.deal_monitor.content_filter import reject_deal_item
+from app.deal_monitor.content_filter import deal_amount_keys, reject_deal_item
 from app.deal_monitor.keywords import is_product_only_integration, is_update_headline, passes_keyword_filter
 from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
-from app.deal_monitor.materiality import score_materiality
+from app.deal_monitor.materiality import (
+    QUALITY_FINANCING,
+    QUALITY_SOFT_PRODUCT,
+    classify_deal_quality,
+    finalize_materiality_score,
+)
 from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pair_text
 from app.deal_monitor.tiers import RoleAssignment, assign_roles, score_threshold
 from app.notifier import notify
@@ -58,13 +65,28 @@ def headline_hash(headline: str) -> str:
     return hashlib.md5(normalize_headline(headline).encode()).hexdigest()
 
 
+def _as_utc_aware(published_at: datetime) -> datetime:
+    if published_at.tzinfo is None:
+        return published_at.replace(tzinfo=timezone.utc)
+    return published_at.astimezone(timezone.utc)
+
+
+def _published_age_days(published_at: datetime) -> float:
+    return (datetime.now(timezone.utc) - _as_utc_aware(published_at)).total_seconds() / 86400
+
+
+def _published_too_stale_for_ingest(published_at: datetime) -> bool:
+    """超过 DEAL_INGEST_MAX_AGE_DAYS 则不入库、不进 LLM（消假 lag）。"""
+    if DEAL_INGEST_MAX_AGE_DAYS <= 0:
+        return False
+    return _published_age_days(published_at) > DEAL_INGEST_MAX_AGE_DAYS
+
+
 def _published_too_stale_for_push(published_at: datetime) -> bool:
     """published_at 为 UTC naive；超过 DEAL_PUSH_MAX_AGE_DAYS 则不推送。"""
     if DEAL_PUSH_MAX_AGE_DAYS <= 0:
         return False
-    aware = published_at.replace(tzinfo=timezone.utc)
-    age_days = (datetime.now(timezone.utc) - aware).total_seconds() / 86400
-    return age_days > DEAL_PUSH_MAX_AGE_DAYS
+    return _published_age_days(published_at) > DEAL_PUSH_MAX_AGE_DAYS
 
 
 def _same_company(a: Entity, b: Entity) -> bool:
@@ -114,8 +136,9 @@ def _dedup_blocked(
     beneficiary_ticker: str,
     is_update: bool,
     anchor_key: str | None = None,
+    headline: str | None = None,
 ) -> bool:
-    """同一受益方+锚点 7 日内不重复入库（覆盖 compute_deal / ai_platform_deal）。"""
+    """同一受益方+锚点 7 日内不重复；同受益方+同金额故事也不重复（防换锚点洗稿）。"""
     if is_update:
         return False
     since = now_beijing() - timedelta(days=DEAL_DEDUP_DAYS)
@@ -133,7 +156,25 @@ def _dedup_blocked(
                 DealEvent.anchor_name.ilike(ak),
             )
         )
-    return q.first() is not None
+    if q.first() is not None:
+        return True
+
+    amounts = deal_amount_keys(headline or "")
+    if not amounts:
+        return False
+    priors = (
+        db.query(DealEvent)
+        .filter(
+            DealEvent.beneficiary_ticker == beneficiary_ticker,
+            DealEvent.fetched_at >= since,
+            DealEvent.is_update.is_(False),
+        )
+        .all()
+    )
+    for prior in priors:
+        if amounts & deal_amount_keys(prior.headline or ""):
+            return True
+    return False
 
 
 def _push_succeeded(event: DealEvent) -> bool:
@@ -141,7 +182,7 @@ def _push_succeeded(event: DealEvent) -> bool:
     return bool(
         event.pushed_at
         and ch
-        and ch not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale"}
+        and ch not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip"}
     )
 
 
@@ -454,9 +495,8 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
                     if r and r.should_push:
                         role_pairs.append((r, ent))
 
-    if is_product_only_integration(text) and not (DEAL_USE_LLM and llm_decision and llm_decision.is_relevant):
-        stats["reason"] = "纯产品整合/功能发布，无新商业条款"
-        return stats
+    quality = classify_deal_quality(text)
+    # 软整合不再被 LLM 豁免成高分：下方 finalize 封顶且不推送
 
     event_type = (llm_decision.event_type if llm_decision else None) or EVENT_TYPE
     is_update = is_update_headline(item.headline)
@@ -465,18 +505,26 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
     last_tier_pair = ""
 
     for roles, beneficiary in role_pairs:
-        score = score_materiality(text, item.source, matched)
-        if llm_decision and llm_decision.llm_score:
-            if llm_decision.llm_score < 70:
-                stats["reason"] = f"LLM 材料性不足 {llm_decision.llm_score} < 70"
-                return stats
-            if (llm_decision.event_type or "") == "ai_platform_deal":
-                score = min(100, max(score, llm_decision.llm_score))
-            else:
-                score = min(100, max(score, min(llm_decision.llm_score, score + 10)))
+        score = finalize_materiality_score(
+            text,
+            item.source,
+            matched,
+            llm_score=(llm_decision.llm_score if llm_decision else None),
+            event_type=event_type,
+        )
+        if (
+            llm_decision
+            and llm_decision.llm_score
+            and llm_decision.llm_score < 70
+            and quality not in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING)
+        ):
+            stats["reason"] = f"LLM 材料性不足 {llm_decision.llm_score} < 70"
+            return stats
         threshold = score_threshold(roles.tier_pair)
-        if score < threshold:
-            stats["reason"] = f"材料性 {score} < {threshold}"
+        # 软整合/融资：用更低展示门槛，便于回测对照；但不推送
+        effective_threshold = 50 if quality in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING) else threshold
+        if score < effective_threshold:
+            stats["reason"] = f"材料性 {score} < {effective_threshold}"
             continue
 
         ticker = (beneficiary.ticker or "").upper()
@@ -486,9 +534,14 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         if _is_duplicate(db, item.source_url, h_hash, ticker):
             stats["reason"] = "URL/标题去重"
             continue
-        if _dedup_blocked(db, ticker, is_update, anchor_key=anchor_key):
+        if _dedup_blocked(db, ticker, is_update, anchor_key=anchor_key, headline=item.headline):
             logger.info("7 天去重跳过 %s (anchor=%s)", ticker, anchor_key)
             continue
+
+        should_push = roles.should_push and quality not in (
+            QUALITY_SOFT_PRODUCT,
+            QUALITY_FINANCING,
+        )
 
         event = _save_event(
             db, item, roles, score, matched, is_update, beneficiary, event_type=event_type
@@ -502,8 +555,11 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
                 event.published_at,
                 DEAL_PUSH_MAX_AGE_DAYS,
             )
+        elif not should_push:
+            event.push_channel = "soft_skip"
+            event.pushed_at = None
         else:
-            await _maybe_push(db, event, roles.should_push)
+            await _maybe_push(db, event, True)
         saved.append(event.beneficiary_ticker)
         last_score = score
         last_tier_pair = roles.tier_pair
@@ -523,11 +579,13 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
 async def run_pipeline() -> dict:
     """执行一轮 RSS / Finnhub / Google News / SEC 抓取与处理。"""
     registry.load_seed()
-    pr_items = await fetch_pr_wires()
-    ir_items = await fetch_company_ir_feeds()
-    agg_items = await fetch_finnhub_and_google()
-    sec_items = await fetch_sec_8k()
-    # URL 去重：同一通稿可能同时出现在 PRN / IR / Finnhub / Google
+    pr_items, ir_items, agg_items, sec_items = await asyncio.gather(
+        fetch_pr_wires(),
+        fetch_company_ir_feeds(),
+        fetch_finnhub_and_google(),
+        fetch_sec_8k(),
+    )
+    # URL 去重：同一通稿可能同时出现在 PRN / BW / IR / Finnhub / Google
     items: list[RawItem] = []
     seen_fetch: set[str] = set()
     for batch in (pr_items, ir_items, agg_items, sec_items):
@@ -544,6 +602,7 @@ async def run_pipeline() -> dict:
         "fetched_agg": len(agg_items),
         "fetched_sec_8k": len(sec_items),
         "fetched_new": 0,
+        "stale_dropped": 0,
         "processed": 0,
         "saved": 0,
         "pushed": 0,
@@ -561,8 +620,20 @@ async def run_pipeline() -> dict:
         summary["fetched_new"] = len(new_items)
 
         content_rejected = 0
+        stale_dropped = 0
         eligible_items: list[RawItem] = []
         for item in new_items:
+            if _published_too_stale_for_ingest(item.published_at):
+                stale_dropped += 1
+                db.merge(
+                    DealSeenUrl(
+                        source_url=item.source_url,
+                        headline_hash=headline_hash(item.headline),
+                        seen_at=now_beijing(),
+                        llm_relevant=False,
+                    )
+                )
+                continue
             reject, reason = reject_deal_item(item)
             if reject:
                 content_rejected += 1
@@ -577,9 +648,10 @@ async def run_pipeline() -> dict:
                 )
                 continue
             eligible_items.append(item)
-        if content_rejected:
+        if content_rejected or stale_dropped:
             db.commit()
             summary["content_filtered"] = content_rejected
+            summary["stale_dropped"] = stale_dropped
         new_items = eligible_items
 
         if DEAL_USE_LLM:

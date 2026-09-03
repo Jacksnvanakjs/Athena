@@ -49,6 +49,28 @@ def today_bj() -> date:
     return datetime.now(_BJ).date()
 
 
+def is_release_past_bj(
+    earnings_date: date,
+    session: str,
+    now: datetime | None = None,
+) -> bool:
+    """财报是否已揭晓（按北京揭晓时刻，含当日已过点）。"""
+    now = now or datetime.now(_BJ)
+    return earnings_release_dt_bj(earnings_date, session) <= now
+
+
+def pre_earnings_price_as_of(earnings_date: date, session: str) -> date:
+    """用于市值/涨幅回填的「财报前」收盘日（美股日历日）。
+
+    AMC：当日常规盘收盘仍早于盘后揭晓 → 用财报日本身。
+    BMO/TBD：用财报日前一个工作日，避免误用盘前揭晓后的价格。
+    """
+    sess = (session or "TBD").upper()
+    if sess == "AMC":
+        return earnings_date
+    return _add_trading_days(earnings_date, -1)
+
+
 def earnings_release_dt_bj(earnings_date: date, session: str) -> datetime:
     """财报揭晓时刻（北京时间）。"""
     sess = (session or "TBD").upper()

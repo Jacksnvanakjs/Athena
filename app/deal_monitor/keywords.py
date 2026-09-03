@@ -12,6 +12,8 @@ POSITIVE_KEYWORDS = [
     "colocation", "hosting agreement", "data center lease", "AI infrastructure",
     "GPU deployment", "training capacity", "inference capacity",
     "multi-year", "gigawatt", "MW capacity", "power capacity",
+    "power purchase agreement", "PPA", "geothermal", "carbon-free",
+    "offtake", "enhanced geothermal",
     "hyperscaler", "definitive agreement", "material definitive agreement",
     # 为了不让命中率为 0：加入少量“基础领域词”
     "lease", "data center", "data centre", "infrastructure", "cloud", "AI", "artificial intelligence",
@@ -35,9 +37,16 @@ HIGH_VALUE_TOKENS = [
     "power capacity",
     "megawatt",
     "gigawatt",
+    "geothermal",
+    "power purchase",
+    "ppa",
+    "carbon-free",
+    "offtake",
     "托管",
     "算力",
     "数据中心",
+    "地热",
+    "购电",
     "机房",
     "智算",
     "容量",
@@ -92,11 +101,18 @@ _PRODUCT_ONLY_CUES = (
     "product integration",
     "integrates with",
     "integration enables",
+    "technology integration",
     "launches new",
     "unveils",
     "introduces",
     "now available",
     "general availability",
+    "marketplace",
+    "brings the falcon",
+    "brings the",
+    "agentic system for",
+    "streamline adverse",
+    "product to streamline",
 )
 _STRONG_DEAL_CUES = (
     "definitive agreement",
@@ -114,6 +130,8 @@ _STRONG_DEAL_CUES = (
     "announced the",
     "announces partnership",
     "deepens partnership",
+    "expand partnership",
+    "expands partnership",
 )
 _HYPERSCALER_CLOUD_CUES = (
     "google cloud",
@@ -126,22 +144,51 @@ _PLATFORM_ON_CLOUD_RE = re.compile(
     r"\b(?:now )?available on\b.{0,40}?\b(?:google cloud|aws|amazon web services|microsoft azure|azure)\b",
     re.I,
 )
+_MARKETPLACE_RE = re.compile(
+    r"\b(?:marketplace|brings?\s+.{0,40}\bmarketplace|available\s+in\s+.{0,20}marketplace)\b",
+    re.I,
+)
 
 
 def is_product_only_integration(text: str) -> bool:
-    """纯产品整合/功能发布，无新商业条款。"""
+    """纯产品整合/功能发布/应用市场上架，无新商业条款。"""
     norm = _normalize(text)
+    # 重大：命名安全平台首次跑在 hyperscaler 云上 —— 保留（回测里 CRWD×GCP 曾大涨）
     if _PLATFORM_ON_CLOUD_RE.search(norm) and re.search(r"\bannounc\w+", norm):
         return False
+    # 命名大模型平台落地（Claudeforce/Agentforce）
+    if re.search(r"\b(?:claudeforce|agentforce)\b", norm) and re.search(
+        r"\b(?:anthropic|openai|claude|salesforce)\b", norm
+    ):
+        return False
+    if re.search(r"\$[\d,.]+\s*(million|billion|m\b|b\b)", norm, re.I):
+        return False
+    if any(cue in norm for cue in _STRONG_DEAL_CUES) and re.search(
+        r"\b(?:multi-year|capacity|\$[\d,.]+|gigawatt|megawatt|definitive|"
+        r"claudeforce|agentforce)\b",
+        norm,
+        re.I,
+    ):
+        return False
+
+    if _MARKETPLACE_RE.search(norm):
+        return True
     if not any(cue in norm for cue in _PRODUCT_ONLY_CUES):
         return False
     if any(cue in norm for cue in _STRONG_DEAL_CUES):
-        return False
-    if any(cloud in norm for cloud in _HYPERSCALER_CLOUD_CUES) and re.search(
-        r"\b(?:platform|falcon|security)\b", norm
-    ) and re.search(r"\bannounc\w+", norm):
-        return False
-    if re.search(r"\$[\d,.]+\s*(million|billion|m\b|b\b)", norm, re.I):
+        # expand partnership 但正文只是产品守护 Agent / 上架 → 仍视为软整合
+        if re.search(
+            r"\b(?:marketplace|falcon guardian|secure(?:s|ing)?\s+(?:codex|ai\s*agents?)|"
+            r"unveils?|launches?|introduces?)\b",
+            norm,
+            re.I,
+        ) and not re.search(
+            r"\$[\d,.]+\s*(million|billion)|multi-year|capacity agreement|gigawatt|"
+            r"claudeforce|agentforce",
+            norm,
+            re.I,
+        ):
+            return True
         return False
     return True
 

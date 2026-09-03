@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from app.deal_monitor.config import DEAL_LLM_MODEL, GEMINI_API_KEY
+from app.deal_monitor.config import DEAL_LLM_MODEL, GEMINI_API_KEY, GEMINI_API_KEYS
 from app.deal_monitor.fetchers.pr_wire import RawItem
 
 logger = logging.getLogger(__name__)
@@ -48,9 +48,10 @@ THEME_TOKENS = (
     # 算力容量
     "gpu", "accelerator", "ai cluster", "compute capacity", "training capacity",
     "inference capacity", "ai infrastructure", "hyperscale",
-    # 数据中心 / 电力 / 液冷
+    # 数据中心 / 电力 / 液冷 / 地热购电
     "data center", "data centre", "colocation", "colo ", "megawatt", "gigawatt",
-    "mw capacity", "power purchase", "liquid cooling", "液冷", "数据中心", "算力",
+    "mw capacity", "power purchase", "ppa", "geothermal", "carbon-free", "offtake",
+    "liquid cooling", "液冷", "数据中心", "算力", "地热", "购电",
     # 定制硅 / 芯片供应链
     "custom semiconductor", "custom silicon", "custom chip", "asic", "tpu",
     "ai inference", "inference accelerator", "near-memory", "hbm",
@@ -72,7 +73,7 @@ COMMERCIAL_SIGNAL_TOKENS = (
     "item 1.01", "material definitive agreement", "definitive agreement",
     "commercial agreement", "entered into", "enter into",
     "purchase agreement", "supply agreement", "capacity agreement",
-    "lease agreement", "master services agreement", "offtake",
+    "power purchase agreement", "ppa", "lease agreement", "master services agreement", "offtake",
     "warrant", "multi-year", "years", "megawatt", "gigawatt",
     "$", "million", "billion",
     # 软件/平台合作常见措辞
@@ -92,8 +93,8 @@ HARD_NEGATIVE_TOKENS = (
 
 
 def _summary_window(item: RawItem) -> str:
-    # SEC Item 1.01 对方/条款常在中后段；RSS 摘要本身较短
-    limit = 1600 if item.source == "sec_8k" else 800
+    # SEC Item 1.01 对方/条款常在中后段；RSS/Finnhub 摘要通常已截断，给足窗口避免「没喂全文」误杀
+    limit = 2400 if item.source == "sec_8k" else 1600
     return (item.summary or "")[:limit]
 
 
@@ -185,7 +186,8 @@ def _build_prompt(items: list[RawItem]) -> str:
         "任一即可。纯仪式/认证/MOU/无产品落地的口头加速合作 → false。\n\n"
         "【主题白名单】\n"
         "T1 算力容量：GPU/加速器采购或租赁、集群、云/专用算力包年包容量\n"
-        "T2 数据中心基建：托管/colo、机柜、电力/PPA、液冷，明确服务 AI/hyperscale\n"
+        "T2 数据中心基建与云厂供电：托管/colo、机柜、电力/PPA/地热/储能购电、液冷；"
+        "明确服务 AI/hyperscale/data center（例：Google×Fervo 地热 PPA、Google×Eos 储能）\n"
         "T3 定制硅与芯片：ASIC/TPU/custom semiconductor|silicon|chip、"
         "inference accelerator、为云厂开发定制芯片、design win\n"
         "T4 AI 集群互联与光模块：以太网/InfiniBand/NIC/光互联/交换，明确 AI 训练/推理场景\n"
@@ -213,15 +215,25 @@ def _build_prompt(items: list[RawItem]) -> str:
         "机器人/消费电子；与大模型无关的普通软件功能更新；信贷/发债/并购/私募；"
         "无产品落地的咨询/营销战略合作；纯 ETF/杠杆产品发行 → false\n"
         "- 纯产品功能/整合发布（deepens integration、integrates with、product launch、"
-        "unveils、introduces、now available），无 definitive/commercial agreement、"
-        "无 multi-year、无金额/容量条款 → false。"
-        "**例外**：命名安全平台首次/重大运行于 hyperscaler 云基础设施且双方联合宣布（Falcon on GCP）→ true。"
+        "unveils、introduces、now available、marketplace 上架），无 definitive/commercial agreement、"
+        "无 multi-year、无金额/容量条款 → false 或 llm_score≤55。"
+        "**例外**：命名安全平台首次/重大运行于 hyperscaler 云基础设施且双方联合宣布（Falcon on GCP）→ true；"
+        "Claudeforce/Agentforce × Anthropic/OpenAI 命名平台落地 → true、llm_score≥75。"
         "例：安全厂商与芯片平台的 FortiAIGate/NVIDIA 产品整合、"
-        "SaaS 常规 Copilot 插件更新 → false\n"
-        "- 旧闻复述/股价反应稿 → false：标题侧重「shares/stock up/jump/soar X% "
-        "after/following announcing partnership/deal」，而非今日新签署/新条款；"
-        "低质 SEO 站（如 Mshale）、标题混无关剧集/随机串 → false。"
-        "例：Reddit shares up 11% after announcing OpenAI partnership（2024 旧闻重发）→ false\n\n"
+        "SaaS 常规 Copilot 插件更新、Falcon 上架 Claude Marketplace → false 或低分\n"
+        "- AI 工厂融资/授信/Blue Owl 募资 → 可 true 但 llm_score≤60（非客户签约催化）\n"
+        "- hyperscaler × 电力/储能/地热 PPA（Google×Eos、Google×Fervo 396MW）→ true、"
+        "llm_score≥75；beneficiary=电力/地热/储能上市方\n"
+        "- 旧闻复述/股价反应稿 → false（硬规则）：标题出现 shares/stock up/jump/surge/soar "
+        "X%、Rise/Surges after/as launch/deal 等，说明已错过原稿，一律 false；"
+        "不要因为正文里还有 signs deal 就放行。"
+        "例：Equinix Shares Rise 2% After Launch…；Fervo Stock Jumps 24% After Google Signs… → false\n"
+        "- 评论/展望/复盘 → false：could reshape investors、keeps rewriting forecast、"
+        "Is a B- credit enough、This Week In…、BRIEF- 二手转载 → false\n"
+        "- 弱催化运营琐事 → false：ceased bitcoin mining、opens new office、accreditation、"
+        "rebuilds its model on X（无新商业协议）→ false\n"
+        "- 低质 SEO 站（Mshale/Stocktwits/Dailyhunt）、标题混无关剧集/随机串 → false。"
+        "例：Reddit shares up 11% after announcing OpenAI partnership（旧闻重发）→ false\n\n"
         "角色与打分：\n"
         "- anchor=叙事核心/更大一方（云厂、大模型、Nvidia 等）；可以是未上市公司。\n"
         "- beneficiary=最值得关注的**美股上市**标的，用于推送与交易；"
@@ -356,7 +368,7 @@ def apply_heuristic_rescue(
 
 
 async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None:
-    models = [DEAL_LLM_MODEL, "gemini-3.5-flash", "gemini-3.5-flash-lite"]
+    models = [DEAL_LLM_MODEL, "gemini-2.5-flash", "gemini-2.0-flash"]
     data = None
     last_exc: Exception | None = None
     body = {
@@ -367,28 +379,37 @@ async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None
             "responseMimeType": "application/json",
         },
     }
+    keys = GEMINI_API_KEYS or ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+    if not keys:
+        return None
 
     async with httpx.AsyncClient(timeout=90) as client:
         for model in dict.fromkeys(models):
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={GEMINI_API_KEY}"
-            for attempt in range(2):
-                try:
-                    resp = await client.post(url, json=body)
-                    if resp.status_code in (429, 503):
-                        last_exc = httpx.HTTPStatusError(
-                            f"{resp.status_code} {resp.text[:200]}",
-                            request=resp.request,
-                            response=resp,
-                        )
-                        if attempt == 0:
-                            await asyncio.sleep(2)
-                            continue
+            for api_key in keys:
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:generateContent?key={api_key}"
+                )
+                for attempt in range(2):
+                    try:
+                        resp = await client.post(url, json=body)
+                        if resp.status_code in (429, 503):
+                            last_exc = httpx.HTTPStatusError(
+                                f"{resp.status_code} {resp.text[:200]}",
+                                request=resp.request,
+                                response=resp,
+                            )
+                            if attempt == 0:
+                                await asyncio.sleep(1.5)
+                                continue
+                            break  # 换下一把 key / 下一个 model
+                        resp.raise_for_status()
+                        data = resp.json()
                         break
-                    resp.raise_for_status()
-                    data = resp.json()
-                    break
-                except Exception as exc:
-                    last_exc = exc
+                    except Exception as exc:
+                        last_exc = exc
+                        break
+                if data is not None:
                     break
             if data is not None:
                 break
@@ -412,7 +433,7 @@ async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None
 
 async def classify_items(items: list[RawItem]) -> dict[str, LlmDecision]:
     """按批分类；失败的批次不写入结果，便于下一轮重试。成功后做规则兜底。"""
-    if not GEMINI_API_KEY or not items:
+    if not (GEMINI_API_KEYS or GEMINI_API_KEY) or not items:
         return {}
 
     merged: dict[str, LlmDecision] = {}

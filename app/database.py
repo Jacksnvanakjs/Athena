@@ -68,6 +68,14 @@ class DealEvent(Base):
     is_update = Column(Boolean, nullable=False, default=False)
     pushed_at = Column(DateTime, nullable=True)
     push_channel = Column(String(30), nullable=True)
+    # 受益方首日股价回测（发稿后首个交易日收盘 vs 前收）
+    first_day_return = Column(Float, nullable=True)
+    first_day_band = Column(String(10), nullable=True)
+    first_day_score = Column(Integer, nullable=True)
+    first_day_session_date = Column(Date, nullable=True)
+    first_day_anomaly = Column(Boolean, nullable=False, default=False)
+    first_day_note = Column(String(200), nullable=True)
+    first_day_checked_at = Column(DateTime, nullable=True)
 
 
 class NvdaSignalEvent(Base):
@@ -102,6 +110,13 @@ class NvdaSignalEvent(Base):
     chase_risk = Column(String(20), nullable=False, default="low")
     pushed_at = Column(DateTime, nullable=True)
     push_channel = Column(String(30), nullable=True)
+    first_day_return = Column(Float, nullable=True)
+    first_day_band = Column(String(10), nullable=True)
+    first_day_score = Column(Integer, nullable=True)
+    first_day_session_date = Column(Date, nullable=True)
+    first_day_anomaly = Column(Boolean, nullable=False, default=False)
+    first_day_note = Column(String(200), nullable=True)
+    first_day_checked_at = Column(DateTime, nullable=True)
 
 
 class NvdaSignalSeenUrl(Base):
@@ -207,6 +222,15 @@ class EarningsEvent(Base):
     push_channel = Column(String(40), nullable=True)
     push_batch_id = Column(Integer, nullable=True)
     source = Column(String(30), nullable=False, default="finnhub")
+    # 财报后涨跌 vs 评分对照（自动回填）
+    post_er_return = Column(Float, nullable=True)
+    post_er_sessions = Column(Integer, nullable=True)
+    post_er_as_of = Column(Date, nullable=True)
+    post_er_source = Column(String(40), nullable=True)
+    outcome_expected = Column(String(20), nullable=True)
+    outcome_anomaly = Column(String(40), nullable=True)
+    outcome_note = Column(String(300), nullable=True)
+    outcome_checked_at = Column(DateTime, nullable=True)
 
 
 class EarningsPushBatch(Base):
@@ -301,6 +325,45 @@ def run_with_db_retry(operation: Callable[[Session], T]) -> T:
     raise last_error
 
 
+def _ensure_sqlite_columns() -> None:
+    """create_all 不会给已有表加列；本地/Turso 共用显式 ALTER。"""
+    alters = (
+        ("earnings_events", "post_er_return", "FLOAT"),
+        ("earnings_events", "post_er_sessions", "INTEGER"),
+        ("earnings_events", "post_er_as_of", "DATE"),
+        ("earnings_events", "post_er_source", "VARCHAR(40)"),
+        ("earnings_events", "outcome_expected", "VARCHAR(20)"),
+        ("earnings_events", "outcome_anomaly", "VARCHAR(40)"),
+        ("earnings_events", "outcome_note", "VARCHAR(300)"),
+        ("earnings_events", "outcome_checked_at", "DATETIME"),
+        ("deal_events", "first_day_return", "FLOAT"),
+        ("deal_events", "first_day_band", "VARCHAR(10)"),
+        ("deal_events", "first_day_score", "INTEGER"),
+        ("deal_events", "first_day_session_date", "DATE"),
+        ("deal_events", "first_day_anomaly", "BOOLEAN DEFAULT 0"),
+        ("deal_events", "first_day_note", "VARCHAR(200)"),
+        ("deal_events", "first_day_checked_at", "DATETIME"),
+        ("nvda_signal_events", "first_day_return", "FLOAT"),
+        ("nvda_signal_events", "first_day_band", "VARCHAR(10)"),
+        ("nvda_signal_events", "first_day_score", "INTEGER"),
+        ("nvda_signal_events", "first_day_session_date", "DATE"),
+        ("nvda_signal_events", "first_day_anomaly", "BOOLEAN DEFAULT 0"),
+        ("nvda_signal_events", "first_day_note", "VARCHAR(200)"),
+        ("nvda_signal_events", "first_day_checked_at", "DATETIME"),
+    )
+    with engine.begin() as conn:
+        for table, column, coltype in alters:
+            try:
+                rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+            except Exception:
+                # 非 sqlite 方言时跳过（新环境靠 create_all）
+                continue
+            names = {r[1] for r in rows}
+            if column in names:
+                continue
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+
+
 def init_db():
     if not USE_TURSO:
         from app.config import DATABASE_URL as resolved_url
@@ -311,6 +374,7 @@ def init_db():
         except OSError as e:
             raise RuntimeError(f"无法创建数据库目录: {db_path.parent}") from e
     Base.metadata.create_all(bind=engine)
+    _ensure_sqlite_columns()
 
 
 def get_db() -> Generator[Session]:

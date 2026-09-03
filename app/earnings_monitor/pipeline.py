@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import EarningsEvent, EarningsPushBatch, db_session
 from app.deal_monitor.market_cap import fetch_market_cap, get_cached_market_cap, save_market_cap_cache
 from app.deal_monitor.tiers import classify_tier
-from app.earnings_monitor.calendar_fetch import fetch_calendar_for_universe, today_et
+from app.earnings_monitor.calendar_fetch import fetch_calendar_for_universe
 from app.earnings_monitor.config import (
     EARNINGS_LOOKAHEAD_DAYS,
     EARNINGS_MONITOR_ENABLED,
@@ -24,10 +24,16 @@ from app.earnings_monitor.config import (
     SECTOR_LABELS,
 )
 from app.earnings_monitor.push import build_earnings_batch_push
-from app.earnings_monitor.scoring import fetch_pre_30d_gain, hard_eliminate, score_candidate
+from app.earnings_monitor.scoring import (
+    fetch_price_setup_features,
+    hard_eliminate,
+    score_candidate,
+)
 from app.earnings_monitor.trade_window import (
     compute_trade_window,
     earnings_release_dt_bj,
+    is_release_past_bj,
+    pre_earnings_price_as_of,
     relative_release_label_bj,
     session_label,
     today_bj,
@@ -69,8 +75,7 @@ def _localize_one_liner(text: str | None) -> str:
 def push_status_for(event: EarningsEvent, today: date | None = None) -> str:
     today = today or today_bj()
     session = event.session or "TBD"
-    d = days_to_earnings(event.earnings_date, today, session)
-    if event.status == "archived" or d < 0:
+    if event.status == "archived" or is_release_past_bj(event.earnings_date, session):
         return "archived"
     if event.eliminate_reason:
         return "skipped"
@@ -125,19 +130,20 @@ def _upsert_event(
     event = db.query(EarningsEvent).filter(EarningsEvent.unique_key == key).first()
     tw = compute_trade_window(earnings_date, session)
 
-    # 同 ticker 旧日期未过期但改期：归档旧 upcoming
+    # 同 ticker 旧日期未过期但改期：归档旧 upcoming（未过期按北京揭晓时刻）
     old_rows = (
         db.query(EarningsEvent)
         .filter(
             EarningsEvent.ticker == ticker.upper(),
             EarningsEvent.status.in_(["upcoming", "pushed"]),
             EarningsEvent.earnings_date != earnings_date,
-            EarningsEvent.earnings_date >= today_et(),
         )
         .all()
     )
     for old in old_rows:
-        if old.unique_key != key:
+        if old.unique_key != key and not is_release_past_bj(
+            old.earnings_date, old.session or "TBD"
+        ):
             old.status = "rescheduled"
             old.push_channel = old.push_channel or "rescheduled"
 
@@ -160,31 +166,49 @@ def _upsert_event(
     event.buy_window_json = tw.buy_window_json
     event.hold_trading_days_max = tw.hold_trading_days_max
     event.fetched_at = now_beijing()
-    if event.status in (None, "rescheduled", "archived") or event.earnings_date >= today_et():
+    still_upcoming = not is_release_past_bj(earnings_date, session or "TBD")
+    if event.status in (None, "rescheduled", "archived") or still_upcoming:
         if event.status != "pushed":
             event.status = "upcoming"
     return event
 
 
 async def _apply_score(event: EarningsEvent) -> None:
+    from app.deal_monitor.market_cap import fetch_market_cap, save_market_cap_cache
+
     days = days_to_earnings(event.earnings_date, session=event.session or "TBD")
-    pre_gain = None
+    # 评分前若缺市值，强制多源重拉，避免误打 E2
+    if event.market_cap_usd is None or event.tier in (None, "", "UNKNOWN"):
+        cap = await fetch_market_cap(event.ticker)
+        if cap is not None:
+            event.market_cap_usd = cap
+            event.tier = classify_tier(cap, ticker=event.ticker)
+
+    feats = None
     if days <= EARNINGS_SCORE_LOOKAHEAD_DAYS:
-        pre_gain = await fetch_pre_30d_gain(event.ticker)
+        feats = await fetch_price_setup_features(event.ticker)
+    pre_gain = feats.pre_30d_gain if feats else None
+    pre_10d = feats.pre_10d_gain if feats else None
 
     elim = hard_eliminate(
-        tier=event.tier,
+        tier=event.tier or "UNKNOWN",
         market_cap_usd=event.market_cap_usd,
         pre_30d_gain=pre_gain,
+        pre_10d_gain=pre_10d,
     )
     result = score_candidate(
         sector=event.sector,
-        tier=event.tier,
+        tier=event.tier or "UNKNOWN",
         session=event.session,
         confirmed=bool(event.confirmed),
         days_to=days,
         pre_30d_gain=pre_gain,
         eliminate_reason=elim,
+        market_cap_usd=event.market_cap_usd,
+        pre_10d_gain=pre_10d,
+        pre_5d_gain=feats.pre_5d_gain if feats else None,
+        down_streak=feats.down_streak if feats else None,
+        from_21d_high=feats.from_21d_high if feats else None,
     )
     event.score_total = result.score_total
     event.score_detail_json = result.score_detail_json
@@ -199,6 +223,74 @@ async def _apply_score(event: EarningsEvent) -> None:
         event.push_channel = event.push_channel if event.pushed_at else "too_early"
 
 
+async def rescore_event_pre_earnings(event: EarningsEvent) -> dict:
+    """用财报前收盘数据重算市值/涨幅/评分（不含财报后价格）。"""
+    from app.deal_monitor.market_cap import fetch_market_cap_as_of
+
+    session = event.session or "TBD"
+    as_of = pre_earnings_price_as_of(event.earnings_date, session)
+    days = days_to_earnings(event.earnings_date, as_of, session)
+
+    cap = await fetch_market_cap_as_of(event.ticker, as_of)
+    if cap is None:
+        return {"ok": False, "reason": "no_pre_earnings_cap", "as_of": as_of.isoformat()}
+
+    tier = classify_tier(cap, ticker=event.ticker)
+    feats = await fetch_price_setup_features(event.ticker, as_of=as_of)
+    pre_gain = feats.pre_30d_gain
+    pre_10d = feats.pre_10d_gain
+    elim = hard_eliminate(
+        tier=tier,
+        market_cap_usd=cap,
+        pre_30d_gain=pre_gain,
+        pre_10d_gain=pre_10d,
+    )
+    result = score_candidate(
+        sector=event.sector,
+        tier=tier,
+        session=session,
+        confirmed=bool(event.confirmed),
+        days_to=max(0, days),
+        pre_30d_gain=pre_gain,
+        eliminate_reason=elim,
+        market_cap_usd=cap,
+        pre_10d_gain=pre_10d,
+        pre_5d_gain=feats.pre_5d_gain,
+        down_streak=feats.down_streak,
+        from_21d_high=feats.from_21d_high,
+    )
+    event.market_cap_usd = cap
+    event.tier = tier
+    event.score_total = result.score_total
+    event.score_detail_json = result.score_detail_json
+    event.eliminate_reason = result.eliminate_reason
+    event.push_eligible = bool(result.push_eligible and not result.eliminate_reason)
+    event.one_liner = result.one_liner
+    event.risk_oneliner = result.risk_oneliner
+    event.scored_at = now_beijing()
+    if result.eliminate_reason:
+        event.push_channel = "eliminated"
+    elif event.pushed_at:
+        pass
+    else:
+        event.push_channel = event.push_channel or "archived"
+    return {
+        "ok": True,
+        "as_of": as_of.isoformat(),
+        "market_cap_usd": cap,
+        "tier": tier,
+        "pre_30d_gain": pre_gain,
+        "pre_10d_gain": pre_10d,
+        "pre_5d_gain": feats.pre_5d_gain,
+        "down_streak": feats.down_streak,
+        "from_21d_high": feats.from_21d_high,
+        "days_to": days,
+        "score_total": result.score_total,
+        "eliminate_reason": result.eliminate_reason,
+        "one_liner": result.one_liner,
+        "push_eligible": event.push_eligible,
+    }
+
 async def run_calendar_refresh() -> dict:
     if not EARNINGS_MONITOR_ENABLED:
         return {"skipped": True, "reason": "disabled"}
@@ -211,6 +303,7 @@ async def run_calendar_refresh() -> dict:
         "upserted": 0,
         "scored": 0,
         "archived": 0,
+        "outcome": {},
     }
     if not universe:
         return summary
@@ -247,27 +340,34 @@ async def run_calendar_refresh() -> dict:
                 await _apply_score(event)
                 summary["scored"] += 1
 
-        # 归档已过期
-        past = (
+        # 归档已过期（按北京揭晓时刻）
+        candidates = (
             db.query(EarningsEvent)
-            .filter(
-                EarningsEvent.earnings_date < today_et(),
-                EarningsEvent.status.in_(["upcoming", "pushed"]),
-            )
+            .filter(EarningsEvent.status.in_(["upcoming", "pushed"]))
             .all()
         )
-        for e in past:
-            e.status = "archived"
-            summary["archived"] += 1
+        for e in candidates:
+            if is_release_past_bj(e.earnings_date, e.session or "TBD"):
+                e.status = "archived"
+                summary["archived"] += 1
 
-        # 超前瞻窗口隐藏为 archived
-        far = today_et() + timedelta(days=EARNINGS_LOOKAHEAD_DAYS)
+        # 超前瞻窗口隐藏为 archived（earnings_date 为美股日历日，多留 1 天缓冲）
+        far = today_bj() + timedelta(days=EARNINGS_LOOKAHEAD_DAYS + 1)
         for e in db.query(EarningsEvent).filter(
             EarningsEvent.earnings_date > far,
             EarningsEvent.status == "upcoming",
         ).all():
             e.status = "archived"
             summary["archived"] += 1
+
+    # 已揭晓：回填财报后涨跌并标记评分异常（独立事务）
+    from app.earnings_monitor.outcome import run_outcome_check
+
+    try:
+        summary["outcome"] = await run_outcome_check()
+    except Exception:
+        logger.exception("earnings outcome check failed")
+        summary["outcome"] = {"error": True}
 
     logger.info("earnings calendar refresh: %s", summary)
     return summary
@@ -403,7 +503,7 @@ def event_to_dict(event: EarningsEvent) -> dict:
     return {
         "id": event.id,
         "category": "earnings",
-        "category_label": "小公司财报",
+        "category_label": "AI财报",
         "ticker": event.ticker,
         "company_name": event.company_name,
         "sector": event.sector,
@@ -444,4 +544,17 @@ def event_to_dict(event: EarningsEvent) -> dict:
         "push_channel": event.push_channel,
         "source": event.source,
         "web_visible": score_ok and event.status in ("upcoming", "pushed"),
+        "post_er_return": event.post_er_return,
+        "post_er_return_pct": None
+        if event.post_er_return is None
+        else round(event.post_er_return * 100, 2),
+        "post_er_sessions": event.post_er_sessions,
+        "post_er_as_of": event.post_er_as_of.isoformat() if event.post_er_as_of else None,
+        "post_er_source": event.post_er_source,
+        "outcome_expected": event.outcome_expected,
+        "outcome_anomaly": event.outcome_anomaly,
+        "outcome_note": event.outcome_note,
+        "outcome_checked_at": event.outcome_checked_at.isoformat()
+        if event.outcome_checked_at
+        else None,
     }

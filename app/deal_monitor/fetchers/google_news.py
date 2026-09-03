@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -67,22 +68,28 @@ async def fetch_google_news(queries: list[str] | None = None) -> list[RawItem]:
     results: list[RawItem] = []
     seen: set[str] = set()
     headers = {"User-Agent": "AthenaDealMonitor/1.0"}
-    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=40) as client:
-        for query in query_list:
-            url = _feed_url(query)
+    sem = asyncio.Semaphore(4)
+
+    async def _one(client: httpx.AsyncClient, query: str) -> list[RawItem]:
+        async with sem:
             try:
-                resp = await client.get(url)
+                resp = await client.get(_feed_url(query))
                 resp.raise_for_status()
                 items = _parse_rss(resp.text)
-                kept = 0
-                for item in items:
-                    u = (item.source_url or "").strip()
-                    if not u or u in seen:
-                        continue
-                    seen.add(u)
-                    results.append(item)
-                    kept += 1
-                logger.info("Google News q=%r: %d 条（去重后 %d）", query[:60], len(items), kept)
+                logger.info("Google News q=%r: %d 条", query[:60], len(items))
+                return items
             except Exception as exc:
                 logger.warning("Google News 抓取失败 q=%r: %r", query[:60], exc)
+                return []
+
+    async with httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=40) as client:
+        batches = await asyncio.gather(*[_one(client, q) for q in query_list])
+
+    for batch in batches:
+        for item in batch:
+            u = (item.source_url or "").strip()
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            results.append(item)
     return results

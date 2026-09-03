@@ -247,7 +247,7 @@
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <a class="btn btn-dark" href="/funds">基金监测</a>
         <a class="btn" href="/deals" style="background:#1e3a5f;color:#fff;text-decoration:none">AI 产业链合作快讯</a>
-        <button class="btn btn-dark" id="snapBtn" onclick="saveSnapshot()" title="保存当前美东交易日的收盘快照（美东16:30口径，北京次日凌晨入库），用于「每日/每周」等周期统计">存今日快照</button>
+        <button class="btn btn-dark" id="snapBtn" onclick="saveSnapshot()" title="保存当前美股交易日收盘快照（对应北京次日凌晨入库），用于「每日/每周」等周期统计">存今日快照</button>
         <button class="btn btn-primary" id="refreshBtn" onclick="reloadAll(true)">刷新</button>
       </div>
     </header>
@@ -291,10 +291,10 @@
             <option value="sector">板块视图</option>
             <option value="company">公司视图</option>
           </select>
-          <select id="periodSelect" onchange="loadStats()" title="切换统计周期；除「实时行情」外均基于美东16:30收盘快照">
+          <select id="periodSelect" onchange="loadStats()" title="切换统计周期；除「实时行情」外均基于收盘快照（北京次日凌晨入库）">
             <option value="live" selected>实时行情</option>
-            <option value="1d" title="最近一个美东交易日16:30收盘快照">每日（美东收盘）</option>
-            <option value="1w" title="约7个自然日内各美东交易日收盘快照累计">每周</option>
+            <option value="1d" title="最近一个交易日收盘快照（北京次日凌晨入库）">每日（收盘）</option>
+            <option value="1w" title="约7个自然日内各交易日收盘快照累计">每周</option>
             <option value="15d">每半月</option>
             <option value="1m">每月</option>
             <option value="2m">每2个月</option>
@@ -402,7 +402,7 @@
         return `周期：${label}${timePart} · 数据还不足（${data.snapshot_count || 0}/${data.min_snapshots || '?'} 天）`;
       }
       const latest = data.latest_trade_date
-        ? ` · 快照交易日 ${data.latest_trade_date}（美东）`
+        ? ` · 快照交易日 ${data.latest_trade_date}`
         : '';
       const days = data.snapshot_count > 1 ? ` · 含 ${data.snapshot_count} 个交易日` : '';
       return `周期：${label}${timePart}${latest}${days}`;
@@ -414,7 +414,7 @@
       if (usingLive()) {
         el.textContent =
           '实时：当前刷新行情，每3分钟更新，盘前/盘中/盘后均可变。' +
-          '「今日」= 当前美东交易日；收盘快照在美东 16:30 入库（北京次日凌晨 04:30/05:30）。';
+          '收盘快照在北京次日凌晨 04:30/05:30 入库（对应美东收盘 16:30）。';
         return;
       }
       if (statsData && statsData.period_desc) {
@@ -808,7 +808,7 @@
         crumb.textContent = '实时行情：方块大小≈资金流强度；涨跌幅随盘前/盘中/盘后变化（与收盘快照可能不同）';
       } else {
         const dayInfo = statsData.latest_trade_date
-          ? ` · 美东交易日 ${statsData.latest_trade_date}`
+          ? ` · 交易日 ${statsData.latest_trade_date}`
           : '';
         crumb.textContent =
           `${statsData.rank_label || statsData.label}：收盘快照统计${dayInfo}（非实时；共 ${statsData.snapshot_count} 个交易日）`;

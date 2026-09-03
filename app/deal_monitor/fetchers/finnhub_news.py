@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -15,11 +16,13 @@ logger = logging.getLogger(__name__)
 
 # 进管线前粗筛，控制 LLM 成本；正式相关性仍由 LLM/规则决定
 _PREFILTER = re.compile(
-    r"(anthropic|openai|claude|gpt|xai|agentforce|ai\s*agent|agentic|"
-    r"large\s*language\s*model|\bllm\b|generative\s*ai|copilot|"
+    r"(anthropic|openai|claude|gpt|xai|nvidia|agentforce|ai\s*agent|agentic|"
+    r"\bai\b|inference|large\s*language\s*model|\bllm\b|generative\s*ai|copilot|"
     r"partnership|collaboration|integration|plugin|"
-    r"data\s*center|gpu|custom\s*semiconductor|hyperscale|"
-    r"算力|数据中心|人工智能)",
+    r"data\s*center|datacenter|gpu|custom\s*semiconductor|hyperscale|"
+    r"geothermal|\bppa\b|power\s+purchase|carbon-?free|offtake|"
+    r"\bmegawatt|\bgigawatt|\b\d+\s*mw\b|fervo|eos\s*energy|"
+    r"算力|数据中心|人工智能|地热|购电|电力协议)",
     re.I,
 )
 
@@ -43,9 +46,10 @@ async def fetch_finnhub_company_news() -> list[RawItem]:
     start = end - timedelta(days=max(1, FINNHUB_NEWS_LOOKBACK_DAYS))
     results: list[RawItem] = []
     seen: set[str] = set()
+    sem = asyncio.Semaphore(8)
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        for ticker in FINNHUB_NEWS_TICKERS:
+    async def _one(client: httpx.AsyncClient, ticker: str) -> list[RawItem]:
+        async with sem:
             try:
                 resp = await client.get(
                     "https://finnhub.io/api/v1/company-news",
@@ -60,8 +64,8 @@ async def fetch_finnhub_company_news() -> list[RawItem]:
                 rows = resp.json()
                 if not isinstance(rows, list):
                     logger.warning("Finnhub news %s 返回异常: %s", ticker, rows)
-                    continue
-                kept = 0
+                    return []
+                kept: list[RawItem] = []
                 for row in rows:
                     headline = (row.get("headline") or "").strip()
                     summary = (row.get("summary") or "").strip()
@@ -69,17 +73,15 @@ async def fetch_finnhub_company_news() -> list[RawItem]:
                     if not headline or not _PREFILTER.search(blob):
                         continue
                     url = _prefer_url(row.get("url") or "", summary)
-                    if not url or url in seen:
+                    if not url:
                         continue
-                    seen.add(url)
                     ts = row.get("datetime")
                     if isinstance(ts, (int, float)) and ts > 0:
                         published = datetime.fromtimestamp(ts, tz=timezone.utc)
                     else:
                         published = datetime.now(timezone.utc)
-                    # summary 若是纯 URL，用 headline 补一点上下文
                     body = summary if summary and not summary.startswith("http") else headline
-                    results.append(
+                    kept.append(
                         RawItem(
                             headline=headline[:500],
                             summary=body[:2000],
@@ -88,9 +90,19 @@ async def fetch_finnhub_company_news() -> list[RawItem]:
                             published_at=published,
                         )
                     )
-                    kept += 1
-                logger.info("Finnhub news %s: raw=%d kept=%d", ticker, len(rows), kept)
+                logger.info("Finnhub news %s: raw=%d kept=%d", ticker, len(rows), len(kept))
+                return kept
             except Exception as exc:
                 logger.warning("Finnhub news %s 失败: %r", ticker, exc)
+                return []
 
+    async with httpx.AsyncClient(timeout=30) as client:
+        batches = await asyncio.gather(*[_one(client, t) for t in FINNHUB_NEWS_TICKERS])
+
+    for batch in batches:
+        for item in batch:
+            if item.source_url in seen:
+                continue
+            seen.add(item.source_url)
+            results.append(item)
     return results

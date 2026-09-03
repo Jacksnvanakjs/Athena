@@ -179,8 +179,31 @@
       white-space: nowrap;
     }
     tr:hover td { background: #f8fafc; }
+    tr.fd-anom td,
+    tr.fd-anom:hover td {
+      background: rgba(192, 57, 43, 0.08);
+    }
     .ticker { font-weight: 600; color: var(--accent); }
     .score { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .fd-band {
+      display: inline-block;
+      min-width: 2.2em;
+      text-align: center;
+      font-size: 0.78rem;
+      font-weight: 700;
+      padding: 0.1rem 0.35rem;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+    }
+    .fd-high { color: var(--green); border-color: var(--green); }
+    .fd-midhigh { color: #2a6fdb; border-color: #2a6fdb; }
+    .fd-mid { color: #b8860b; border-color: #b8860b; }
+    .fd-low { color: var(--red, #c0392b); border-color: var(--red, #c0392b); }
+    .fd-none { color: var(--muted); }
+    .fd-anom { background: rgba(192, 57, 43, 0.08); }
+    .fd-ret { font-variant-numeric: tabular-nums; font-size: 0.85rem; }
+    .fd-ret.up { color: var(--green); }
+    .fd-ret.down { color: var(--red, #c0392b); }
     .time-cell { font-size: 0.82rem; line-height: 1.4; max-width: 172px; display: inline-block; white-space: normal; }
     .time-main { color: var(--text); }
     .time-sub { color: var(--text-muted); margin-top: 5px; font-size: 0.78rem; }
@@ -222,6 +245,60 @@
     }
     .er-elim { color: var(--text-muted); text-decoration: line-through; opacity: 0.75; }
     .er-trade { font-size: 0.75rem; color: var(--text-muted); line-height: 1.4; }
+    .er-history { color: var(--text-muted); opacity: 0.85; background: #f8fafc; }
+    .er-history-toggle td {
+      padding: 8px 12px;
+      background: #f1f5f9;
+      border-bottom: 1px solid var(--border);
+    }
+    .er-hist-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      cursor: pointer;
+      padding: 2px 0;
+    }
+    .er-hist-btn:hover { color: var(--text); }
+    .er-hist-chevron { display: inline-block; transition: transform 0.15s ease; font-size: 0.75rem; }
+    .er-hist-chevron.open { transform: rotate(90deg); }
+    .er-anomaly-panel {
+      margin-bottom: 14px;
+      border: 1px solid #fecaca;
+      background: #fff7f7;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .er-anomaly-panel.hidden { display: none; }
+    .er-anomaly-head {
+      padding: 10px 14px;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: #991b1b;
+      border-bottom: 1px solid #fecaca;
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .er-anomaly-head .hint {
+      font-weight: 400;
+      font-size: 0.75rem;
+      color: #9f1239;
+    }
+    .er-anomaly-panel table { font-size: 0.82rem; }
+    .er-anomaly-panel th {
+      background: #fef2f2;
+      color: #7f1d1d;
+      font-weight: 600;
+    }
+    .er-anom-fp { color: #b91c1c; font-weight: 600; }
+    .er-anom-fn { color: #c2410c; font-weight: 600; }
+    .er-ret-up { color: #166534; }
+    .er-ret-dn { color: #b91c1c; }
     .score-hi { color: var(--green); font-weight: 700; }
     .row-nvda td { border-left: 3px solid #f97316; }
     .row-nvda-a td { border-left: 3px solid #22c55e; }
@@ -307,12 +384,12 @@
       <h3>这个页面做什么？</h3>
       <p class="muted" style="margin-bottom:8px">
         四类信号：<strong>AI 主线</strong>（子板块相对强弱）、
-        <strong>小公司财报</strong>、<strong>AI合作</strong>、<strong>黄仁勋</strong>。
+        <strong>AI财报</strong>、<strong>AI合作</strong>、<strong>黄仁勋</strong>。
       </p>
       <ul>
         <li><strong>AI 主线</strong>：用各子板块相对 AI 综合基准的 5 日强弱判断资金偏向哪条链，<strong>不是</strong>软硬件互斥。「已确认」约需连续 3 个交易日排名靠前。</li>
         <li><strong>合作 / 黄仁勋</strong>：事件驱动即时推送；入库 ≠ 一定推送。</li>
-        <li><strong>财报日历</strong>：可提前数周上网站；手机推送<strong>仅财报前 2 天</strong>，同日多家合并一条。</li>
+        <li><strong>财报日历</strong>：监控 AI 链相关标的（含 DELL 等）；可提前数周上网站；手机推送<strong>仅财报前 2 天</strong>且须过市值/评分门槛，同日多家合并一条。揭晓后自动对照涨跌与评分，对不上的进<strong>评分异常区</strong>。行情/日线/市值均<strong>多源自动切换</strong>。</li>
         <li>仅供研究，非投资建议。</li>
       </ul>
     </div>
@@ -382,7 +459,7 @@
             时间范围（天）
             <span class="help" title="按稿件发布时间筛选，列表默认按最新发布时间排序。">?</span>
           </div>
-          <input type="number" class="short" id="days" value="7" min="1" max="90">
+          <input type="number" class="short" id="days" value="7" min="1" max="365">
         </div>
         <div class="field field-tier">
           <div class="field-label">
@@ -436,7 +513,7 @@
         <div class="panel-title">财报筛选</div>
         <div class="filters">
           <div class="field">
-            <div class="field-label">前瞻天数</div>
+            <div class="field-label" title="未来与历史回看共用此天数">前瞻 / 历史天数</div>
             <input type="number" class="short" id="er_days" value="90" min="1" max="180">
           </div>
           <div class="field">
@@ -464,6 +541,27 @@
         </div>
       </div>
       <div class="stats" id="erStats"></div>
+      <div class="er-anomaly-panel hidden" id="erAnomalyPanel">
+        <div class="er-anomaly-head">
+          评分异常区 <span id="erAnomalyCount"></span>
+          <span class="hint">财报后涨跌与评分对不上时自动出现，便于回头改机制</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>异常类型</th>
+                <th>公司</th>
+                <th>财报日</th>
+                <th>评分</th>
+                <th>财报后</th>
+                <th>说明</th>
+              </tr>
+            </thead>
+            <tbody id="erAnomalyTbody"></tbody>
+          </table>
+        </div>
+      </div>
       <div class="panel table-panel">
         <div class="table-wrap">
           <table>
@@ -474,7 +572,7 @@
                 <th>公司</th>
                 <th>赛道</th>
                 <th>得分</th>
-                <th>距今</th>
+                <th title="待发：距揭晓天数；历史：财报后涨跌">距今 / 财报后</th>
                 <th>建议买入</th>
                 <th>卖出首选</th>
                 <th>卖出最晚</th>
@@ -504,7 +602,10 @@
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
-            <th>分数</th>
+            <th title="系统材料性评分">分数</th>
+            <th title="首日回测档：≥+3%高 · +1%~+3%中高 · ±1%中 · ≤-1%低；中/低计异常">档</th>
+            <th title="首日回测分：高85 / 中高70 / 中55 / 低35">回测</th>
+            <th title="发稿后首个交易日收盘相对前收">首日</th>
             <th>关系/策略</th>
             <th>已推送</th>
             <th>来源</th>
@@ -602,7 +703,7 @@
       m.push(`AI基准5D ${bench.ret_5d != null ? (bench.ret_5d > 0 ? '+' : '') + Number(bench.ret_5d).toFixed(1) + '%' : '—'}`);
       const asOf = data.trade_date || '';
       const bj = data.updated_bj || '';
-      m.push(`更新：美东 ${asOf}${bj ? ' / 北京 ' + bj : ''}`);
+      m.push(`更新：北京 ${bj || '—'}${asOf ? ' · 美东交易日 ' + asOf : ''}`);
       metrics.textContent = m.join(' ｜ ');
       summary.textContent = data.summary || data.disclaimer || '';
 
@@ -755,6 +856,8 @@
       }
     }
 
+    let erHistoryExpanded = false;
+
     function fmtDaysTo(row) {
       let label = row.days_to_label;
       if (!label) {
@@ -782,62 +885,188 @@
       return m[row.push_status] || (row.push_channel || '—');
     }
 
+    function fmtErRet(pct) {
+      if (pct == null || pct === '') return '—';
+      const n = Number(pct);
+      if (Number.isNaN(n)) return '—';
+      const cls = n >= 0 ? 'er-ret-up' : 'er-ret-dn';
+      return `<span class="${cls}">${n >= 0 ? '+' : ''}${n.toFixed(1)}%</span>`;
+    }
+
+    function renderErAnomalies(items) {
+      const panel = document.getElementById('erAnomalyPanel');
+      const tbody = document.getElementById('erAnomalyTbody');
+      const countEl = document.getElementById('erAnomalyCount');
+      tbody.innerHTML = '';
+      if (!items || !items.length) {
+        panel.classList.add('hidden');
+        return;
+      }
+      panel.classList.remove('hidden');
+      countEl.textContent = `（${items.length}）`;
+      for (const row of items) {
+        const tr = document.createElement('tr');
+        const kind = row.outcome_anomaly === 'false_positive' ? 'er-anom-fp' : 'er-anom-fn';
+        const score = row.eliminate_reason
+          ? `<span class="strategy-hint">${row.eliminate_reason}</span>`
+          : (row.score_total == null ? '—' : row.score_total);
+        tr.innerHTML = `
+          <td class="${kind}">${row.outcome_anomaly_label || row.outcome_anomaly || '—'}</td>
+          <td><span class="ticker">${row.ticker}</span></td>
+          <td>${row.earnings_date || '—'}</td>
+          <td>${score}</td>
+          <td>${fmtErRet(row.post_er_return_pct)}</td>
+          <td>${row.outcome_note || '—'}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    function buildErRow(row, isHistory) {
+      const tr = document.createElement('tr');
+      const classes = [];
+      if (isHistory) classes.push('er-history');
+      if (row.eliminate_reason) classes.push('er-elim');
+      tr.className = classes.join(' ');
+      if (isHistory) tr.dataset.history = '1';
+      const score = row.eliminate_reason
+        ? '—'
+        : (row.score_total == null ? '待评分' : `<span class="${row.score_total >= 75 ? 'score-hi' : 'score'}">${row.score_total}</span>`);
+      const sess = row.session_label || ({AMC:'盘后', BMO:'盘前', TBD:'待定'}[row.session] || row.session);
+      const conf = row.confirmed ? '' : ' <span class="strategy-hint">待确认</span>';
+      const sectorCn = row.sector_label || row.sector || '—';
+      const retCell = isHistory
+        ? `<div>${fmtErRet(row.post_er_return_pct)}</div>${row.outcome_anomaly ? `<div class="strategy-hint">${row.outcome_anomaly === 'false_positive' ? '高分却跌' : '低分却涨'}</div>` : ''}`
+        : fmtDaysTo(row);
+      tr.innerHTML = `
+        <td>${fmtDualTime(row.earnings_release_bj, row.earnings_release_et)}${conf}</td>
+        <td>${sess}</td>
+        <td><span class="ticker">${row.ticker}</span><div class="strategy-hint">${row.company_name || ''}</div></td>
+        <td>${sectorCn}</td>
+        <td>${score}</td>
+        <td>${retCell}</td>
+        <td class="er-trade">${fmtDualTime(row.buy_window_bj, row.buy_window_et)}</td>
+        <td class="er-trade">${fmtDualTime(row.sell_window_bj, row.sell_window_et)}</td>
+        <td class="er-trade">${fmtDualTime(row.sell_deadline_bj, row.sell_deadline_et)}</td>
+        <td class="${row.push_status === 'pushed' ? 'pushed' : ''}">${fmtErPush(row)}</td>
+        <td>${row.eliminate_reason ? row.eliminate_reason : (row.one_liner || '—')}</td>
+      `;
+      return tr;
+    }
+
+    function setErHistoryVisible(expanded) {
+      erHistoryExpanded = expanded;
+      document.querySelectorAll('#erTbody tr[data-history="1"]').forEach(tr => {
+        tr.style.display = expanded ? '' : 'none';
+      });
+      const chevron = document.getElementById('erHistChevron');
+      const label = document.getElementById('erHistLabel');
+      const btn = document.querySelector('#erTbody .er-hist-btn');
+      if (chevron) chevron.classList.toggle('open', expanded);
+      if (btn) btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      if (label) {
+        const n = Number(label.dataset.count || 0);
+        label.textContent = expanded
+          ? `收起历史日历（${n}）`
+          : `展开历史日历（${n}）`;
+      }
+    }
+
+    function toggleErHistory() {
+      setErHistoryVisible(!erHistoryExpanded);
+    }
+
     async function loadEarnings() {
+      const days = document.getElementById('er_days').value;
       const params = new URLSearchParams();
-      params.set('days', document.getElementById('er_days').value);
+      params.set('days', days);
+      params.set('history_days', days);
+      params.set('include_history', 'true');
       params.set('min_score', document.getElementById('er_min_score').value);
       const sec = document.getElementById('er_sector').value;
       if (sec) params.set('sector', sec);
       if (document.getElementById('er_push_eligible').checked) params.set('push_eligible', 'true');
 
-      const [listRes, statsRes] = await Promise.all([
+      const [listRes, statsRes, anomRes] = await Promise.all([
         fetch('/api/earnings?' + params),
-        fetch('/api/earnings/stats?days=' + document.getElementById('er_days').value),
+        fetch('/api/earnings/stats?days=' + days + '&history_days=' + days),
+        fetch('/api/earnings/anomalies?days=' + Math.min(Number(days) || 14, 90)),
       ]);
-      const items = await listRes.json();
+      const payload = await listRes.json();
+      const upcoming = Array.isArray(payload) ? payload : (payload.upcoming || []);
+      const history = Array.isArray(payload) ? [] : (payload.history || []);
       const stats = await statsRes.json();
+      const anomPayload = await anomRes.json().catch(() => ({ items: [] }));
+      renderErAnomalies(anomPayload.items || []);
       document.getElementById('erStats').innerHTML =
         `待发财报 <strong>${stats.upcoming}</strong> 家` +
         `<span class="help" title="筛选范围内、尚未过期的财报日程条数">?</span>` +
         ` · 还有2天将推送 <strong>${stats.t2_due}</strong>` +
         `<span class="help" title="距财报正好 2 天、得分≥75、今日会发手机提醒的家数。更早的只在网页展示，不推手机。">?</span>` +
-        ` · 已推送 ${stats.pushed}` +
-        ` · 近30日批次 ${stats.batches_30d}`;
+        ` · 近30日已推送 <strong>${stats.batches_30d}</strong>` +
+        `<span class="help" title="近30天内成功发出的手机推送次数。同一天多家公司合并为 1 次。">?</span>` +
+        ` · 评分异常 <strong>${stats.anomalies || 0}</strong>` +
+        `<span class="help" title="财报后涨跌与评分方向明显对不上的条数（高分大跌 / 低分大涨）。下方异常区可点开看明细。">?</span>`;
 
       const tbody = document.getElementById('erTbody');
       const empty = document.getElementById('erEmpty');
       tbody.innerHTML = '';
-      if (!items.length) {
+      if (!upcoming.length && !history.length) {
         empty.style.display = 'block';
         loadStatus();
         return;
       }
       empty.style.display = 'none';
-      for (const row of items) {
-        const tr = document.createElement('tr');
-        if (row.eliminate_reason) tr.className = 'er-elim';
-        const score = row.eliminate_reason
-          ? '—'
-          : (row.score_total == null ? '待评分' : `<span class="${row.score_total >= 75 ? 'score-hi' : 'score'}">${row.score_total}</span>`);
-        const sess = row.session_label || ({AMC:'盘后', BMO:'盘前', TBD:'待定'}[row.session] || row.session);
-        const conf = row.confirmed ? '' : ' <span class="strategy-hint">待确认</span>';
-        const sectorCn = row.sector_label || row.sector || '—';
-        tr.innerHTML = `
-          <td>${fmtDualTime(row.earnings_release_bj, row.earnings_release_et)}${conf}</td>
-          <td>${sess}</td>
-          <td><span class="ticker">${row.ticker}</span><div class="strategy-hint">${row.company_name || ''}</div></td>
-          <td>${sectorCn}</td>
-          <td>${score}</td>
-          <td>${fmtDaysTo(row)}</td>
-          <td class="er-trade">${fmtDualTime(row.buy_window_bj, row.buy_window_et)}</td>
-          <td class="er-trade">${fmtDualTime(row.sell_window_bj, row.sell_window_et)}</td>
-          <td class="er-trade">${fmtDualTime(row.sell_deadline_bj, row.sell_deadline_et)}</td>
-          <td class="${row.push_status === 'pushed' ? 'pushed' : ''}">${fmtErPush(row)}</td>
-          <td>${row.eliminate_reason ? row.eliminate_reason : (row.one_liner || '—')}</td>
-        `;
-        tbody.appendChild(tr);
+
+      if (history.length) {
+        const toggle = document.createElement('tr');
+        toggle.className = 'er-history-toggle';
+        toggle.innerHTML = `
+          <td colspan="11">
+            <button type="button" class="er-hist-btn" onclick="toggleErHistory()" aria-expanded="false">
+              <span class="er-hist-chevron" id="erHistChevron">▶</span>
+              <span id="erHistLabel" data-count="${history.length}">展开历史日历（${history.length}）</span>
+            </button>
+          </td>`;
+        tbody.appendChild(toggle);
+        for (const row of history) {
+          tbody.appendChild(buildErRow(row, true));
+        }
       }
+
+      for (const row of upcoming) {
+        tbody.appendChild(buildErRow(row, false));
+      }
+      setErHistoryVisible(erHistoryExpanded && history.length > 0);
       loadStatus();
+    }
+
+    function fmtFirstDayBand(row) {
+      const b = row.first_day_band;
+      if (!b) return '<span class="fd-band fd-none">—</span>';
+      let cls = 'fd-none';
+      if (b === '高') cls = 'fd-high';
+      else if (b === '中高') cls = 'fd-midhigh';
+      else if (b === '中') cls = 'fd-mid';
+      else if (b === '低') cls = 'fd-low';
+      const anom = row.first_day_anomaly ? ' title="首日中/低：计入异常，供人工复核"' : '';
+      return `<span class="fd-band ${cls}"${anom}>${b}</span>`;
+    }
+
+    function fmtFirstDayScore(row) {
+      if (row.first_day_score == null) return '—';
+      return String(row.first_day_score);
+    }
+
+    function fmtFirstDayRet(row) {
+      const p = row.first_day_return_pct;
+      if (p == null) {
+        return `<span class="fd-ret" title="${row.first_day_note || '待回测'}">—</span>`;
+      }
+      const cls = p > 0 ? 'up' : (p < 0 ? 'down' : '');
+      const sign = p > 0 ? '+' : '';
+      const tip = row.first_day_session_date || row.first_day_note || '';
+      return `<span class="fd-ret ${cls}" title="${tip}">${sign}${Number(p).toFixed(1)}%</span>`;
     }
 
     async function loadStats() {
@@ -853,8 +1082,12 @@
       if (cat === 'all') {
         extra = ` · AI合作 ${data.ai_cooperation_total || 0} · 黄仁勋 ${data.nvda_signal_total || 0}`;
       }
-      document.getElementById('stats').textContent =
-        `筛选范围内：共 ${data.total} 条 · 已推送 ${data.pushed} 条${extra}` + (pairs ? ' · ' + pairs : '');
+      const anom = data.first_day_anomalies || 0;
+      document.getElementById('stats').innerHTML =
+        `筛选范围内：共 ${data.total} 条 · 已推送 ${data.pushed} 条${extra}` +
+        (pairs ? ' · ' + pairs : '') +
+        ` · 首日异常 <strong>${anom}</strong>` +
+        `<span class="help" title="受益方首日涨跌档为「中」或「低」的条数（档位标识不变）。规则：≥+3%高 · +1%~+3%中高 · ±1%中 · ≤-1%低。请定期人工复核。">?</span>`;
     }
 
     async function loadDeals() {
@@ -883,7 +1116,7 @@
       empty.style.display = 'none';
       for (const row of items) {
         const tr = document.createElement('tr');
-        tr.className = rowClass(row);
+        tr.className = rowClass(row) + (row.first_day_anomaly ? ' fd-anom' : '');
         const titleExtra = row.category === 'nvda_signal' && row.buy_window
           ? `<div class="strategy-hint">买: ${row.buy_window} · 卖: ${row.sell_window || ''}</div>`
           : '';
@@ -894,8 +1127,11 @@
           <td>${fmtAnchor(row)}</td>
           <td>${row.headline}${titleExtra}</td>
           <td class="score">${row.materiality_score}${row.confidence != null ? '<div class="strategy-hint">置信' + row.confidence + '</div>' : ''}</td>
+          <td>${fmtFirstDayBand(row)}</td>
+          <td class="score">${fmtFirstDayScore(row)}</td>
+          <td>${fmtFirstDayRet(row)}</td>
           <td>${fmtRelation(row)}</td>
-          <td class="${row.pushed ? 'pushed' : ''}">${row.pushed ? '✓' : (row.push_channel === 'stale' ? '过旧' : (row.push_channel === 'unconfigured' || row.push_channel === 'failed' || row.push_channel === 'none' ? '未送达' : '—'))}</td>
+          <td class="${row.pushed ? 'pushed' : ''}">${row.pushed ? '✓' : (row.push_channel === 'stale' ? '过旧' : (row.push_channel === 'soft_skip' ? '弱催化' : (row.push_channel === 'unconfigured' || row.push_channel === 'failed' || row.push_channel === 'none' ? '未送达' : '—')))}</td>
           <td>${fmtSource(row)}</td>
         `;
         tbody.appendChild(tr);
@@ -917,7 +1153,8 @@
         } else if (currentTab === 'earnings') {
           const res = await fetch('/api/earnings/run', { method: 'POST' });
           const data = await res.json();
-          alert(`财报日历刷新：候选 ${data.universe || 0} · 入库 ${data.upserted || 0} · 评分 ${data.scored || 0}`);
+          alert(`财报日历刷新：候选 ${data.universe || 0} · 入库 ${data.upserted || 0} · 评分 ${data.scored || 0}` +
+            (data.outcome ? ` · 对照 ${data.outcome.checked || 0}/异常 ${data.outcome.anomalies || 0}` : ''));
           await loadEarnings();
         } else {
           const res = await fetch('/api/deals/run', { method: 'POST' });

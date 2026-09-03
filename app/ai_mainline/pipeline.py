@@ -125,11 +125,12 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
         return _CACHE["data"]
 
     from app.database import SessionLocal
-    from app.heatmap import fetch_period_returns, get_quotes_for_symbols
+    from app.heatmap import fetch_period_returns
+    from app.market_data import fetch_quotes
 
     themes_cfg = enabled_themes()
     symbols = all_symbols()
-    quotes, source = await get_quotes_for_symbols(symbols)
+    quotes, source = await fetch_quotes(symbols)
     period = await fetch_period_returns(symbols)
 
     raw_themes = [theme_metrics(t, quotes, period) for t in themes_cfg]

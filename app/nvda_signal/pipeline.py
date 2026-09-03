@@ -27,7 +27,7 @@ from app.deal_monitor.entities import Entity, registry
 from app.deal_monitor.entity_resolver import is_channel_partner_entity, resolve_entity
 from app.deal_monitor.fetchers.pr_wire import RawItem
 from app.deal_monitor.market_cap import enrich_entity_tiers
-from app.deal_monitor.pipeline import normalize_headline
+from app.deal_monitor.pipeline import normalize_headline, _published_too_stale_for_ingest
 from app.nvda_signal.classifier import classify_signal
 from app.nvda_signal.config import ACTION_MIN_SCORE
 from app.nvda_signal.fetchers import fetch_all_nvda_items
@@ -334,6 +334,26 @@ async def run_pipeline() -> dict:
         seen = {r.source_url for r in db.query(NvdaSignalSeenUrl.source_url).all()}
         new_items = [i for i in items if i.source_url not in seen and not is_test_source_url(i.source_url)]
         summary["fetched_new"] = len(new_items)
+
+        stale_dropped = 0
+        eligible: list[RawItem] = []
+        for item in new_items:
+            if _published_too_stale_for_ingest(item.published_at):
+                stale_dropped += 1
+                db.merge(
+                    NvdaSignalSeenUrl(
+                        source_url=item.source_url,
+                        headline_hash=headline_hash(item.headline),
+                        seen_at=now_beijing(),
+                        relevant=False,
+                    )
+                )
+                continue
+            eligible.append(item)
+        if stale_dropped:
+            db.commit()
+            summary["stale_dropped"] = stale_dropped
+        new_items = eligible
 
         for item in new_items:
             try:

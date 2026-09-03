@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from app.earnings_monitor.config import EARNINGS_LOOKAHEAD_DAYS, FINNHUB_API_KEY
+from app.earnings_monitor.trade_window import today_bj
 
 logger = logging.getLogger(__name__)
 _ET = ZoneInfo("America/New_York")
@@ -26,8 +27,13 @@ class CalendarHit:
 
 
 def today_et() -> date:
+    """美东日历日（对接 Finnhub/Nasdaq 等美股源时可用）。"""
     return datetime.now(_ET).date()
 
+
+def _today_fetch_start() -> date:
+    """抓取起点：北京今天往前 1 天，避免漏掉跨日盘后日程。"""
+    return today_bj() - timedelta(days=1)
 
 def _parse_session(raw: str | None) -> str:
     s = (raw or "").strip().upper()
@@ -110,7 +116,7 @@ async def fetch_finnhub_calendar(
 ) -> list[CalendarHit]:
     if not FINNHUB_API_KEY:
         return []
-    start = from_date or today_et()
+    start = from_date or _today_fetch_start()
     end = to_date or (start + timedelta(days=EARNINGS_LOOKAHEAD_DAYS))
 
     # 先尝试批量区间（省配额）；429/失败再按标的
@@ -195,9 +201,9 @@ async def fetch_yahoo_next_earnings(ticker: str) -> CalendarHit | None:
             ed = _parse_date(ts if ts is not None else raw)
             if not ed:
                 return None
-            if ed < today_et():
+            if ed < _today_fetch_start():
                 return None
-            if ed > today_et() + timedelta(days=EARNINGS_LOOKAHEAD_DAYS):
+            if ed > today_bj() + timedelta(days=EARNINGS_LOOKAHEAD_DAYS + 1):
                 return None
             return CalendarHit(
                 ticker=ticker.upper(),
@@ -217,7 +223,7 @@ async def fetch_nasdaq_calendar(
     to_date: date | None = None,
 ) -> list[CalendarHit]:
     """Nasdaq 公开财报日历（按日）；Yahoo 403 时的稳定备选。"""
-    start = from_date or today_et()
+    start = from_date or _today_fetch_start()
     end = to_date or (start + timedelta(days=min(EARNINGS_LOOKAHEAD_DAYS, 60)))
     days: list[date] = []
     cur = start
@@ -306,7 +312,7 @@ async def fetch_calendar_for_universe(tickers: list[str]) -> list[CalendarHit]:
 
     best: dict[str, CalendarHit] = {}
     for h in hits:
-        if h.earnings_date < today_et():
+        if h.earnings_date < _today_fetch_start():
             continue
         prev = best.get(h.ticker)
         if not prev or h.earnings_date < prev.earnings_date:

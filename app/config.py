@@ -104,9 +104,22 @@ FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
 TICKDB_API_KEY = os.getenv("TICKDB_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+# 可选：逗号分隔多把 Gemini Key，429/配额时轮询（单 key 仍用 GEMINI_API_KEY）
+_GEMINI_EXTRA = [
+    k.strip()
+    for k in os.getenv("GEMINI_API_KEYS", "").split(",")
+    if k.strip()
+]
+GEMINI_API_KEYS = list(
+    dict.fromkeys(
+        ([GEMINI_API_KEY] if GEMINI_API_KEY else []) + _GEMINI_EXTRA
+    )
+)
 DEAL_USE_LLM = os.getenv("DEAL_USE_LLM", "true").lower() == "true"
 DEAL_LLM_MODEL = os.getenv("DEAL_LLM_MODEL", "gemini-3.6-flash")
-# 发稿超过 N 天：仍入库观察，但不推送（防 IR RSS 历史稿误推）
+# 发稿超过 N 天：不入库（消 IR/聚合器历史稿造成的假 lag）；0=关闭
+DEAL_INGEST_MAX_AGE_DAYS = int(os.getenv("DEAL_INGEST_MAX_AGE_DAYS", "3"))
+# 发稿超过 N 天：若已入库则不推送（兜底；正常应由 INGEST 先行丢弃）
 DEAL_PUSH_MAX_AGE_DAYS = int(os.getenv("DEAL_PUSH_MAX_AGE_DAYS", "3"))
 
 # ── 黄仁勋 / NVDA A 档产业动作监控 ──
@@ -142,6 +155,13 @@ EARNINGS_CALENDAR_SOURCE = os.getenv("EARNINGS_CALENDAR_SOURCE", "finnhub")
 EARNINGS_STRATEGY = os.getenv("EARNINGS_STRATEGY", "POST_ER_BUY_WITHIN_2D")
 EARNINGS_HOLD_TRADING_DAYS_MAX = int(os.getenv("EARNINGS_HOLD_TRADING_DAYS_MAX", "2"))
 EARNINGS_CHASE_GAP_PCT_BLOCK = float(os.getenv("EARNINGS_CHASE_GAP_PCT_BLOCK", "15"))
+# 已废弃：不再用 $150B 硬淘汰；大市值 AI 硬件（如 DELL）可评分推送
+# EARNINGS_MAX_CAP_USD 保留读取以免旧环境报错，评分逻辑已忽略
+EARNINGS_MAX_CAP_USD = float(os.getenv("EARNINGS_MAX_CAP_USD", "999999999999"))
+# 财报后涨跌 vs 评分：异常监控（供网站「异常区」与后续改机制）
+EARNINGS_OUTCOME_LOOKBACK_DAYS = int(os.getenv("EARNINGS_OUTCOME_LOOKBACK_DAYS", "14"))
+EARNINGS_OUTCOME_FALSE_POS_PCT = float(os.getenv("EARNINGS_OUTCOME_FALSE_POS_PCT", "5"))
+EARNINGS_OUTCOME_FALSE_NEG_PCT = float(os.getenv("EARNINGS_OUTCOME_FALSE_NEG_PCT", "8"))
 
 # ── AI 主线（子板块相对强弱）──
 AI_MAINLINE_ENABLED = os.getenv("AI_MAINLINE_ENABLED", "true").lower() == "true"

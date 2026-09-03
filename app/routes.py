@@ -241,8 +241,30 @@ def _push_ok(event) -> bool:
         event.pushed_at
         and event.push_channel
         and event.push_channel
-        not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale"}
+        not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip"}
     )
+
+
+def _first_day_fields(event) -> dict:
+    ret = getattr(event, "first_day_return", None)
+    return {
+        "first_day_return": ret,
+        "first_day_return_pct": None if ret is None else round(ret * 100.0, 2),
+        "first_day_band": getattr(event, "first_day_band", None),
+        "first_day_score": getattr(event, "first_day_score", None),
+        "first_day_session_date": (
+            event.first_day_session_date.isoformat()
+            if getattr(event, "first_day_session_date", None)
+            else None
+        ),
+        "first_day_anomaly": bool(getattr(event, "first_day_anomaly", False)),
+        "first_day_note": getattr(event, "first_day_note", None),
+        "first_day_checked_at": (
+            event.first_day_checked_at.isoformat()
+            if getattr(event, "first_day_checked_at", None)
+            else None
+        ),
+    }
 
 
 def _deal_to_dict(event) -> dict:
@@ -285,6 +307,7 @@ def _deal_to_dict(event) -> dict:
         "sell_window": None,
         "buy_ok": None,
         "confidence": None,
+        **_first_day_fields(event),
     }
 
 
@@ -332,17 +355,18 @@ def _nvda_to_dict(event) -> dict:
         "chase_risk": event.chase_risk,
         "prior_a_days_ago": event.prior_a_days_ago,
         "strategy_label": strategy_label(event.strategy),
+        **_first_day_fields(event),
     }
 
 
 _PUSH_OK_EXCLUDE = frozenset(
-    {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale"}
+    {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip"}
 )
 
 
 @router.get("/deals")
 def list_deals(
-    days: int = Query(default=7, ge=1, le=90),
+    days: int = Query(default=7, ge=1, le=365),
     category: str = Query(default="all"),
     tier_pair: str | None = Query(default=None),
     signal_tier: str | None = Query(default=None),
@@ -402,7 +426,7 @@ def list_deals(
 
 @router.get("/deals/stats")
 def deals_stats(
-    days: int = Query(default=7, ge=1, le=90),
+    days: int = Query(default=7, ge=1, le=365),
     category: str = Query(default="all"),
 ):
     from app.database import DealEvent, NvdaSignalEvent
@@ -413,6 +437,8 @@ def deals_stats(
     def _query(db: Session):
         ai_total = ai_pushed = 0
         nvda_total = nvda_pushed = 0
+        ai_anom = nvda_anom = 0
+        ai_fd_checked = nvda_fd_checked = 0
         by_tier_pair: dict[str, int] = {}
 
         if category in ("all", FEED_AI):
@@ -425,6 +451,8 @@ def deals_stats(
                 e for e in ai_rows
                 if e.pushed_at and e.push_channel and e.push_channel not in _PUSH_OK_EXCLUDE
             ])
+            ai_anom = len([e for e in ai_rows if e.first_day_anomaly])
+            ai_fd_checked = len([e for e in ai_rows if e.first_day_checked_at])
             by_tier_pair = {}
             for e in ai_rows:
                 by_tier_pair[e.tier_pair] = by_tier_pair.get(e.tier_pair, 0) + 1
@@ -442,6 +470,8 @@ def deals_stats(
                 if e.pushed_at and e.push_channel
                 and e.push_channel not in _PUSH_OK_EXCLUDE
             ])
+            nvda_anom = len([e for e in nvda_rows if e.first_day_anomaly])
+            nvda_fd_checked = len([e for e in nvda_rows if e.first_day_checked_at])
 
         return {
             "days": days,
@@ -453,6 +483,8 @@ def deals_stats(
             "nvda_signal_total": nvda_total,
             "nvda_signal_pushed": nvda_pushed,
             "by_tier_pair": by_tier_pair,
+            "first_day_anomalies": ai_anom + nvda_anom,
+            "first_day_checked": ai_fd_checked + nvda_fd_checked,
         }
 
     return run_with_db_retry(_query)
@@ -479,19 +511,38 @@ def get_deal(deal_id: int, category: str = Query(default=FEED_AI)):
 
 @router.post("/deals/run")
 async def run_deals(token: str = Query(default="")):
+    import asyncio
+
     from app.config import DEAL_ADMIN_TOKEN
+    from app.deal_monitor.first_day import run_first_day_check
     from app.deal_monitor.pipeline import run_pipeline as run_deal_pipeline
     from app.nvda_signal.pipeline import run_pipeline as run_nvda_pipeline
 
     if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="无效 token")
-    deal_result = await run_deal_pipeline()
-    nvda_result = await run_nvda_pipeline()
+    deal_result, nvda_result = await asyncio.gather(run_deal_pipeline(), run_nvda_pipeline())
+    first_day = await run_first_day_check(lookback_days=90)
     return {
         **deal_result,
         "nvda_signal": nvda_result,
+        "first_day": first_day,
         "saved": (deal_result.get("saved") or 0) + (nvda_result.get("saved") or 0),
     }
+
+
+@router.post("/deals/first-day-check")
+async def deals_first_day_check(
+    token: str = Query(default=""),
+    days: int = Query(default=90, ge=1, le=365),
+    force: bool = Query(default=False),
+):
+    """手动回填受益方首日涨跌档位。"""
+    from app.config import DEAL_ADMIN_TOKEN
+    from app.deal_monitor.first_day import run_first_day_check
+
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+    return await run_first_day_check(lookback_days=days, force=force)
 
 
 # ── 小公司财报日历 ──
@@ -500,6 +551,8 @@ async def run_deals(token: str = Query(default="")):
 @router.get("/earnings")
 def list_earnings(
     days: int = Query(default=90, ge=1, le=180),
+    history_days: int = Query(default=90, ge=0, le=365),
+    include_history: bool = Query(default=True),
     min_score: int = Query(default=0, ge=0, le=100),
     sector: str | None = Query(default=None),
     push_eligible: bool | None = Query(default=None),
@@ -509,21 +562,18 @@ def list_earnings(
     from datetime import timedelta
 
     from app.database import EarningsEvent
-    from app.earnings_monitor.calendar_fetch import today_et
-    from app.earnings_monitor.pipeline import event_to_dict
+    from app.earnings_monitor.pipeline import days_to_earnings, event_to_dict
+    from app.earnings_monitor.trade_window import is_release_past_bj, today_bj
 
-    today = today_et()
+    # 全站以北京时间为主：待发/历史按「财报揭晓北京时刻」是否已过切分
+    today = today_bj()
     until = today + timedelta(days=days)
+    history_from = today - timedelta(days=history_days) if history_days else today
+    # earnings_date 为美股日历日，边界多取 1 天再按北京揭晓时刻细分
+    fetch_from = history_from - timedelta(days=1)
+    fetch_until = until + timedelta(days=1)
 
-    def _query(db: Session):
-        q = db.query(EarningsEvent).filter(
-            EarningsEvent.earnings_date >= today,
-            EarningsEvent.earnings_date <= until,
-        )
-        if status == "upcoming":
-            q = q.filter(EarningsEvent.status.in_(["upcoming", "pushed"]))
-        elif status:
-            q = q.filter(EarningsEvent.status == status)
+    def _apply_filters(q):
         if sector:
             q = q.filter(EarningsEvent.sector == sector.upper())
         if push_eligible is not None:
@@ -535,67 +585,208 @@ def list_earnings(
                     EarningsEvent.score_total >= min_score,
                 )
             )
-        rows = q.order_by(EarningsEvent.earnings_date.asc(), EarningsEvent.score_total.desc()).limit(limit).all()
-        # 同日得分降序：SQLAlchemy nulls last 因方言差异，再排一次
-        out = [event_to_dict(r) for r in rows]
-        out.sort(
+        return q
+
+    def _sort_upcoming(rows: list[dict]) -> list[dict]:
+        rows.sort(
             key=lambda x: (
                 x.get("earnings_date") or "",
                 -(x.get("score_total") if x.get("score_total") is not None else -1),
             )
         )
-        return out
+        return rows
+
+    def _sort_history(rows: list[dict]) -> list[dict]:
+        rows.sort(
+            key=lambda x: -(
+                x.get("score_total") if x.get("score_total") is not None else -1
+            )
+        )
+        rows.sort(key=lambda x: x.get("earnings_date") or "", reverse=True)
+        return rows
+
+    def _query(db: Session):
+        q = db.query(EarningsEvent).filter(
+            EarningsEvent.earnings_date >= fetch_from,
+            EarningsEvent.earnings_date <= fetch_until,
+        )
+        q = _apply_filters(q)
+        all_rows = q.order_by(
+            EarningsEvent.earnings_date.asc(), EarningsEvent.score_total.desc()
+        ).limit(limit * 2).all()
+
+        upcoming: list[dict] = []
+        history: list[dict] = []
+        for r in all_rows:
+            past = is_release_past_bj(r.earnings_date, r.session or "TBD")
+            d_to = days_to_earnings(r.earnings_date, today, r.session or "TBD")
+            if not past:
+                if d_to > days:
+                    continue
+                if status == "upcoming" and r.status not in ("upcoming", "pushed"):
+                    continue
+                if status and status != "upcoming" and r.status != status:
+                    continue
+                upcoming.append(event_to_dict(r))
+            elif include_history and history_days > 0:
+                if d_to < -history_days:
+                    continue
+                if r.status not in ("archived", "pushed", "upcoming", "rescheduled"):
+                    continue
+                history.append(event_to_dict(r))
+
+        return {
+            "upcoming": _sort_upcoming(upcoming)[:limit],
+            "history": _sort_history(history)[:limit],
+        }
 
     return run_with_db_retry(_query)
 
 
 @router.get("/earnings/stats")
-def earnings_stats(days: int = Query(default=90, ge=1, le=180)):
+def earnings_stats(
+    days: int = Query(default=90, ge=1, le=180),
+    history_days: int = Query(default=90, ge=0, le=365),
+):
     from datetime import timedelta
 
     from app.database import EarningsEvent, EarningsPushBatch
-    from app.earnings_monitor.calendar_fetch import today_et
     from app.earnings_monitor.config import EARNINGS_PUSH_DAYS_BEFORE, EARNINGS_PUSH_MIN_SCORE
     from app.earnings_monitor.pipeline import days_to_earnings
-    from app.earnings_monitor.trade_window import today_bj
+    from app.earnings_monitor.trade_window import is_release_past_bj, today_bj
 
     today = today_bj()
     until = today + timedelta(days=days)
+    history_from = today - timedelta(days=history_days) if history_days else today
+    fetch_from = history_from - timedelta(days=1)
+    fetch_until = until + timedelta(days=1)
 
     def _query(db: Session):
         rows = (
             db.query(EarningsEvent)
             .filter(
-                EarningsEvent.earnings_date >= today,
-                EarningsEvent.earnings_date <= until,
-                EarningsEvent.status.in_(["upcoming", "pushed"]),
+                EarningsEvent.earnings_date >= fetch_from,
+                EarningsEvent.earnings_date <= fetch_until,
+                EarningsEvent.status.in_(
+                    ["upcoming", "pushed", "archived", "rescheduled"]
+                ),
             )
             .all()
         )
-        upcoming = len(rows)
+        upcoming_rows = []
+        history_n = 0
+        for e in rows:
+            past = is_release_past_bj(e.earnings_date, e.session or "TBD")
+            d_to = days_to_earnings(e.earnings_date, today, e.session or "TBD")
+            if not past:
+                if d_to > days:
+                    continue
+                if e.status not in ("upcoming", "pushed"):
+                    continue
+                upcoming_rows.append(e)
+            elif history_days > 0 and d_to >= -history_days:
+                history_n += 1
+
+        upcoming = len(upcoming_rows)
         t2 = sum(
             1
-            for e in rows
+            for e in upcoming_rows
             if days_to_earnings(e.earnings_date, today, e.session or "TBD")
             == EARNINGS_PUSH_DAYS_BEFORE
             and e.push_eligible
             and (e.score_total or 0) >= EARNINGS_PUSH_MIN_SCORE
         )
-        pushed = sum(1 for e in rows if e.pushed_at and e.push_channel not in {"failed", "unconfigured", "too_early", "eliminated", "below_score", "disabled"})
+        pushed = sum(
+            1
+            for e in upcoming_rows
+            if e.pushed_at
+            and e.push_channel
+            not in {
+                "failed",
+                "unconfigured",
+                "too_early",
+                "eliminated",
+                "below_score",
+                "disabled",
+            }
+        )
         batches = (
             db.query(EarningsPushBatch)
-            .filter(EarningsPushBatch.pushed_at >= now_beijing() - timedelta(days=30))
+            .filter(
+                EarningsPushBatch.pushed_at >= now_beijing() - timedelta(days=30),
+                EarningsPushBatch.success.is_(True),
+            )
+            .count()
+        )
+        anomalies = (
+            db.query(EarningsEvent)
+            .filter(
+                EarningsEvent.earnings_date >= fetch_from,
+                EarningsEvent.earnings_date <= fetch_until,
+                EarningsEvent.outcome_anomaly.isnot(None),
+                EarningsEvent.outcome_anomaly != "",
+            )
             .count()
         )
         return {
             "days": days,
+            "history_days": history_days,
             "upcoming": upcoming,
+            "history": history_n,
             "t2_due": t2,
             "pushed": pushed,
             "batches_30d": batches,
+            "anomalies": anomalies,
         }
 
     return run_with_db_retry(_query)
+
+
+@router.get("/earnings/anomalies")
+def list_earnings_anomalies(
+    days: int = Query(default=14, ge=1, le=90),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """评分 vs 财报后涨跌对不上的异常列表（网站异常区）。"""
+    from datetime import timedelta
+
+    from app.database import EarningsEvent
+    from app.earnings_monitor.outcome import anomaly_to_dict
+    from app.earnings_monitor.trade_window import today_bj
+
+    today = today_bj()
+    since = today - timedelta(days=days + 1)
+
+    def _query(db: Session):
+        rows = (
+            db.query(EarningsEvent)
+            .filter(
+                EarningsEvent.earnings_date >= since,
+                EarningsEvent.outcome_anomaly.isnot(None),
+                EarningsEvent.outcome_anomaly != "",
+            )
+            .order_by(EarningsEvent.earnings_date.desc(), EarningsEvent.ticker.asc())
+            .limit(limit)
+            .all()
+        )
+        return {
+            "days": days,
+            "count": len(rows),
+            "items": [anomaly_to_dict(e) for e in rows],
+        }
+
+    return run_with_db_retry(_query)
+
+
+@router.post("/earnings/outcome-check")
+async def earnings_outcome_check(token: str = Query(default="")):
+    """手动触发：回填已发财报涨跌并刷新异常标记。"""
+    from app.config import DEAL_ADMIN_TOKEN
+    from app.earnings_monitor.outcome import run_outcome_check
+
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+    return await run_outcome_check()
 
 
 @router.get("/earnings/{event_id}")

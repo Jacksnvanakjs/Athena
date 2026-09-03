@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 
 import httpx
 
-from app.deal_monitor.fetchers.google_news import fetch_google_news
 from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
 from app.nvda_signal.config import GOOGLE_NEWS_NVDA_QUERIES, NVDA_CIK, NVDA_NEWSROOM_RSS
@@ -56,10 +56,13 @@ async def fetch_nvda_google_news() -> list[RawItem]:
 
 
 async def fetch_all_nvda_items() -> list[RawItem]:
-    pr = _filter_nvda(await fetch_pr_wires())
-    newsroom = await fetch_nvidia_newsroom()
-    sec = await fetch_nvda_sec_8k()
-    google = await fetch_nvda_google_news()
+    pr_raw, newsroom, sec, google = await asyncio.gather(
+        fetch_pr_wires(),
+        fetch_nvidia_newsroom(),
+        fetch_nvda_sec_8k(),
+        fetch_nvda_google_news(),
+    )
+    pr = _filter_nvda(pr_raw)
 
     merged: list[RawItem] = []
     seen: set[str] = set()

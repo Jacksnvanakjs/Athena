@@ -44,7 +44,15 @@
     {"names": ["Adobe", "Adobe Inc"], "ticker": "ADBE"},
     {"names": ["Snowflake"], "ticker": "SNOW"},
     {"names": ["Palantir"], "ticker": "PLTR"},
-    {"names": ["CrowdStrike", "CrowdStrike Holdings"], "ticker": "CRWD"}
+    {"names": ["CrowdStrike", "CrowdStrike Holdings"], "ticker": "CRWD"},
+    {"names": ["Fervo Energy", "Fervo"], "ticker": "FRVO"},
+    {"names": ["Eos Energy", "Eos Energy Enterprises"], "ticker": "EOSE"},
+    {"names": ["Bloom Energy"], "ticker": "BE"},
+    {"names": ["Fluence Energy", "Fluence"], "ticker": "FLNC"},
+    {"names": ["Constellation Energy"], "ticker": "CEG"},
+    {"names": ["Vistra"], "ticker": "VST"},
+    {"names": ["Talen Energy", "Talen"], "ticker": "TLN"},
+    {"names": ["GE Vernova"], "ticker": "GEV"}
   ],
   "unlisted_anchors": [
     {"names": ["OpenAI", "Open AI"], "id": "openai"},

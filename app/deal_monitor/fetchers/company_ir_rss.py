@@ -14,10 +14,10 @@ from app.deal_monitor.fetchers.pr_wire import RawItem, _parse_rss
 
 logger = logging.getLogger(__name__)
 
-# 与 Finnhub 粗筛一致，控制进 LLM 的条数
+# 与 Finnhub/BW 粗筛一致，控制进 LLM 的条数（含 \bai\b / nvidia，避免漏 EQIX Inference 等稿）
 _PREFILTER = re.compile(
-    r"(anthropic|openai|claude|gpt|xai|agentforce|ai\s*agent|agentic|"
-    r"large\s*language\s*model|\bllm\b|generative\s*ai|copilot|"
+    r"(anthropic|openai|claude|gpt|xai|nvidia|agentforce|ai\s*agent|agentic|"
+    r"\bai\b|inference|large\s*language\s*model|\bllm\b|generative\s*ai|copilot|"
     r"partnership|collaboration|integration|plugin|"
     r"data\s*center|gpu|custom\s*semiconductor|hyperscale|"
     r"算力|数据中心|人工智能|strategic)",

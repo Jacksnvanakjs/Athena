@@ -23,22 +23,26 @@ def build_earnings_batch_push(
 ) -> tuple[str, str]:
     """events 已按 score 降序。"""
     n = len(events)
-    mmdd = earnings_date.strftime("%m-%d")
+    sample = events[0]
+    tw0 = compute_trade_window(sample.earnings_date, sample.session or "TBD")
+    # 标题/导语用北京揭晓时刻为主，美东日期仅旁注
+    mmdd_bj = (tw0.earnings_release_bj or "")[:5] or earnings_date.strftime("%m-%d")
     if n == 1:
         e = events[0]
         title = (
-            f"【小公司财报 T-2】{e.ticker} {mmdd} "
-            f"{e.session} 得分 {e.score_total or '—'}"
+            f"【AI财报 T-2】{e.ticker} {mmdd_bj}北京 "
+            f"{session_label(e.session)} 得分 {e.score_total or '—'}"
         )
     else:
         tickers = " / ".join(e.ticker for e in events[:6])
         more = f" 等{n}家" if n > 6 else ""
-        title = f"【小公司财报 T-2】{mmdd} 共 {n} 家：{tickers}{more}"
+        title = f"【AI财报 T-2】{mmdd_bj}北京 共 {n} 家：{tickers}{more}"
 
     lines = [
-        "【小公司财报提醒】",
+        "【AI财报提醒】",
         "",
-        f"以下公司预计美东 {earnings_date.isoformat()} 发布财报（提前 2 天提醒）。",
+        f"以下公司预计北京 {tw0.earnings_release_bj} 前后发布财报"
+        f"（美东日历日 {earnings_date.isoformat()}，提前 2 天提醒）。",
         "策略：财报发布后买，约 2 个交易日内卖完；财报前勿埋伏。",
         "说明：非投资建议；beat 不代表必涨；跳空≥15%不追。",
         "",
@@ -52,10 +56,10 @@ def build_earnings_batch_push(
         one = _localize_one_liner(e.one_liner)
         if one:
             lines.append(f"理由：{one}")
-        lines.append(f"买入：{tw.buy_window_bj} 北京（{tw.buy_window_et} 美东）")
-        lines.append(f"卖出首选：{tw.sell_window_bj} 北京（{tw.sell_window_et} 美东）")
+        lines.append(f"买入：{tw.buy_window_bj} 北京 · {tw.buy_window_et} 美东")
+        lines.append(f"卖出首选：{tw.sell_window_bj} 北京 · {tw.sell_window_et} 美东")
         lines.append(
-            f"卖出最晚：{tw.sell_deadline_bj} 北京（{tw.sell_deadline_et} 美东）"
+            f"卖出最晚：{tw.sell_deadline_bj} 北京 · {tw.sell_deadline_et} 美东"
         )
         if e.risk_oneliner:
             lines.append(f"风险：{e.risk_oneliner}")

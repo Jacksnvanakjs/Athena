@@ -281,10 +281,10 @@ THEMES: list[dict[str, Any]] = [
 ]
 
 
-# 收盘快照入库时刻说明（PERIODS「每日」等均指该时刻的美东交易日收盘数据）
+# 收盘快照入库时刻说明（PERIODS「每日」等均指该时刻对应交易日的收盘数据）
 SNAPSHOT_TIME_DESC = (
-    "美东每个交易日 16:30 自动入库"
-    "（北京次日凌晨 04:30 冬令时 / 05:30 夏令时）"
+    "北京次日凌晨 04:30（冬令时）/ 05:30（夏令时）自动入库"
+    "（对应美东收盘 16:30）"
 )
 
 
@@ -298,9 +298,9 @@ PERIODS: dict[str, dict[str, Any]] = {
         "rank_label": "当日",
         "min_snapshots": 1,
         "desc": (
-            "最近一个美东交易日的收盘快照。"
+            "最近一个美股交易日的收盘快照。"
             f"入库时间：{SNAPSHOT_TIME_DESC}。"
-            "涨跌幅 = 相对上一美股交易日收盘价；成交额 = 该日全日成交量；非实时。"
+            "涨跌幅 = 相对上一交易日收盘价；成交额 = 该日全日成交量；非实时。"
         ),
     },
     "1w": {
@@ -309,7 +309,7 @@ PERIODS: dict[str, dict[str, Any]] = {
         "rank_label": "本周",
         "min_snapshots": 5,
         "desc": (
-            "累计最近约 7 个自然日内、各美东交易日的收盘快照"
+            "累计最近约 7 个自然日内、各美股交易日的收盘快照"
             "（至少需 5 个交易日；缺日则等补齐）。"
             f"每条快照均为{SNAPSHOT_TIME_DESC}。"
         ),
@@ -320,7 +320,7 @@ PERIODS: dict[str, dict[str, Any]] = {
         "rank_label": "半月",
         "min_snapshots": 10,
         "desc": (
-            "累计最近约 15 个自然日内、各美东交易日的收盘快照（至少需 10 个交易日）。"
+            "累计最近约 15 个自然日内、各美股交易日的收盘快照（至少需 10 个交易日）。"
             f"每条快照均为{SNAPSHOT_TIME_DESC}。"
         ),
     },
@@ -330,7 +330,7 @@ PERIODS: dict[str, dict[str, Any]] = {
         "rank_label": "本月",
         "min_snapshots": 20,
         "desc": (
-            "累计最近约 30 个自然日内、各美东交易日的收盘快照（至少需 20 个交易日）。"
+            "累计最近约 30 个自然日内、各美股交易日的收盘快照（至少需 20 个交易日）。"
             f"每条快照均为{SNAPSHOT_TIME_DESC}。"
         ),
     },
@@ -340,7 +340,7 @@ PERIODS: dict[str, dict[str, Any]] = {
         "rank_label": "近两月",
         "min_snapshots": 40,
         "desc": (
-            "累计最近约 60 个自然日内、各美东交易日的收盘快照（至少需 40 个交易日）。"
+            "累计最近约 60 个自然日内、各美股交易日的收盘快照（至少需 40 个交易日）。"
             f"每条快照均为{SNAPSHOT_TIME_DESC}。"
         ),
     },
@@ -350,7 +350,7 @@ PERIODS: dict[str, dict[str, Any]] = {
         "rank_label": "近三月",
         "min_snapshots": 55,
         "desc": (
-            "累计最近约 90 个自然日内、各美东交易日的收盘快照（至少需 55 个交易日）。"
+            "累计最近约 90 个自然日内、各美股交易日的收盘快照（至少需 55 个交易日）。"
             f"每条快照均为{SNAPSHOT_TIME_DESC}。"
         ),
     },
@@ -491,7 +491,7 @@ def _us_market_session(now_et: datetime | None = None) -> dict[str, str]:
     return {
         "session": "overnight",
         "session_label": "隔夜休市",
-        "data_freshness": "隔夜休市，价格停在昨盘后；开盘前（美东04:00起）才会继续变动",
+        "data_freshness": "隔夜休市，价格停在昨盘后；开盘前（北京约16:00/17:00起，对应美东04:00）才会继续变动",
         "change_pct_basis": "涨跌幅停在昨盘后",
     }
 
@@ -1108,33 +1108,72 @@ def _symbol_from_tickdb(code: str) -> str:
 
 
 def _parse_tickdb_ticker(item: dict[str, Any], symbol: str) -> dict[str, Any] | None:
-    price = _to_float(item.get("last_price") or item.get("price") or item.get("last"))
+    """解析 TickDB ticker；盘后/盘前优先用 extended quote（AMC 财报当晚关键）。"""
+    reg_price = _to_float(item.get("last_price") or item.get("price") or item.get("last"))
+    post = item.get("post_market_quote") or {}
+    pre = item.get("pre_market_quote") or {}
+    post_px = _to_float(post.get("last_done") or post.get("last_price") or post.get("price"))
+    pre_px = _to_float(pre.get("last_done") or pre.get("last_price") or pre.get("price"))
+    reg_ts = item.get("timestamp")
+    post_ts = post.get("timestamp")
+    pre_ts = pre.get("timestamp")
+
+    price = reg_price
+    volume = _to_float(item.get("volume_24h") or item.get("volume")) or 0.0
+    quote_ts = reg_ts
+    session_tag = "REGULAR"
+
+    # 盘后价时间戳 ≥ 常规收盘 → 用盘后（隔夜仍保留财报反应）
+    if (
+        post_px is not None
+        and post_ts is not None
+        and (reg_ts is None or int(post_ts) >= int(reg_ts))
+    ):
+        price = post_px
+        quote_ts = post_ts
+        session_tag = "POST"
+        volume = _to_float(post.get("volume")) or volume
+    elif (
+        pre_px is not None
+        and pre_ts is not None
+        and (reg_ts is None or int(pre_ts) >= int(reg_ts))
+    ):
+        price = pre_px
+        quote_ts = pre_ts
+        session_tag = "PRE"
+        volume = _to_float(pre.get("volume")) or volume
+
     if price is None:
         return None
+
     change_pct = _to_float(
         item.get("price_change_percent_24h")
         or item.get("change_percent")
         or item.get("change_pct")
     )
-    if change_pct is None:
+    prev = _to_float(item.get("prev_close") or item.get("previous_close"))
+    if session_tag in ("POST", "PRE") and prev and prev > 0:
+        change_pct = round((price - prev) / prev * 100, 2)
+    elif change_pct is None:
         change = _to_float(item.get("price_change_24h") or item.get("change"))
         if change is not None and price:
             base = price - change
             change_pct = (change / base * 100) if base else 0.0
+        elif prev and prev > 0:
+            change_pct = round((price - prev) / prev * 100, 2)
         else:
             change_pct = 0.0
-    volume = _to_float(item.get("volume_24h") or item.get("volume")) or 0.0
+
     quote_time = None
     quote_time_et = None
-    ts = item.get("timestamp")
-    if ts:
+    if quote_ts:
         try:
-            dt = datetime.fromtimestamp(int(ts) / 1000, tz=_US_TZ)
+            dt = datetime.fromtimestamp(int(quote_ts) / 1000, tz=_US_TZ)
             quote_time_et = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
             quote_time = dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
         except (TypeError, ValueError, OSError):
             pass
-    return _quote_row(
+    row = _quote_row(
         symbol,
         name=str(item.get("name") or symbol),
         price=price,
@@ -1143,6 +1182,9 @@ def _parse_tickdb_ticker(item: dict[str, Any], symbol: str) -> dict[str, Any] | 
         quote_time=quote_time,
         quote_time_et=quote_time_et,
     )
+    if row is not None:
+        row["session"] = session_tag
+    return row
 
 
 async def _fetch_tickdb(symbols: list[str]) -> dict[str, dict[str, Any]]:
@@ -1324,7 +1366,7 @@ async def get_quotes_for_symbols(symbols: list[str]) -> tuple[dict[str, dict[str
 async def fetch_period_returns(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
-    """近 5/20 交易日累计涨跌（%）。优先 HeatmapSnapshot 收盘价，不足则 Yahoo chart。"""
+    """近 5/20 交易日累计涨跌（%）。快照 → Yahoo → 全站多源日线。"""
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     out: dict[str, dict[str, float | None]] = {
         s: {"ret_5d": None, "ret_20d": None} for s in uniq
@@ -1349,6 +1391,40 @@ async def fetch_period_returns(
                 cur["ret_5d"] = vals["ret_5d"]
             if cur.get("ret_20d") is None and vals.get("ret_20d") is not None:
                 cur["ret_20d"] = vals["ret_20d"]
+
+    still = [
+        s
+        for s in uniq
+        if out[s].get("ret_5d") is None or out[s].get("ret_20d") is None
+    ]
+    if still:
+        from_multi = await _period_returns_from_daily_closes(still)
+        for sym, vals in from_multi.items():
+            cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
+            if cur.get("ret_5d") is None and vals.get("ret_5d") is not None:
+                cur["ret_5d"] = vals["ret_5d"]
+            if cur.get("ret_20d") is None and vals.get("ret_20d") is not None:
+                cur["ret_20d"] = vals["ret_20d"]
+    return out
+
+
+async def _period_returns_from_daily_closes(
+    symbols: list[str],
+) -> dict[str, dict[str, float | None]]:
+    """快照/Yahoo 不足时，走全站多源日线再算 5d/20d。"""
+    from app.market_data import fetch_daily_closes
+
+    out: dict[str, dict[str, float | None]] = {}
+    for sym in symbols:
+        try:
+            rows = await fetch_daily_closes(sym, lookback_days=60)
+        except Exception:
+            continue
+        closes = [c for _, c in rows]
+        out[sym] = {
+            "ret_5d": _period_ret_from_closes(closes, 5),
+            "ret_20d": _period_ret_from_closes(closes, 20),
+        }
     return out
 
 
@@ -1605,7 +1681,7 @@ async def _build_heatmap() -> dict[str, Any]:
     note = (
         f"数据源 {source}（板块 {sector_hits}/{total_sector}，合计 {quote_count}/{len(symbols)} 只）。"
         "「实时」= 当前刷新行情，排行随盘前/盘中/盘后变化；"
-        "「今日」= 当前美东交易日，收盘快照在美东 16:30 后入库用于周期统计。"
+        "「今日」= 当前美股交易日；收盘快照在北京次日凌晨入库（对应美东 16:30）用于周期统计。"
         "本站% = 占监控样本（约11个主要板块+龙头股）的资金活跃度比重，"
         "非真实 Level2 资金流；红流入绿流出。"
         "主题涨跌幅 = 有代表性 ETF 的主题优先使用 ETF 实时价格，其余为成分股等权平均。"
@@ -1920,7 +1996,7 @@ def get_period_stats(period: str = "1w") -> dict[str, Any]:
         empty["note"] = (
             f"「{label}」数据还不足：该周期至少需要 {min_snapshots} 个交易日快照，"
             f"当前只有 {snapshot_count} 天"
-            + (f"（最新美东交易日 {latest_trade_date}）" if latest_trade_date else "")
+            + (f"（最新交易日 {latest_trade_date}）" if latest_trade_date else "")
             + "。可先查看「每日」或「实时行情」；"
             f"请继续每日在{SNAPSHOT_TIME_DESC}后自动积累，或手动存快照。"
         )

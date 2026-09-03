@@ -1,4 +1,4 @@
-"""加载 earnings_universe.json + 市值过滤（踢出 T0）。"""
+"""加载 earnings_universe.json + 市值分档（全量监控入库）。"""
 
 from __future__ import annotations
 
@@ -8,10 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.deal_monitor.tiers import classify_tier
-from app.earnings_monitor.config import (
-    DEAL_T0_MIN_CAP,
-    UNIVERSE_CANDIDATES,
-)
+from app.earnings_monitor.config import UNIVERSE_CANDIDATES
 
 logger = logging.getLogger(__name__)
 
@@ -38,10 +35,12 @@ def load_universe() -> list[UniverseTicker]:
     data = json.loads(path.read_text(encoding="utf-8"))
     rows = data.get("tickers") or []
     out: list[UniverseTicker] = []
+    seen: set[str] = set()
     for item in rows:
         ticker = str(item.get("ticker") or "").strip().upper()
-        if not ticker:
+        if not ticker or ticker in seen:
             continue
+        seen.add(ticker)
         out.append(
             UniverseTicker(
                 ticker=ticker,
@@ -56,18 +55,16 @@ def filter_by_market_cap(
     items: list[UniverseTicker],
     caps: dict[str, float | None],
 ) -> list[tuple[UniverseTicker, str, float | None]]:
-    """返回 (item, tier, cap)；排除 T0 / UNKNOWN。"""
+    """全量保留进日历监控；T0/大市值只标档位，推送由评分硬淘汰。"""
     kept: list[tuple[UniverseTicker, str, float | None]] = []
     for item in items:
         cap = caps.get(item.ticker)
         tier = classify_tier(cap, ticker=item.ticker)
-        if tier == "T0" or (cap is not None and cap >= DEAL_T0_MIN_CAP):
-            logger.info("财报池踢出 T0: %s cap=%s", item.ticker, cap)
-            continue
         if tier == "UNKNOWN" and cap is None:
-            # 暂无市值：仍入库，tier 标 UNKNOWN，评分时淘汰推送
             kept.append((item, "UNKNOWN", None))
+            logger.info("财报池暂无市值仍监控: %s", item.ticker)
             continue
-        if tier in ("T1", "T2", "UNKNOWN"):
-            kept.append((item, tier if tier != "UNKNOWN" else "T2", cap))
+        if tier == "T0":
+            logger.info("财报池保留 T0 仅日历/观察: %s cap=%s", item.ticker, cap)
+        kept.append((item, tier if tier != "UNKNOWN" else "T2", cap))
     return kept

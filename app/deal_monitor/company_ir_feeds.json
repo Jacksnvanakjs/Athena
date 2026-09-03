@@ -61,6 +61,12 @@
     {"ticker": "CLSK", "category": "compute_hosting", "name": "cleanspark_ir", "url": "https://ir.cleanspark.com/news-events/press-releases/rss"},
     {"ticker": "CIFR", "category": "compute_hosting", "name": "cipher_ir", "url": "https://investors.ciphermining.com/news-events/press-releases/rss"},
     {"ticker": "HUT", "category": "compute_hosting", "name": "hut8_ir", "url": "https://hut8.com/investors/news-events/press-releases/rss"},
-    {"ticker": "BITF", "category": "compute_hosting", "name": "bitfarms_ir", "url": "https://investors.bitfarms.com/news-events/press-releases/rss"}
+    {"ticker": "BITF", "category": "compute_hosting", "name": "bitfarms_ir", "url": "https://investors.bitfarms.com/news-events/press-releases/rss"},
+    {"ticker": "FRVO", "category": "dc_power", "name": "fervo_gnw", "type": "google_news",
+     "query": "site:globenewswire.com (Fervo OR FRVO) (Google OR PPA OR geothermal OR \"data center\") when:5d"},
+    {"ticker": "EOSE", "category": "dc_power", "name": "eos_gnw", "type": "google_news",
+     "query": "(Eos OR EOSE) (Google OR Microsoft OR Amazon OR PPA OR \"data center\" OR energy) when:5d"},
+    {"ticker": "BE", "category": "dc_power", "name": "bloom_power", "type": "google_news",
+     "query": "(\"Bloom Energy\" OR BE) (Google OR Microsoft OR Amazon OR Oracle OR \"data center\" OR AI) (PPA OR power OR fuel) when:5d"}
   ]
 }
