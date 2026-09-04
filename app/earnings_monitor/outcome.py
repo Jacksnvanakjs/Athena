@@ -72,6 +72,13 @@ def expected_direction(
     return "bearish"
 
 
+def false_positive_threshold_pct(score_total: int | None) -> float:
+    """可推送/高分票用更严阈值：跌超约 2% 即进异常区（覆盖 ZS 91→-2.1% 类）。"""
+    if score_total is not None and score_total >= EARNINGS_PUSH_MIN_SCORE:
+        return min(EARNINGS_OUTCOME_FALSE_POS_PCT, 2.0)
+    return EARNINGS_OUTCOME_FALSE_POS_PCT
+
+
 def judge_anomaly(
     *,
     expected: str,
@@ -86,7 +93,8 @@ def judge_anomaly(
             note="暂无对照（T0/无分/尚无财报后价格）",
         )
 
-    neg_th = EARNINGS_OUTCOME_FALSE_POS_PCT / 100.0
+    neg_th_pct = false_positive_threshold_pct(score_total)
+    neg_th = neg_th_pct / 100.0
     pos_th = EARNINGS_OUTCOME_FALSE_NEG_PCT / 100.0
     score_txt = "—" if score_total is None else str(score_total)
     elim = eliminate_reason or "—"
@@ -97,7 +105,7 @@ def judge_anomaly(
             anomaly=ANOMALY_FALSE_POSITIVE,
             note=(
                 f"评分{score_txt}≥{EARNINGS_PUSH_MIN_SCORE}看涨，"
-                f"财报后却{post_ret * 100:.1f}%≤-{EARNINGS_OUTCOME_FALSE_POS_PCT:g}%"
+                f"财报后却{post_ret * 100:.1f}%≤-{neg_th_pct:g}%"
             ),
         )
     if expected == "bearish" and post_ret >= pos_th:
@@ -511,7 +519,7 @@ async def _pre_close_only(ticker: str, as_of: date) -> float | None:
 
 
 async def _batch_resolve_live_prices(tickers: list[str]) -> dict[str, _LivePx]:
-    """批量解析盘后价：TickDB/热力图 → CNBC → Yahoo AH → Finnhub。"""
+    """批量解析盘后价：CNBC → Yahoo AH → TickDB/热力图 → Finnhub（少打易限流源）。"""
     import asyncio
 
     uniq = list(dict.fromkeys(tickers))
@@ -519,41 +527,35 @@ async def _batch_resolve_live_prices(tickers: list[str]) -> dict[str, _LivePx]:
     if not uniq:
         return out
 
-    # 1) TickDB 等（现已解析 post_market_quote）
-    try:
-        from app.market_data import fetch_quotes
-
-        quotes, src_label = await fetch_quotes(uniq)
-        for t in uniq:
-            q = quotes.get(t) or {}
-            px = q.get("price")
-            if px is not None and float(px) > 0:
-                out[t] = _LivePx(float(px), today_bj(), f"heatmap:{src_label}")
-    except Exception:
-        logger.debug("batch heatmap quotes failed", exc_info=True)
-
-    # 2) 仍缺或疑似未含盘后：CNBC ExtendedMktQuote
-    need_cnbc = list(uniq)  # 对全部用 CNBC 校验；若变动更大则覆盖
-    for t in need_cnbc:
+    # 1) CNBC ExtendedMktQuote（盘后反应常用）
+    for t in uniq:
         cnbc = await _fetch_cnbc_extended(t)
-        if not cnbc:
-            await asyncio.sleep(0.15)
-            continue
-        prev = out.get(t)
-        # 无旧值，或 CNBC 相对旧值变动显著（盘后反应）→ 采用 CNBC
-        if prev is None or abs(cnbc.price / prev.price - 1.0) >= 0.002:
-            # 若已有盘后且与 CNBC 接近，保留原 source；否则用 CNBC
-            if prev is None or abs(cnbc.price / prev.price - 1.0) >= 0.01:
-                out[t] = cnbc
-        await asyncio.sleep(0.15)
+        if cnbc:
+            out[t] = cnbc
+        await asyncio.sleep(0.12)
 
-    # 3) 仍缺：Yahoo AH
+    # 2) 仍缺：Yahoo AH
     still = [t for t in uniq if t not in out]
     for t in still:
         ah = await _fetch_yahoo_extended_last(t)
         if ah:
             out[t] = ah
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.35)
+
+    # 3) TickDB / 热力图（易 429，放后）
+    still = [t for t in uniq if t not in out]
+    if still:
+        try:
+            from app.market_data import fetch_quotes
+
+            quotes, src_label = await fetch_quotes(still)
+            for t in still:
+                q = quotes.get(t) or {}
+                px = q.get("price")
+                if px is not None and float(px) > 0:
+                    out[t] = _LivePx(float(px), today_bj(), f"heatmap:{src_label}")
+        except Exception:
+            logger.debug("batch heatmap quotes failed", exc_info=True)
 
     # 4) Finnhub
     still = [t for t in uniq if t not in out]

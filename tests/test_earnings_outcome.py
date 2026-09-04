@@ -43,6 +43,24 @@ def test_false_positive_high_score_drop():
     assert j.anomaly == ANOMALY_FALSE_POSITIVE
 
 
+def test_false_positive_zs_style_small_drop():
+    """高分票跌超 2% 也应标异常（ZS 91→-2.1%）。"""
+    j = judge_anomaly(expected="bullish", post_ret=-0.021, score_total=91)
+    assert j.anomaly == ANOMALY_FALSE_POSITIVE
+
+
+def test_aligned_mild_drop_mid_score_no_anomaly():
+    """未达推送线的中分、小跌 → 不按高分异常处理。"""
+    j = judge_anomaly(expected="bullish", post_ret=-0.015, score_total=70)
+    # 70 分仍可能 bullish（若 expected 已是 bullish）；阈值用默认 5%
+    assert j.anomaly is None
+
+
+def test_push_eligible_small_drop_is_anomaly():
+    j = judge_anomaly(expected="bullish", post_ret=-0.021, score_total=82)
+    assert j.anomaly == ANOMALY_FALSE_POSITIVE
+
+
 def test_false_negative_low_score_rally():
     j = judge_anomaly(
         expected="bearish",

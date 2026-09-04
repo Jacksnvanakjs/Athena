@@ -59,6 +59,43 @@ SERVERCHAN_SENDKEY = os.getenv("SERVERCHAN_SENDKEY", "")
 TURSO_DATABASE_URL = _normalize_turso_url(os.getenv("TURSO_DATABASE_URL", "")) if os.getenv("TURSO_DATABASE_URL") else ""
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 USE_TURSO = bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)
+# 额外 Turso URL（逗号分隔）。仅当官方提供「同库」多节点时再用；
+# AWS Edge Replicas 已弃用，勿把另一份独立库填进来（会双写分裂）。
+_TURSO_EXTRA = [
+    _normalize_turso_url(u.strip())
+    for u in os.getenv("TURSO_DATABASE_URL_FALLBACKS", "").split(",")
+    if u.strip()
+]
+TURSO_DATABASE_URLS = list(
+    dict.fromkeys(
+        ([TURSO_DATABASE_URL] if TURSO_DATABASE_URL else []) + _TURSO_EXTRA
+    )
+)
+# 启动/探测 Turso 时的超时（秒）；超时先起 HTTP，后台只重试 Turso（不切 SQLite）
+TURSO_CONNECT_TIMEOUT_SEC = float(os.getenv("TURSO_CONNECT_TIMEOUT_SEC", "45"))
+# 后台重连间隔（秒）
+TURSO_RECONNECT_INTERVAL_SEC = float(os.getenv("TURSO_RECONNECT_INTERVAL_SEC", "15"))
+# 单次启动探测内对每个节点的重试次数
+TURSO_CONNECT_RETRIES = max(1, int(os.getenv("TURSO_CONNECT_RETRIES", "2")))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+# 本地 Embedded Replica：读走本地文件（亚毫秒），写仍转发 Turso 主库。
+# 孟买/东京远程每条查询约 0.5–2s；开副本后页面会快一个数量级。首次 sync 较慢。
+TURSO_EMBEDDED_REPLICA = _env_flag("TURSO_EMBEDDED_REPLICA", True)
+TURSO_EMBEDDED_REPLICA_PATH = os.getenv(
+    "TURSO_EMBEDDED_REPLICA_PATH", str(DATA_DIR / "turso_embedded.db")
+)
+# 自动增量同步间隔（秒）；0 表示仅启动时手动 sync
+TURSO_SYNC_INTERVAL_SEC = max(0, int(float(os.getenv("TURSO_SYNC_INTERVAL_SEC", "30"))))
+
+
 def _resolve_funds_source_file() -> str:
     if env_path := os.getenv("FUNDS_SOURCE_FILE"):
         return env_path
@@ -171,6 +208,11 @@ AI_MAINLINE_MIN_BREADTH = float(os.getenv("AI_MAINLINE_MIN_BREADTH", "0.55"))
 AI_MAINLINE_MIN_VALID = int(os.getenv("AI_MAINLINE_MIN_VALID", "3"))
 AI_MAINLINE_PUSH_ENABLED = os.getenv("AI_MAINLINE_PUSH_ENABLED", "false").lower() == "true"
 AI_MAINLINE_PUSH_COOLDOWN_DAYS = int(os.getenv("AI_MAINLINE_PUSH_COOLDOWN_DAYS", "5"))
+
+# ── 数据自检 / 缺失补全（部署打断定时任务后自动回填）──
+SELF_HEAL_ENABLED = os.getenv("SELF_HEAL_ENABLED", "true").lower() == "true"
+SELF_HEAL_INTERVAL_MIN = int(os.getenv("SELF_HEAL_INTERVAL_MIN", "20"))
+SELF_HEAL_STARTUP_DELAY_SEC = int(os.getenv("SELF_HEAL_STARTUP_DELAY_SEC", "45"))
 
 RANDOM_DELAY_MIN = 1.0
 RANDOM_DELAY_MAX = 3.0

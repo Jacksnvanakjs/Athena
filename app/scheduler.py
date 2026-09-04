@@ -14,6 +14,8 @@ from app.config import (
     FUNDS_SOURCE_FILE,
     NVDA_SIGNAL_ENABLED,
     SCRAPE_TIMES,
+    SELF_HEAL_ENABLED,
+    SELF_HEAL_INTERVAL_MIN,
     TIMEZONE,
 )
 from app.service import run_scrape_and_notify
@@ -131,6 +133,17 @@ async def scheduled_earnings_outcome():
     logger.info("开始 earnings 财报后涨跌对照...")
     result = await run_outcome_check()
     logger.info("earnings 财报后对照完成: %s", result)
+
+
+async def scheduled_self_heal():
+    """扫描数据缺口并自动补跑相关流程（抗部署打断）。"""
+    if not SELF_HEAL_ENABLED:
+        return
+    from app.self_heal import run_self_heal
+
+    logger.info("开始数据自检补全...")
+    result = await run_self_heal()
+    logger.info("数据自检补全完成: %s", result)
 
 
 def scheduler_status() -> dict:
@@ -265,17 +278,29 @@ def start_scheduler():
             id="earnings_outcome_et_1000",
             replace_existing=True,
         )
+    if SELF_HEAL_ENABLED:
+        scheduler.add_job(
+            scheduled_self_heal,
+            IntervalTrigger(minutes=max(10, SELF_HEAL_INTERVAL_MIN)),
+            id="data_self_heal",
+            replace_existing=True,
+            next_run_time=datetime.now() + timedelta(seconds=90),
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.start()
     times = ", ".join(f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES)
     logger.info(
         "调度器已启动，时区: %s，基金抓取: %s；美股热力图快照: 美东 16:30；"
-        "deal_monitor: 每 %d 分钟；nvda_signal: %s；earnings: %s；ai_mainline: %s",
+        "deal_monitor: 每 %d 分钟；nvda_signal: %s；earnings: %s；ai_mainline: %s；"
+        "self_heal: %s",
         TIMEZONE,
         times,
         DEAL_POLL_INTERVAL_MIN,
         "开启" if NVDA_SIGNAL_ENABLED else "关闭",
         "开启" if EARNINGS_MONITOR_ENABLED else "关闭",
         "开启" if AI_MAINLINE_ENABLED else "关闭",
+        f"每{SELF_HEAL_INTERVAL_MIN}分钟" if SELF_HEAL_ENABLED else "关闭",
     )
 
 

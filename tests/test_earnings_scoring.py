@@ -50,6 +50,115 @@ def test_setup_dell_healthy_pullback():
     assert score >= 20
 
 
+def test_setup_snow_still_healthy_pullback():
+    """SNOW：月线略负 + 脱离高点，双确认健康回调须维持高分（财报后大涨样本）。"""
+    score, label = _setup_into_er_score(
+        -0.059,
+        -0.035,
+        pre_5d_gain=-0.04,
+        down_streak=2,
+        from_21d_high=-0.093,
+    )
+    assert label == "healthy_pullback"
+    assert score >= 20
+    snow = score_candidate(
+        sector="AI_SAAS",
+        tier="T1",
+        session="AMC",
+        confirmed=True,
+        days_to=1,
+        eliminate_reason=None,
+        market_cap_usd=60e9,
+        pre_10d_gain=-0.059,
+        pre_30d_gain=-0.035,
+        down_streak=2,
+        from_21d_high=-0.093,
+    )
+    assert snow.score_total is not None and snow.score_total >= 88
+    assert snow.push_eligible is True
+
+
+def test_setup_cien_weak_slide_not_healthy():
+    """CIEN：周月同跌不应再标健康回调。"""
+    score, label = _setup_into_er_score(
+        -0.113,
+        -0.139,
+        down_streak=2,
+    )
+    assert label == "weak_slide"
+    assert score <= -6
+
+
+def test_setup_zs_soft_dip_not_healthy():
+    """ZS：月线仍正、周线小回调、形态特征缺失 → soft_dip，不是健康回调。"""
+    score, label = _setup_into_er_score(
+        -0.064,
+        0.058,
+        down_streak=None,
+        from_21d_high=None,
+    )
+    assert label == "soft_dip"
+    assert score <= 6
+
+
+def test_setup_ai_drift_into_er():
+    """AI：10日仅微涨 → drift，不应给可推送级形态分。"""
+    score, label = _setup_into_er_score(
+        0.0135,
+        0.0468,
+        down_streak=None,
+        from_21d_high=None,
+    )
+    assert label == "drift"
+    assert score <= 6
+
+
+def test_cien_zs_ai_rescore_below_push():
+    """结构分封顶 + 形态修正后，CIEN/ZS/AI 不应再轻松过推送线。"""
+    cien = score_candidate(
+        sector="AI_NET",
+        tier="T1",
+        session="BMO",
+        confirmed=True,
+        days_to=1,
+        eliminate_reason=None,
+        market_cap_usd=50e9,
+        pre_10d_gain=-0.113,
+        pre_30d_gain=-0.139,
+        down_streak=2,
+    )
+    zs = score_candidate(
+        sector="AI_SEC",
+        tier="T1",
+        session="AMC",
+        confirmed=True,
+        days_to=1,
+        eliminate_reason=None,
+        market_cap_usd=28e9,
+        pre_10d_gain=-0.064,
+        pre_30d_gain=0.058,
+        down_streak=None,
+        from_21d_high=None,
+    )
+    ai = score_candidate(
+        sector="AI_SAAS",
+        tier="T2",
+        session="AMC",
+        confirmed=True,
+        days_to=1,
+        eliminate_reason=None,
+        market_cap_usd=1.6e9,
+        pre_10d_gain=0.0135,
+        pre_30d_gain=0.0468,
+    )
+    assert cien.score_total is not None and cien.score_total < 75
+    assert zs.score_total is not None and zs.score_total < 75
+    assert ai.score_total is not None and ai.score_total < 75
+    assert cien.push_eligible is False
+    assert zs.push_eligible is False
+    assert ai.push_eligible is False
+
+
 def test_setup_mdb_stale_extension():
     score, label = _setup_into_er_score(
         -0.001,

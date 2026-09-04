@@ -201,8 +201,19 @@ def system_status():
             "earnings_enabled": EARNINGS_MONITOR_ENABLED,
             "ai_mainline_enabled": AI_MAINLINE_ENABLED,
         },
+        "self_heal": _self_heal_status_snippet(),
     }
 
+
+def _self_heal_status_snippet() -> dict:
+    from app.config import SELF_HEAL_ENABLED, SELF_HEAL_INTERVAL_MIN
+
+    return {
+        "enabled": SELF_HEAL_ENABLED,
+        "interval_min": SELF_HEAL_INTERVAL_MIN if SELF_HEAL_ENABLED else None,
+        "audit_path": "/api/self-heal/audit",
+        "run_path": "/api/self-heal/run",
+    }
 
 @router.get("/heatmap")
 async def heatmap_data(force: bool = Query(default=False)):
@@ -779,15 +790,78 @@ def list_earnings_anomalies(
 
 
 @router.post("/earnings/outcome-check")
-async def earnings_outcome_check(token: str = Query(default="")):
+async def earnings_outcome_check(
+    token: str = Query(default=""),
+    lookback_days: int = Query(default=14, ge=1, le=90),
+):
     """手动触发：回填已发财报涨跌并刷新异常标记。"""
     from app.config import DEAL_ADMIN_TOKEN
     from app.earnings_monitor.outcome import run_outcome_check
 
     if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="无效 token")
-    return await run_outcome_check()
+    return await run_outcome_check(lookback_days=lookback_days)
 
+@router.get("/db/status")
+def db_status():
+    from app.config import TURSO_CONNECT_RETRIES, TURSO_DATABASE_URLS
+    from app.database import get_active_turso_url, get_db_backend, is_db_ready
+
+    ready = is_db_ready()
+    backend = get_db_backend()
+    return {
+        "turso": USE_TURSO,
+        "ready": ready,
+        "db_backend": backend,
+        "turso_url": get_active_turso_url() or None,
+        "turso_candidates": len(TURSO_DATABASE_URLS),
+        "turso_retries": TURSO_CONNECT_RETRIES,
+        "status": "ok" if ready and (backend == "turso" or not USE_TURSO) else "degraded",
+    }
+
+
+@router.post("/db/reconnect")
+async def db_reconnect(timeout_sec: float = Query(default=0)):
+    """手动触发 Turso 探测（主 URL + 副本 URL，不切 SQLite）。"""
+    import asyncio
+
+    from app.config import TURSO_CONNECT_TIMEOUT_SEC
+    from app.database import get_active_turso_url, get_db_backend, is_db_ready, try_startup_db
+
+    timeout = float(timeout_sec) if timeout_sec and timeout_sec > 0 else float(TURSO_CONNECT_TIMEOUT_SEC)
+    ok = await asyncio.to_thread(try_startup_db, timeout)
+    backend = get_db_backend()
+    return {
+        "ok": ok,
+        "ready": is_db_ready(),
+        "db_backend": backend,
+        "turso_url": get_active_turso_url() or None,
+        "turso": USE_TURSO,
+        "timeout_sec": timeout,
+        "status": "ok" if ok and backend == "turso" else "degraded",
+    }
+
+
+@router.get("/self-heal/audit")
+def self_heal_audit():
+    """只读：扫描财报涨跌 / 首日回测等数据缺口。"""
+    from app.self_heal import audit_data_gaps
+
+    return audit_data_gaps()
+
+
+@router.post("/self-heal/run")
+async def self_heal_run(
+    token: str = Query(default=""),
+    force: bool = Query(default=False),
+):
+    """手动触发数据自检补全（force=true 忽略冷却）。"""
+    from app.config import DEAL_ADMIN_TOKEN
+    from app.self_heal import run_self_heal
+
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+    return await run_self_heal(force=force)
 
 @router.get("/earnings/{event_id}")
 def get_earnings(event_id: int):

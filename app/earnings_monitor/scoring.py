@@ -3,8 +3,15 @@
 设计取舍（可解释、可回测）：
 - 不再因「市值偏大」硬淘汰 DELL 这类 AI 硬件受益票
 - 不再因「30 日已涨 >25%」硬淘汰（GTLB 类动量票可高分）
-- 奖励「健康回调」与「建设性动量进财报」；惩罚「滞涨延伸 / 尾盘反抽 / 连续阴跌 / 暴跌进场」
+- 奖励「健康回调」与「建设性动量进财报」；惩罚「滞涨延伸 / 尾盘反抽 / 连续阴跌 / 暴跌进场 / 周月同跌 / 软回撤 / 漂移进场」
+- 结构分（板块+流动性+时段+确认+临近）封顶，须靠形态分才能过推送线
 - T0 巨头仍不推送（波动弹性与策略不同）
+
+2026-09 对照补丁：
+- CIEN：10日-11% 且 30日-14% 被误标「健康回调」→92 分后大跌；改为 weak_slide
+- ZS：10日-6%、月线仍+5% 却当健康回调 →82 分后仍跌；改为 soft_dip（须月线未涨或明确脱离高点才算吸筹）
+- AI：10日仅+1% 漂移进场却 78 可推 → 财报后跌；改为 drift，形态分压低
+- SNOW/DELL：双确认健康回调恢复满档形态分（20/22），避免真赢家被压到 82
 """
 
 from __future__ import annotations
@@ -31,6 +38,9 @@ SECTOR_BASE = {
     "AI_SEC": 13,
     "AI_SAAS": 13,
 }
+
+# 不含形态分时的结构分封顶：避免「随便一个回调」就轻松 90+
+_STRUCTURAL_CAP = 68
 
 
 @dataclass
@@ -173,7 +183,10 @@ def _setup_into_er_score(
     """进财报前的价格形态：可为负分，拉开赢家/输家。
 
     经验对照（2026-09 样本，财报前特征 → 揭晓后）：
-    - GTLB 建设性动量 → 涨；DELL/SNOW 健康回调 → 涨
+    - GTLB 建设性动量 → 涨；DELL/SNOW 健康回调（月线未深涨 + 脱离高点）→ 涨
+    - CIEN 周月同跌却被当回调 → 大跌（weak_slide）
+    - ZS 周线小回但月线仍涨、未确认离高 → 跌（soft_dip，不是吸筹）
+    - AI 近乎走平/微涨漂移进场 → 跌（drift）
     - MDB 滞涨延伸、PANW 尾盘反抽、HPE 高位磨弱、NTAP 连续阴跌 → 跌
     - CRDO 暴跌进场 → 继续杀（另有 E7）
     """
@@ -189,15 +202,44 @@ def _setup_into_er_score(
     if down_streak is not None and down_streak >= 4 and g10 < -0.04:
         return -12, "bleeding"
 
-    # 3) 健康回调吸筹：如 DELL / SNOW
+    # 3) 周月同跌：近 10 日回调且月线也深跌 → 趋势走弱进财报（CIEN），不是吸筹
+    if (
+        -0.15 < g10 <= -0.04
+        and pre_30d_gain is not None
+        and pre_30d_gain <= -0.08
+    ):
+        return -8, "weak_slide"
+
+    # 4) 软回撤（假回调）：周线回一点，但月线仍在涨，且未明确脱离 21 日高
+    #    或缺形态特征时宁可不给「健康回调」高分（ZS：10日-6%、月线+5% → 高分后跌）
+    if -0.15 < g10 <= -0.04:
+        month_still_up = pre_30d_gain is not None and pre_30d_gain > 0.02
+        off_highs = from_21d_high is not None and from_21d_high <= -0.06
+        features_thin = down_streak is None and from_21d_high is None
+        if month_still_up and (not off_highs or features_thin):
+            return 4, "soft_dip"
+
+    # 5) 健康回调吸筹：周线回撤，且（月线未同步走强 或 已明确脱离高点）
+    #    DELL / SNOW：月线近乎走平或略负 + 脱离高点 → 给回满档形态分（财报后弹性已验证）
+    #    与 soft_dip 对立：假回调不给高分，真吸筹必须维持高分
     if -0.15 < g10 <= -0.04 and (down_streak is None or down_streak <= 3):
-        return 22, "healthy_pullback"
+        month_ok = pre_30d_gain is None or pre_30d_gain <= 0.02
+        off_highs = from_21d_high is not None and from_21d_high <= -0.06
+        if month_ok or off_highs:
+            quality = int(bool(month_ok)) + int(bool(off_highs))
+            deep = g10 <= -0.08
+            if quality >= 2:
+                # 双确认（月线未涨 + 脱离高点）：SNOW/DELL 档
+                return (22 if deep else 20), "healthy_pullback"
+            # 单确认：仍算健康回调，但略低于双确认
+            return (16 if deep else 14), "healthy_pullback"
+        return 4, "soft_dip"
 
-    # 4) 建设性动量进财报（近 10 日仍上行，非硬杀）：如 GTLB
+    # 6) 建设性动量进财报（近 10 日仍上行，非硬杀）：如 GTLB
     if 0.05 < g10 <= 0.18 and (pre_30d_gain is None or pre_30d_gain < 0.45):
-        return 20, "constructive_momentum"
+        return 18, "constructive_momentum"
 
-    # 5) 滞涨延伸：月线已大涨，近 10 日走平 → 如 MDB
+    # 7) 滞涨延伸：月线已大涨，近 10 日走平 → 如 MDB
     if (
         pre_30d_gain is not None
         and pre_30d_gain > 0.15
@@ -205,11 +247,11 @@ def _setup_into_er_score(
     ):
         return -10, "stale_extension"
 
-    # 6) 尾盘反抽进财报：近 5 日急拉、10 日仍弱 → 如 PANW
+    # 8) 尾盘反抽进财报：近 5 日急拉、10 日仍弱 → 如 PANW
     if pre_5d_gain is not None and pre_5d_gain > 0.05 and g10 < 0:
         return -8, "late_bounce"
 
-    # 7) 高位下方磨弱：离 21 日高点深、近 10 日近乎走平 → 如 HPE
+    # 9) 高位下方磨弱：离 21 日高点深、近 10 日近乎走平 → 如 HPE
     if (
         from_21d_high is not None
         and from_21d_high <= -0.12
@@ -217,15 +259,19 @@ def _setup_into_er_score(
     ):
         return -8, "weak_off_highs"
 
-    # 8) 极端追高（软惩罚，不硬淘汰）
+    # 10) 极端追高（软惩罚，不硬淘汰）
     if g10 > 0.18 or (
         pre_30d_gain is not None and pre_30d_gain > 0.35 and g10 > 0.10
     ):
         return 4, "extended_chase"
 
-    # 9) 其余分段
-    if -0.04 < g10 <= 0.05:
-        return 10, "neutral"
+    # 11) 漂移进场：近乎走平/微涨，无清晰形态 → 如 AI（C3.ai）
+    if -0.02 <= g10 <= 0.03:
+        return 6, "drift"
+
+    # 12) 其余分段
+    if -0.04 < g10 < -0.02 or 0.03 < g10 <= 0.05:
+        return 8, "neutral"
     if 0.05 < g10 <= 0.15:
         return 10, "mild_up"
     return 8, "other"
@@ -296,7 +342,8 @@ def score_candidate(
     else:
         f = 5
 
-    total = max(0, min(100, a + b + c + d + e + f))
+    structural = min(_STRUCTURAL_CAP, a + b + c + d + f)
+    total = max(0, min(100, structural + e))
     detail = {
         "A_sector": a,
         "B_liquidity": b,
@@ -305,6 +352,7 @@ def score_candidate(
         "E_setup": e,
         "E_setup_label": setup_label,
         "F_proximity": f,
+        "structural_capped": structural,
         "pre_5d_gain": pre_5d_gain,
         "pre_10d_gain": pre_10d_gain,
         "pre_30d_gain": pre_30d_gain,
@@ -318,6 +366,8 @@ def score_candidate(
     sector_cn = SECTOR_LABELS.get(sector, sector)
     setup_cn = {
         "healthy_pullback": "健康回调",
+        "soft_dip": "软回撤",
+        "weak_slide": "周月同跌",
         "constructive_momentum": "建设性动量",
         "stale_extension": "滞涨延伸",
         "late_bounce": "尾盘反抽",
@@ -325,6 +375,7 @@ def score_candidate(
         "bleeding": "连续阴跌",
         "crash": "暴跌进场",
         "extended_chase": "追高延伸",
+        "drift": "漂移进场",
         "neutral": "近乎走平",
         "mild_up": "温和上行",
         "unknown": "形态未知",

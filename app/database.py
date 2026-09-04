@@ -1,22 +1,55 @@
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
+import logging
 from pathlib import Path
+import threading
+import time
 from typing import TypeVar
 
 from sqlalchemy import Boolean, Column, Date, DateTime, Float, Integer, String, Text, UniqueConstraint, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from app.config import DATABASE_URL, TURSO_AUTH_TOKEN, TURSO_DATABASE_URL, USE_TURSO
+from app.config import (
+    DATABASE_URL,
+    TURSO_AUTH_TOKEN,
+    TURSO_CONNECT_RETRIES,
+    TURSO_CONNECT_TIMEOUT_SEC,
+    TURSO_DATABASE_URL,
+    TURSO_DATABASE_URLS,
+    TURSO_EMBEDDED_REPLICA,
+    TURSO_EMBEDDED_REPLICA_PATH,
+    TURSO_SYNC_INTERVAL_SEC,
+    USE_TURSO,
+)
 from app.utils import now_beijing
 
 T = TypeVar("T")
+logger = logging.getLogger(__name__)
 
 STREAM_ERROR_MARKERS = (
     "stream not found",
     "stream has expired",
     "stream expired",
     "hrana_closed",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection refused",
+    "temporarily unavailable",
+    "network is unreachable",
+    "name or service not known",
 )
+
+_db_ready = threading.Event()
+_startup_lock = threading.Lock()
+_schema_ready = False
+# turso | sqlite
+_active_backend = "turso" if USE_TURSO else "sqlite"
+_active_turso_url = TURSO_DATABASE_URL or ""
+# 本地 SQLite 无网络冷启动问题，默认视为就绪；Turso 需探测成功后才 set
+if not USE_TURSO:
+    _db_ready.set()
+    _schema_ready = True
 
 
 class Base(DeclarativeBase):
@@ -277,29 +310,101 @@ def is_turso_stream_error(exc: BaseException) -> bool:
     return any(marker in message for marker in STREAM_ERROR_MARKERS)
 
 
-def _create_engine():
-    if USE_TURSO:
+def is_db_ready() -> bool:
+    return _db_ready.is_set()
+
+
+def get_db_backend() -> str:
+    """当前实际读写后端：turso | sqlite。"""
+    return _active_backend
+
+
+def get_active_turso_url() -> str:
+    return _active_turso_url if _active_backend == "turso" else ""
+
+
+def _turso_https_url(url: str) -> str:
+    if url.startswith("libsql://"):
+        return "https://" + url[len("libsql://") :]
+    return url
+
+
+def _create_engine(*, backend: str | None = None, turso_url: str | None = None):
+    backend = backend or _active_backend
+    if backend == "turso":
         import sqlalchemy_libsql  # noqa: F401 — registers sqlite+libsql dialect
 
+        url = turso_url or _active_turso_url or TURSO_DATABASE_URL
+        # 注意：libsql connect() 不接受 pysqlite 的 timeout=；启动超时靠子进程探测
+        # pool_pre_ping 对远程 libsql 几乎等于多一次往返（孟买约 +1s），默认关闭。
+        if TURSO_EMBEDDED_REPLICA and TURSO_EMBEDDED_REPLICA_PATH:
+            replica = Path(TURSO_EMBEDDED_REPLICA_PATH)
+            replica.parent.mkdir(parents=True, exist_ok=True)
+            connect_args: dict = {
+                "auth_token": TURSO_AUTH_TOKEN,
+                "sync_url": _turso_https_url(url),
+            }
+            if TURSO_SYNC_INTERVAL_SEC > 0:
+                connect_args["sync_interval"] = TURSO_SYNC_INTERVAL_SEC
+            return create_engine(
+                f"sqlite+libsql:///{replica.resolve()}",
+                connect_args=connect_args,
+                pool_pre_ping=False,
+            )
         return create_engine(
-            f"sqlite+{TURSO_DATABASE_URL}?secure=true",
+            f"sqlite+{url}?secure=true",
             connect_args={"auth_token": TURSO_AUTH_TOKEN},
-            pool_pre_ping=True,
+            pool_pre_ping=False,
             pool_recycle=300,
         )
     return create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+
+
+def _sync_embedded_replica() -> None:
+    """拉取远程变更到本地副本；读路径之后走本地文件。"""
+    if not (TURSO_EMBEDDED_REPLICA and _active_backend == "turso"):
+        return
+    t0 = time.perf_counter()
+    with engine.connect() as conn:
+        raw = conn.connection.dbapi_connection
+        sync = getattr(raw, "sync", None)
+        if callable(sync):
+            sync()
+    logger.info(
+        "Turso embedded replica 已同步（%.1fs，path=%s）",
+        time.perf_counter() - t0,
+        TURSO_EMBEDDED_REPLICA_PATH,
+    )
 
 
 engine = _create_engine()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
-def reset_engine() -> None:
-    """丢弃失效的 Turso 连接池，下次请求会建立新连接。"""
-    global engine, SessionLocal
-    engine.dispose()
-    engine = _create_engine()
+def reset_engine(*, wait: bool = True, backend: str | None = None, turso_url: str | None = None) -> None:
+    """丢弃失效连接池并按指定后端重建。"""
+    global engine, SessionLocal, _active_backend, _active_turso_url
+    if backend is not None:
+        _active_backend = backend
+    if turso_url is not None:
+        _active_turso_url = turso_url
+    old = engine
+    engine = _create_engine(backend=_active_backend, turso_url=_active_turso_url or None)
     SessionLocal.configure(bind=engine)
+    if wait:
+        try:
+            old.dispose()
+        except Exception as exc:
+            logger.warning("dispose 旧连接池失败: %s", exc)
+        return
+
+    def _dispose_old() -> None:
+        try:
+            old.dispose()
+        except Exception:
+            pass
+
+    threading.Thread(target=_dispose_old, name="db-engine-dispose", daemon=True).start()
 
 
 def check_database() -> None:
@@ -307,7 +412,140 @@ def check_database() -> None:
         db.execute(text("SELECT 1"))
 
 
+def _run_db_boot() -> None:
+    """探活；首次成功再 create_all/迁移，避免每次重连都扫全表结构。"""
+    global _schema_ready
+    check_database()
+    if not _schema_ready:
+        init_db()
+        _schema_ready = True
+
+
+def _subprocess_turso_ping(database_url: str, auth_token: str) -> None:
+    """保留给旧测试；实际探测走 _turso_reachable_in_subprocess。"""
+    import sqlalchemy_libsql  # noqa: F401
+    from sqlalchemy import create_engine, text as sql_text
+
+    eng = create_engine(
+        f"sqlite+{database_url}?secure=true",
+        connect_args={"auth_token": auth_token},
+    )
+    try:
+        with eng.connect() as conn:
+            conn.execute(sql_text("SELECT 1"))
+    finally:
+        eng.dispose()
+
+
+def _turso_reachable_in_subprocess(database_url: str, timeout_sec: float) -> bool:
+    """用独立解释器跑 app.turso_ping，避免 spawn/GIL 问题。"""
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    env["TURSO_PING_URL"] = database_url
+    env["TURSO_PING_TOKEN"] = TURSO_AUTH_TOKEN
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "app.turso_ping"],
+            env=env,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, timeout_sec),
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    if completed.returncode != 0:
+        err = (completed.stderr or completed.stdout or "").strip()
+        if err:
+            logger.warning("Turso ping 子进程失败: %s", err[:240])
+        return False
+    return True
+
+
+def _try_activate_turso_url(url: str, timeout_sec: float) -> bool:
+    """探测并切到指定 Turso URL；成功则标记 ready。"""
+    global _schema_ready
+    host = url.replace("libsql://", "").split("/")[0]
+    logger.info("探测 Turso 节点 %s（timeout=%.0fs）...", host, timeout_sec)
+    if not _turso_reachable_in_subprocess(url, timeout_sec):
+        logger.warning("Turso 节点不可达: %s", host)
+        return False
+    try:
+        reset_engine(wait=False, backend="turso", turso_url=url)
+        _sync_embedded_replica()
+    except Exception as dispose_exc:
+        logger.warning("切换 Turso 连接池失败 (%s): %s", host, dispose_exc)
+        return False
+    _schema_ready = True
+    _db_ready.set()
+    mode = "embedded-replica" if TURSO_EMBEDDED_REPLICA else "remote"
+    logger.info("数据库可达（Turso %s，%s）", host, mode)
+    return True
+
+
+def try_startup_db(timeout_sec: float | None = None) -> bool:
+    """
+    带超时的启动探测：只连 Turso（主 URL + FALLBACKS 副本），不回退 SQLite。
+
+    探测在子进程中进行：libsql 握手会长期占用 GIL，线程超时无法真正打断。
+    """
+    if not _startup_lock.acquire(blocking=False):
+        logger.info("跳过重复的数据库探测（已有探测在进行）")
+        return is_db_ready() and get_db_backend() == "turso"
+
+    timeout = float(TURSO_CONNECT_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
+    timeout = max(1.0, timeout)
+    try:
+        if USE_TURSO and TURSO_AUTH_TOKEN and TURSO_DATABASE_URLS:
+            # 先试上次成功的节点，再试其余（多区域副本备用）
+            urls = list(TURSO_DATABASE_URLS)
+            if _active_turso_url and _active_turso_url in urls:
+                urls = [_active_turso_url] + [u for u in urls if u != _active_turso_url]
+            for round_i in range(TURSO_CONNECT_RETRIES):
+                for url in urls:
+                    if _try_activate_turso_url(url, timeout):
+                        return True
+                if round_i + 1 < TURSO_CONNECT_RETRIES:
+                    logger.info("Turso 第 %s 轮全失败，立即再试…", round_i + 1)
+
+            logger.warning(
+                "所有 Turso 节点探测失败（每节点 %.0fs × %s 轮，候选 %s 个），后台继续重试",
+                timeout,
+                TURSO_CONNECT_RETRIES,
+                len(urls),
+            )
+            # 周期探测失败时不要清掉已就绪状态，否则网页会间歇性断库
+            if not is_db_ready():
+                try:
+                    reset_engine(wait=False, backend="turso")
+                except Exception:
+                    pass
+            return is_db_ready()
+
+        # 未配置 Turso：仅此时允许纯本地 sqlite
+        try:
+            reset_engine(wait=False, backend="sqlite")
+            _run_db_boot()
+        except BaseException as exc:  # noqa: BLE001
+            logger.warning("本地 SQLite 启动失败: %s", exc)
+            _db_ready.clear()
+            return False
+        _db_ready.set()
+        logger.info("数据库就绪（sqlite，未配置 Turso）")
+        return True
+    finally:
+        _startup_lock.release()
+
+
 def run_with_db_retry(operation: Callable[[Session], T]) -> T:
+    if USE_TURSO and not is_db_ready():
+        raise RuntimeError("database not ready; reconnecting turso")
+    if not is_db_ready():
+        raise RuntimeError("database not ready; reconnecting")
     last_error: BaseException | None = None
     for attempt in range(2):
         db = SessionLocal()
@@ -315,8 +553,9 @@ def run_with_db_retry(operation: Callable[[Session], T]) -> T:
             return operation(db)
         except Exception as exc:
             last_error = exc
-            if attempt == 0 and USE_TURSO and is_turso_stream_error(exc):
-                reset_engine()
+            if attempt == 0 and _active_backend == "turso" and is_turso_stream_error(exc):
+                # 流错误：软重置连接池，仍留在 Turso；由后台换节点
+                reset_engine(wait=False, backend="turso")
                 continue
             raise
         finally:
@@ -365,7 +604,7 @@ def _ensure_sqlite_columns() -> None:
 
 
 def init_db():
-    if not USE_TURSO:
+    if get_db_backend() != "turso":
         from app.config import DATABASE_URL as resolved_url
 
         db_path = Path(resolved_url.replace("sqlite:///", ""))
