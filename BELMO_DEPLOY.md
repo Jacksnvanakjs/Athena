@@ -22,39 +22,45 @@ Belmo 免费版容器重启或重新部署后，本地 `/tmp` 里的 SQLite 会�
 ### 3.1 创建 Turso 数据库
 
 1. 打开 https://turso.tech ，用 **GitHub** 注册/登录
-2. 控制台点击 **Create Database**，名称填 `athena`（任意即可）
-3. 进入该数据库，复制 **Database URL**（形如 `libsql://athena-xxx.turso.io`）
-4. 点击 **Create Token**，复制生成的 **Auth Token**
+2. 控制台创建数据库（或用 CLI 建 group + import）。当前推荐主库在 **孟买** `aws-ap-south-1`（东京节点从国内常超时；官方 AWS 暂不支持 sin/hkg 副本）
+3. 复制 **Database URL**（形如 `libsql://athena-apac-xxx.aws-ap-south-1.turso.io`）
+4. **Create Token**，复制 **Auth Token**
 
 也可用 Turso CLI（可选）：
 
 ```bash
 brew install tursodatabase/tap/turso
 turso auth login
-turso db create athena
-turso db show athena --url    # 得到 TURSO_DATABASE_URL
-turso db tokens create athena # 得到 TURSO_AUTH_TOKEN
+# 示例：孟买 group + 库（若已有东京库，先 export 再 import，勿两套库同时当主库写）
+turso group create asia --location aws-ap-south-1 -w
+turso db show athena-apac --url
+turso db tokens create athena-apac
 ```
 
 ### 3.2 在 Belmo 填写环境变量
 
 在服务的 **Environment variables** 中添加：
 
-| 变量名 | 值 | 说明 |
-|--------|-----|------|
-| `TURSO_DATABASE_URL` | `libsql://xxx.turso.io` | Turso 数据库地址 |
-| `TURSO_AUTH_TOKEN` | 你的 Token | Turso 认证令牌 |
-| `SERVERCHAN_SENDKEY` | 你的 SendKey | Server酱 推送密钥（必填） |
-| `SCRAPE_SECRET` | 随机字符串 | 保护 `/api/cron/scrape` 接口 |
-| `TIMEZONE` | `Asia/Shanghai` | 北京时间 |
-| `ENABLE_SCHEDULER` | `true` | **必填**：启用内置定时任务（合作快讯每 **2** 分钟扫描 + 基金额度抓取） |
-| `DEAL_POLL_INTERVAL_MIN` | `2` | 合作快讯轮询间隔（分钟），默认 2 |
-| `GEMINI_API_KEY` | 你的 Gemini Key | AI 合作快讯第一轮筛选（必填） |
-| `SEC_USER_AGENT` | `YourName your@email.com` | SEC 要求带联系邮箱，否则 8-K 抓不到 |
-| `FINNHUB_API_KEY` | 你的 Finnhub Key | 公司名 → 美股 ticker / 市值（建议填） |
+| 变量名 | 必填？ | 值 / 说明 |
+|--------|--------|-----------|
+| `TURSO_DATABASE_URL` | **必改** | 与本地同一主库 URL（现为孟买 `…aws-ap-south-1.turso.io`）。若仍是旧东京 URL，请改成新库并换 token |
+| `TURSO_AUTH_TOKEN` | **必改** | 对应上述库的 token（换库必须换 token） |
+| `TURSO_EMBEDDED_REPLICA` | 建议 | 默认 `true`：云端也读本地副本，页面更快；首次部署 sync 可能 1–3 分钟 |
+| `TURSO_SYNC_INTERVAL_SEC` | 可选 | 默认 `30`；可调 `120`/`300` 更省 Sync 流量 |
+| `TURSO_CONNECT_TIMEOUT_SEC` | 可选 | 默认 `45`；启动超时先起 HTTP，后台重连 Turso |
+| `SELF_HEAL_ENABLED` | 建议 | 默认 `true`：定时补全财报涨跌/首日回测等缺失字段 |
+| `SELF_HEAL_INTERVAL_MIN` | 可选 | 默认 `20` |
+| `SERVERCHAN_SENDKEY` | 必填 | Server酱推送 |
+| `SCRAPE_SECRET` | 建议 | 保护 cron 接口 |
+| `TIMEZONE` | 必填 | `Asia/Shanghai` |
+| `ENABLE_SCHEDULER` | **必填** | `true`（合作快讯 7×24） |
+| `DEAL_POLL_INTERVAL_MIN` | 可选 | 默认 `2` |
+| `GEMINI_API_KEY` | 必填 | 合作快讯 LLM |
+| `SEC_USER_AGENT` | 建议 | SEC 联系邮箱 UA |
+| `FINNHUB_API_KEY` | 建议 | 日历 / ticker |
 
-> 配置 Turso 后**不要**再设 `DATABASE_URL`，程序会自动使用 Turso。  
-> 未配置 Turso 时，程序回退到 `/tmp/athena-data/` 本地 SQLite（重新部署会丢历史）。
+> **不要**再设 `DATABASE_URL` 当主库；配置了 Turso 后只走 Turso（含 Embedded Replica），不再回退 SQLite。  
+> **不要**把另一份独立库填进 `TURSO_DATABASE_URL_FALLBACKS`（会双写分裂）。官方 Edge Replicas 已弃用。
 
 在 Belmo **Settings** 里把 **Health Check Path** 设为：
 
@@ -62,7 +68,8 @@ turso db tokens create athena # 得到 TURSO_AUTH_TOKEN
 /health
 ```
 
-> `SCRAPE_SECRET` 可用终端生成：`openssl rand -hex 16`
+> 降级时 `/health` 可能返回 `degraded`（库未就绪）但仍应尽快恢复；HTML 页可开，部分 `/api/*` 会 503。  
+> `SCRAPE_SECRET` 可用：`openssl rand -hex 16`
 
 ## 第四步：启动命令（重要）
 
