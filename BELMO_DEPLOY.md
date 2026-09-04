@@ -50,7 +50,9 @@ turso db tokens create athena-apac
 | `TURSO_CONNECT_TIMEOUT_SEC` | 可选 | 默认 `45`；启动超时先起 HTTP，后台重连 Turso |
 | `SELF_HEAL_ENABLED` | 建议 | 默认 `true`：定时补全财报涨跌/首日回测等缺失字段 |
 | `SELF_HEAL_INTERVAL_MIN` | 可选 | 默认 `20` |
-| `SERVERCHAN_SENDKEY` | 必填 | Server酱推送 |
+| `BARK_DEVICE_KEY` | **推荐** | iOS Bark App 内复制的 key（无需国内实名；官方 `api.day.app`） |
+| `BARK_SERVER_URL` | 可选 | 默认 `https://api.day.app` |
+| `BARK_GROUP` | 可选 | 默认 `Athena` |
 | `SCRAPE_SECRET` | 建议 | 保护 cron 接口 |
 | `TIMEZONE` | 必填 | `Asia/Shanghai` |
 | `ENABLE_SCHEDULER` | **必填** | `true`（合作快讯 7×24） |
@@ -127,7 +129,7 @@ https://athena-fund.app.belmo.io
 确认 `ENABLE_SCHEDULER=true`，且 `TIMEZONE=Asia/Shanghai`。
 
 **Q: 推送没收到？**  
-检查 `SERVERCHAN_SENDKEY` 是否正确，Server酱 免费版每天 5 条额度是否用完。
+检查 `BARK_DEVICE_KEY` 是否正确；可用 `scripts/send_bark_test.py` 测一条。
 
 **Q: 如何确认 Turso 已生效？**  
 访问 `/api/status`，`database` 字段应为 `"turso"`。若为 `"sqlite"`，检查 Belmo 环境变量 `TURSO_DATABASE_URL` 和 `TURSO_AUTH_TOKEN` 是否都已填写并重新部署。

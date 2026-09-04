@@ -39,7 +39,7 @@ from app.earnings_monitor.trade_window import (
     today_bj,
 )
 from app.earnings_monitor.universe import filter_by_market_cap, load_universe
-from app.notifier import notify
+from app.notifier import notify, successful_channels
 from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
@@ -445,11 +445,7 @@ async def run_t2_push_check() -> dict:
             events.sort(key=lambda x: x.score_total or 0, reverse=True)
             title, content = build_earnings_batch_push(edate, events)
             results = await notify(title, content)
-            channels = []
-            if results.get("pushplus"):
-                channels.append("pushplus")
-            if results.get("serverchan"):
-                channels.append("serverchan")
+            channels = successful_channels(results)
 
             success = bool(channels)
             if not results:

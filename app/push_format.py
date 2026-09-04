@@ -44,6 +44,47 @@ def build_deal_push_content(event) -> tuple[str, str]:
     return title, "\n".join(lines)
 
 
+def build_deal_digest_push_content(events: list) -> tuple[str, str]:
+    """多条积压快讯合并成一条，避免额度恢复后连发刷屏。"""
+    items = [e for e in events if e is not None]
+    n = len(items)
+    if n == 0:
+        return "[AI合作] 综合", "（无条目）"
+    if n == 1:
+        return build_deal_push_content(items[0])
+
+    tickers: list[str] = []
+    seen: set[str] = set()
+    for e in items:
+        t = (e.beneficiary_ticker or "").strip()
+        if t and t not in seen:
+            seen.add(t)
+            tickers.append(t)
+    head = "、".join(tickers[:5])
+    if len(tickers) > 5:
+        head += f" 等{len(tickers)}只"
+    title = f"[AI合作·综合] {n}条 · {head}"
+
+    lines = [
+        f"【AI 合作快讯综合】共 {n} 条（积压合并推送，免连发）",
+        "",
+    ]
+    for i, e in enumerate(items, 1):
+        anchor = (e.anchor_ticker or "").strip() or (e.anchor_name or "—")
+        lines.append(
+            f"{i}. {(e.beneficiary_ticker or '—')} ← {anchor}"
+        )
+        hl = (e.headline or "").strip()
+        if hl:
+            lines.append(f"   {hl[:120]}{'…' if len(hl) > 120 else ''}")
+        url = (e.source_url or "").strip()
+        if url:
+            lines.append(f"   {url}")
+        lines.append("")
+
+    return title, "\n".join(lines).rstrip()
+
+
 def build_nvda_push_content(event) -> tuple[str, str]:
     tag = "A+B" if event.signal_tier == "A_PLUS_B" else "A"
     observe = "" if event.buy_ok else "·观察"

@@ -55,7 +55,10 @@ def _resolve_database_url() -> str:
 
 
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")
-SERVERCHAN_SENDKEY = os.getenv("SERVERCHAN_SENDKEY", "")
+# Bark（iOS）：App 打开后复制 key；默认走官方 https://api.day.app，无需自建、无需实名
+BARK_DEVICE_KEY = (os.getenv("BARK_DEVICE_KEY") or "").strip()
+BARK_SERVER_URL = (os.getenv("BARK_SERVER_URL") or "https://api.day.app").rstrip("/")
+BARK_GROUP = (os.getenv("BARK_GROUP") or "Athena").strip() or "Athena"
 TURSO_DATABASE_URL = _normalize_turso_url(os.getenv("TURSO_DATABASE_URL", "")) if os.getenv("TURSO_DATABASE_URL") else ""
 TURSO_AUTH_TOKEN = os.getenv("TURSO_AUTH_TOKEN", "")
 USE_TURSO = bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)

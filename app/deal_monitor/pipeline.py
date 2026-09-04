@@ -45,8 +45,8 @@ from app.deal_monitor.materiality import (
 )
 from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pair_text
 from app.deal_monitor.tiers import RoleAssignment, assign_roles, score_threshold
-from app.notifier import notify
-from app.push_format import build_deal_push_content
+from app.notifier import notify, successful_channels
+from app.push_format import build_deal_digest_push_content, build_deal_push_content
 from app.source_url_guard import is_test_source_url
 from app.utils import now_beijing
 
@@ -220,6 +220,24 @@ def _push_rate_limited(db: Session, beneficiary_ticker: str) -> bool:
     return global_count >= DEAL_MAX_PUSH_PER_HOUR
 
 
+async def _apply_notify_result(event: DealEvent, results: dict) -> bool:
+    """根据 notify 结果写 pushed_at / push_channel。成功返回 True。"""
+    if not results:
+        event.push_channel = "unconfigured"
+        event.pushed_at = None
+        return False
+    channels = successful_channels(results)
+    if channels:
+        event.pushed_at = now_beijing()
+        event.push_channel = "+".join(channels)
+        logger.info("已推送 %s via %s", event.beneficiary_ticker, event.push_channel)
+        return True
+    event.push_channel = "failed"
+    event.pushed_at = None
+    logger.warning("推送全部失败 %s results=%s", event.beneficiary_ticker, results)
+    return False
+
+
 async def _maybe_push(db: Session, event: DealEvent, roles_should_push: bool) -> None:
     """仅在渠道真正发送成功时写入 pushed_at；失败可被后续重试。"""
     if not roles_should_push or not DEAL_PUSH_ENABLED:
@@ -233,31 +251,19 @@ async def _maybe_push(db: Session, event: DealEvent, roles_should_push: bool) ->
     title, content = build_deal_push_content(event)
     results = await notify(title, content)
     if not results:
-        logger.warning("推送通道未配置（PUSHPLUS/SERVERCHAN 为空），跳过 %s", event.beneficiary_ticker)
-        event.push_channel = "unconfigured"
-        event.pushed_at = None
-        return
-
-    channels = []
-    if results.get("pushplus"):
-        channels.append("pushplus")
-    if results.get("serverchan"):
-        channels.append("serverchan")
-    if channels:
-        event.pushed_at = now_beijing()
-        event.push_channel = "+".join(channels)
-        logger.info("已推送 %s via %s", event.beneficiary_ticker, event.push_channel)
-    else:
-        logger.warning("推送全部失败 %s results=%s", event.beneficiary_ticker, results)
-        event.push_channel = "failed"
-        event.pushed_at = None
+        logger.warning("推送通道未配置（BARK/PUSHPLUS 为空），跳过 %s", event.beneficiary_ticker)
+    await _apply_notify_result(event, results)
 
 
-async def retry_unpushed_events(db: Session, limit: int = 20) -> int:
-    """补推：从未成功推送的事件（含误写 pushed_at 但 channel=none）。"""
+async def retry_unpushed_events(db: Session, limit: int = 12) -> int:
+    """补推失败/限流事件。
+
+    积压 ≥2 条时合并成一条综合推送（占 1 次额度），避免通道日限额恢复后连发。
+    仅 1 条时仍单条即时补推。
+    """
     if not DEAL_PUSH_ENABLED:
         return 0
-    pending = (
+    candidates = (
         db.query(DealEvent)
         .filter(
             or_(
@@ -268,24 +274,85 @@ async def retry_unpushed_events(db: Session, limit: int = 20) -> int:
                 ),
             )
         )
-        .order_by(DealEvent.id.asc())
-        .limit(limit)
+        .order_by(DealEvent.fetched_at.desc(), DealEvent.id.desc())
+        .limit(40)
         .all()
     )
-    n = 0
-    for event in pending:
-        # 同受益标的 24h 内已成功推过 → 不再补推转载稿，避免刷屏
+
+    eligible: list[DealEvent] = []
+    touched = False
+    seen_ticker: set[str] = set()
+    for event in candidates:
+        if _published_too_stale_for_push(event.published_at):
+            event.push_channel = "stale"
+            event.pushed_at = None
+            db.add(event)
+            touched = True
+            continue
+        ticker = (event.beneficiary_ticker or "").strip().upper()
+        if ticker and ticker in seen_ticker:
+            event.push_channel = "soft_skip"
+            event.pushed_at = None
+            db.add(event)
+            touched = True
+            continue
         if _push_rate_limited(db, event.beneficiary_ticker):
             event.push_channel = "rate_limited"
             db.add(event)
+            touched = True
             continue
-        await _maybe_push(db, event, roles_should_push=True)
-        if _push_succeeded(event):
-            n += 1
-        db.add(event)
-    if pending:
+        if ticker:
+            seen_ticker.add(ticker)
+        eligible.append(event)
+        if len(eligible) >= limit:
+            break
+
+    if not eligible:
+        if touched:
+            db.commit()
+        return 0
+
+    if len(eligible) == 1:
+        await _maybe_push(db, eligible[0], roles_should_push=True)
+        db.add(eligible[0])
         db.commit()
-    return n
+        return 1 if _push_succeeded(eligible[0]) else 0
+
+    title, content = build_deal_digest_push_content(eligible)
+    results = await notify(title, content)
+    if not results:
+        logger.warning("综合推送通道未配置，跳过 %s 条积压", len(eligible))
+        for event in eligible:
+            event.push_channel = "unconfigured"
+            event.pushed_at = None
+            db.add(event)
+        db.commit()
+        return 0
+
+    channels = successful_channels(results)
+    if not channels:
+        logger.warning("综合推送全部失败 results=%s", results)
+        for event in eligible:
+            event.push_channel = "failed"
+            event.pushed_at = None
+            db.add(event)
+        db.commit()
+        return 0
+
+    channel = "+".join(channels) + "+digest"
+    now = now_beijing()
+    for event in eligible:
+        event.pushed_at = now
+        event.push_channel = channel
+        db.add(event)
+    db.commit()
+    logger.info(
+        "已综合推送 %s 条积压 via %s: %s",
+        len(eligible),
+        channel,
+        ", ".join(e.beneficiary_ticker or "?" for e in eligible),
+    )
+    return len(eligible)
 
 
 def _save_event(

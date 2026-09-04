@@ -44,7 +44,7 @@ fly volumes create athena_data --region hkg --size 1
 
 # 设置环境变量（替换成你的真实值）
 fly secrets set \
-  SERVERCHAN_SENDKEY=你的SendKey \
+  BARK_DEVICE_KEY=你的BarkKey \
   SCRAPE_SECRET=随机字符串比如abc123xyz \
   TIMEZONE=Asia/Shanghai \
   ENABLE_SCHEDULER=true
@@ -94,7 +94,7 @@ git push -u origin main
 1. 打开 https://render.com ，用 GitHub 登录
 2. New → Blueprint → 连接仓库（会自动读取 `render.yaml`）
 3. 在 Environment 中手动填入：
-   - `SERVERCHAN_SENDKEY`
+   - `BARK_DEVICE_KEY`
    - `SCRAPE_SECRET`（随机字符串）
 
 ### 3. 配置外部定时任务
@@ -114,11 +114,11 @@ git push -u origin main
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `SERVERCHAN_SENDKEY` | 是 | 你的 Server酱 SendKey |
+| `BARK_DEVICE_KEY` | 推荐 | iOS Bark App 内 key（官方 api.day.app） |
 | `SCRAPE_SECRET` | 公网部署必填 | 防止他人滥用抓取接口 |
 | `TIMEZONE` | 是 | 固定填 `Asia/Shanghai` |
 | `ENABLE_SCHEDULER` | - | Fly.io 填 `true`；Render 填 `false` |
-| `PUSHPLUS_TOKEN` | 否 | 如用 PushPlus 则填写 |
+| `PUSHPLUS_TOKEN` | 否 | 需实名，可不配 |
 
 ---
 
@@ -135,6 +135,4 @@ git push -u origin main
 - **Fly.io 免费额度**：足够跑本项目的单实例（256MB 内存）
 - **Render 免费版**：$0，但会休眠
 - **cron-job.org**：$0
-- **Server酱**：你当前的免费版每天 5 条，够用（每天最多抓 2 次 + 偶尔变化通知）
-
-如果推送量增大，可考虑 Server酱 订阅（约 8 元/月，1000 条/天）。
+- **Bark**：官方推送通道，按设备 key 推送，无需国内实名
