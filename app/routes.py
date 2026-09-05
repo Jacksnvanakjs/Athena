@@ -257,12 +257,19 @@ def _push_ok(event) -> bool:
 
 
 def _first_day_fields(event) -> dict:
+    from app.config import DEAL_SCORE_OUTCOME_GAP_DISPLAY
+
     ret = getattr(event, "first_day_return", None)
+    mat = getattr(event, "materiality_score", None)
+    fd_score = getattr(event, "first_day_score", None)
+    gap = None
+    if mat is not None and fd_score is not None:
+        gap = int(mat) - int(fd_score)
     return {
         "first_day_return": ret,
         "first_day_return_pct": None if ret is None else round(ret * 100.0, 2),
         "first_day_band": getattr(event, "first_day_band", None),
-        "first_day_score": getattr(event, "first_day_score", None),
+        "first_day_score": fd_score,
         "first_day_session_date": (
             event.first_day_session_date.isoformat()
             if getattr(event, "first_day_session_date", None)
@@ -275,7 +282,16 @@ def _first_day_fields(event) -> dict:
             if getattr(event, "first_day_checked_at", None)
             else None
         ),
+        "score_gap": gap,
+        "score_gap_large": gap is not None and abs(gap) >= DEAL_SCORE_OUTCOME_GAP_DISPLAY,
     }
+
+
+def _deal_quality_fields(event) -> dict:
+    from app.deal_monitor.materiality import classify_deal_quality
+
+    text = f"{getattr(event, 'headline', '') or ''}\n{getattr(event, 'summary', None) or ''}"
+    return {"deal_quality": classify_deal_quality(text)}
 
 
 def _deal_to_dict(event) -> dict:
@@ -318,6 +334,7 @@ def _deal_to_dict(event) -> dict:
         "sell_window": None,
         "buy_ok": None,
         "confidence": None,
+        **_deal_quality_fields(event),
         **_first_day_fields(event),
     }
 
@@ -366,6 +383,7 @@ def _nvda_to_dict(event) -> dict:
         "chase_risk": event.chase_risk,
         "prior_a_days_ago": event.prior_a_days_ago,
         "strategy_label": strategy_label(event.strategy),
+        "deal_quality": event.signal_tier,
         **_first_day_fields(event),
     }
 
@@ -383,14 +401,34 @@ def list_deals(
     signal_tier: str | None = Query(default=None),
     min_score: int = Query(default=0, ge=0, le=100),
     pushed_only: bool = Query(default=False),
+    first_day_move: str | None = Query(default=None),
+    hide_weak: bool | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
 ):
+    from app.config import DEAL_HIDE_WEAK_QUALITY
     from app.database import DealEvent, NvdaSignalEvent
-    from app.deal_monitor.content_filter import should_hide_deal_event
+    from app.deal_monitor.content_filter import (
+        should_hide_deal_event,
+        should_hide_weak_quality_event,
+    )
 
     since = now_beijing() - timedelta(days=days)
     if category not in ("all", FEED_AI, FEED_NVDA):
         raise HTTPException(status_code=400, detail="category 支持: all, ai_cooperation, nvda_signal")
+    move = (first_day_move or "").strip().lower()
+    if move and move not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="first_day_move 支持: up, down")
+    do_hide_weak = DEAL_HIDE_WEAK_QUALITY if hide_weak is None else hide_weak
+
+    def _match_first_day_move(row: dict) -> bool:
+        if not move:
+            return True
+        ret = row.get("first_day_return")
+        if ret is None:
+            return False
+        if move == "up":
+            return float(ret) > 0
+        return float(ret) < 0
 
     def _query(db: Session):
         rows: list[dict] = []
@@ -407,10 +445,16 @@ def list_deals(
                     DealEvent.push_channel.isnot(None),
                     ~DealEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
-            for r in q.order_by(desc(DealEvent.published_at)).limit(limit).all():
+            fetch_n = min(500, max(limit * 4, limit))
+            for r in q.order_by(desc(DealEvent.published_at)).limit(fetch_n).all():
                 if is_test_source_url(r.source_url) or should_hide_deal_event(r):
                     continue
-                rows.append(_deal_to_dict(r))
+                if do_hide_weak and should_hide_weak_quality_event(r):
+                    continue
+                row = _deal_to_dict(r)
+                if not _match_first_day_move(row):
+                    continue
+                rows.append(row)
 
         if category in ("all", FEED_NVDA):
             q = db.query(NvdaSignalEvent).filter(NvdaSignalEvent.published_at >= since)
@@ -424,10 +468,14 @@ def list_deals(
                     NvdaSignalEvent.push_channel.isnot(None),
                     ~NvdaSignalEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
-            for r in q.order_by(desc(NvdaSignalEvent.published_at)).limit(limit).all():
+            fetch_n = min(500, max(limit * 4, limit))
+            for r in q.order_by(desc(NvdaSignalEvent.published_at)).limit(fetch_n).all():
                 if is_test_source_url(r.source_url):
                     continue
-                rows.append(_nvda_to_dict(r))
+                row = _nvda_to_dict(r)
+                if not _match_first_day_move(row):
+                    continue
+                rows.append(row)
 
         rows.sort(key=lambda x: x.get("published_at") or "", reverse=True)
         return rows[:limit]
@@ -439,11 +487,35 @@ def list_deals(
 def deals_stats(
     days: int = Query(default=7, ge=1, le=365),
     category: str = Query(default="all"),
+    first_day_move: str | None = Query(default=None),
+    hide_weak: bool | None = Query(default=None),
 ):
+    from app.config import DEAL_HIDE_WEAK_QUALITY, DEAL_SCORE_OUTCOME_GAP_DISPLAY
     from app.database import DealEvent, NvdaSignalEvent
-    from app.deal_monitor.content_filter import should_hide_deal_event
+    from app.deal_monitor.content_filter import (
+        should_hide_deal_event,
+        should_hide_weak_quality_event,
+    )
 
     since = now_beijing() - timedelta(days=days)
+    do_hide_weak = DEAL_HIDE_WEAK_QUALITY if hide_weak is None else hide_weak
+    move = (first_day_move or "").strip().lower()
+    if move and move not in ("up", "down"):
+        raise HTTPException(status_code=400, detail="first_day_move 支持: up, down")
+
+    def _ret_ok(ret) -> bool:
+        if not move:
+            return True
+        if ret is None:
+            return False
+        if move == "up":
+            return float(ret) > 0
+        return float(ret) < 0
+
+    def _gap_large(mat, fd) -> bool:
+        if mat is None or fd is None:
+            return False
+        return abs(int(mat) - int(fd)) >= DEAL_SCORE_OUTCOME_GAP_DISPLAY
 
     def _query(db: Session):
         ai_total = ai_pushed = 0
@@ -451,22 +523,35 @@ def deals_stats(
         ai_anom = nvda_anom = 0
         ai_fd_checked = nvda_fd_checked = 0
         by_tier_pair: dict[str, int] = {}
+        first_day_up = first_day_down = 0
 
         if category in ("all", FEED_AI):
-            ai_rows = [
-                e for e in db.query(DealEvent).filter(DealEvent.published_at >= since).all()
-                if not is_test_source_url(e.source_url) and not should_hide_deal_event(e)
-            ]
+            ai_rows = []
+            for e in db.query(DealEvent).filter(DealEvent.published_at >= since).all():
+                if is_test_source_url(e.source_url) or should_hide_deal_event(e):
+                    continue
+                if do_hide_weak and should_hide_weak_quality_event(e):
+                    continue
+                if not _ret_ok(e.first_day_return):
+                    continue
+                ai_rows.append(e)
             ai_total = len(ai_rows)
             ai_pushed = len([
                 e for e in ai_rows
                 if e.pushed_at and e.push_channel and e.push_channel not in _PUSH_OK_EXCLUDE
             ])
-            ai_anom = len([e for e in ai_rows if e.first_day_anomaly])
+            ai_anom = len([
+                e for e in ai_rows if _gap_large(e.materiality_score, e.first_day_score)
+            ])
             ai_fd_checked = len([e for e in ai_rows if e.first_day_checked_at])
             by_tier_pair = {}
             for e in ai_rows:
                 by_tier_pair[e.tier_pair] = by_tier_pair.get(e.tier_pair, 0) + 1
+                if e.first_day_return is not None:
+                    if e.first_day_return > 0:
+                        first_day_up += 1
+                    elif e.first_day_return < 0:
+                        first_day_down += 1
 
         if category in ("all", FEED_NVDA):
             nvda_rows = (
@@ -474,19 +559,32 @@ def deals_stats(
                 .filter(NvdaSignalEvent.published_at >= since)
                 .all()
             )
-            nvda_rows = [e for e in nvda_rows if not is_test_source_url(e.source_url)]
+            nvda_rows = [
+                e
+                for e in nvda_rows
+                if not is_test_source_url(e.source_url) and _ret_ok(e.first_day_return)
+            ]
             nvda_total = len(nvda_rows)
             nvda_pushed = len([
                 e for e in nvda_rows
                 if e.pushed_at and e.push_channel
                 and e.push_channel not in _PUSH_OK_EXCLUDE
             ])
-            nvda_anom = len([e for e in nvda_rows if e.first_day_anomaly])
+            nvda_anom = len([
+                e for e in nvda_rows if _gap_large(e.materiality_score, e.first_day_score)
+            ])
             nvda_fd_checked = len([e for e in nvda_rows if e.first_day_checked_at])
+            for e in nvda_rows:
+                if e.first_day_return is not None:
+                    if e.first_day_return > 0:
+                        first_day_up += 1
+                    elif e.first_day_return < 0:
+                        first_day_down += 1
 
         return {
             "days": days,
             "category": category,
+            "first_day_move": move or None,
             "total": ai_total + nvda_total,
             "pushed": ai_pushed + nvda_pushed,
             "ai_cooperation_total": ai_total,
@@ -495,10 +593,43 @@ def deals_stats(
             "nvda_signal_pushed": nvda_pushed,
             "by_tier_pair": by_tier_pair,
             "first_day_anomalies": ai_anom + nvda_anom,
+            "score_gap_large": ai_anom + nvda_anom,
             "first_day_checked": ai_fd_checked + nvda_fd_checked,
+            "first_day_up": first_day_up,
+            "first_day_down": first_day_down,
         }
 
     return run_with_db_retry(_query)
+
+
+@router.post("/deals/rescore")
+def deals_rescore(
+    token: str = Query(default=""),
+    days: int = Query(default=365, ge=1, le=730),
+    gap_only: bool = Query(default=True),
+    calibrate: bool = Query(default=True),
+    dry_run: bool = Query(default=False),
+    limit: int = Query(default=500, ge=1, le=2000),
+):
+    """按新材料性规则重打分；默认只处理分数与回测分差大的条目。"""
+    from app.config import DEAL_ADMIN_TOKEN, DEAL_SCORE_OUTCOME_GAP
+    from app.deal_monitor.rescore import rescore_deal_events
+
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+
+    def _run(db: Session):
+        return rescore_deal_events(
+            db,
+            lookback_days=days,
+            gap_only=gap_only,
+            gap_threshold=DEAL_SCORE_OUTCOME_GAP,
+            calibrate=calibrate,
+            dry_run=dry_run,
+            limit=limit,
+        )
+
+    return run_with_db_retry(_run)
 
 
 @router.get("/deals/{deal_id}")

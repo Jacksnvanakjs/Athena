@@ -229,3 +229,14 @@ def test_fervo_shares_jump_still_rejected():
     reject, reason = reject_deal_item(_item(h, source="finnhub:GOOGL"))
     assert reject is True
     assert "股价" in reason or "旧闻" in reason
+
+
+def test_mining_pivot_headline_hidden():
+    event = SimpleNamespace(
+        headline="GPUS：停挖矿转 AI（小票波动大）",
+        summary="Master Services Agreement up to $3 Billion at Michigan Data Center",
+        source="pr_newswire",
+        source_url="https://www.prnewswire.com/news-releases/example",
+        published_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
+    )
+    assert should_hide_deal_event(event) is True

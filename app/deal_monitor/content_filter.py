@@ -143,11 +143,14 @@ _PRIMARY_SOURCE_PREFIXES = (
     "company_ir",
 )
 
-# 弱催化：运营琐事、无新商业条款
+# 弱催化：运营琐事、无新商业条款、挖矿转型叙事
 _WEAK_CATALYST = re.compile(
     r"(?:"
     r"ceased?\s+(?:bitcoin\s+)?mining|"
+    r"stop(?:s|ped)?\s+(?:bitcoin\s+)?mining|"
+    r"exit(?:s|ing)?\s+(?:bitcoin\s+)?mining|"
     r"has ceased\b|"
+    r"停挖矿|停止挖矿|挖矿转|"
     r"opens?\s+(?:a\s+)?new\s+.{0,30}office|"
     r"receives?\s+accreditation|"
     r"achieves?\s+.{0,40}accreditation|"
@@ -442,7 +445,30 @@ def should_hide_deal_event(event) -> bool:
         source_url=event.source_url or "",
         published_at=getattr(event, "published_at", None) or datetime.now(timezone.utc),
     )
-    return reject_deal_item(item)[0]
+    if reject_deal_item(item)[0]:
+        return True
+    # 标题已标明挖矿转型等弱叙事：即使正文有大额 MSA 也不展示
+    headline = event.headline or ""
+    if is_weak_price_catalyst(headline):
+        return True
+    return False
+
+
+def should_hide_weak_quality_event(event, *, keep_if_first_day_high: bool = True) -> bool:
+    """列表可选：隐藏软整合/融资/空话；首日回测≥70 的保留作对照样本。"""
+    from app.deal_monitor.materiality import (
+        classify_deal_quality,
+        is_weak_quality_for_display,
+    )
+
+    text = f"{event.headline or ''}\n{event.summary or ''}"
+    quality = classify_deal_quality(text)
+    if not is_weak_quality_for_display(quality):
+        return False
+    fd = getattr(event, "first_day_score", None)
+    if keep_if_first_day_high and fd is not None and int(fd) >= 70:
+        return False
+    return True
 
 
 

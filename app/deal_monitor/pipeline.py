@@ -40,8 +40,10 @@ from app.deal_monitor.market_cap import enrich_entity_tiers
 from app.deal_monitor.materiality import (
     QUALITY_FINANCING,
     QUALITY_SOFT_PRODUCT,
+    QUALITY_VAGUE,
     classify_deal_quality,
     finalize_materiality_score,
+    should_soft_skip_push,
 )
 from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pair_text
 from app.deal_monitor.tiers import RoleAssignment, assign_roles, score_threshold
@@ -365,11 +367,18 @@ def _save_event(
     beneficiary: Entity,
     event_type: str = EVENT_TYPE,
 ) -> DealEvent:
+    from app.deal_monitor.headline_zh import build_zh_headline
+
     h_hash = headline_hash(item.headline)
+    display_headline = build_zh_headline(
+        beneficiary.ticker or "",
+        item.headline,
+        item.summary,
+    )
     event = DealEvent(
         published_at=item.published_at.replace(tzinfo=None),
         fetched_at=now_beijing(),
-        headline=item.headline,
+        headline=display_headline[:500],
         summary=item.summary,
         source=item.source,
         source_url=item.source_url,
@@ -563,13 +572,17 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
                         role_pairs.append((r, ent))
 
     quality = classify_deal_quality(text)
-    # 软整合不再被 LLM 豁免成高分：下方 finalize 封顶且不推送
+    # 空话合作默认不入库；软整合/融资可入库对照但不推送，且封顶低分
 
     event_type = (llm_decision.event_type if llm_decision else None) or EVENT_TYPE
     is_update = is_update_headline(item.headline)
     saved: list[str] = []
     last_score = 0
     last_tier_pair = ""
+
+    if quality == QUALITY_VAGUE:
+        stats["reason"] = "空话合作/无商业条款，不入库"
+        return stats
 
     for roles, beneficiary in role_pairs:
         score = finalize_materiality_score(
@@ -583,13 +596,16 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             llm_decision
             and llm_decision.llm_score
             and llm_decision.llm_score < 70
-            and quality not in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING)
+            and quality not in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING, QUALITY_VAGUE)
         ):
             stats["reason"] = f"LLM 材料性不足 {llm_decision.llm_score} < 70"
             return stats
         threshold = score_threshold(roles.tier_pair)
-        # 软整合/融资：用更低展示门槛，便于回测对照；但不推送
-        effective_threshold = 50 if quality in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING) else threshold
+        # 软整合/融资：更高入库门槛（弱催化少占列表）；仍 soft_skip 不推送
+        if quality in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING):
+            effective_threshold = max(55, threshold)
+        else:
+            effective_threshold = threshold
         if score < effective_threshold:
             stats["reason"] = f"材料性 {score} < {effective_threshold}"
             continue
@@ -605,10 +621,7 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             logger.info("7 天去重跳过 %s (anchor=%s)", ticker, anchor_key)
             continue
 
-        should_push = roles.should_push and quality not in (
-            QUALITY_SOFT_PRODUCT,
-            QUALITY_FINANCING,
-        )
+        should_push = roles.should_push and not should_soft_skip_push(quality)
 
         event = _save_event(
             db, item, roles, score, matched, is_update, beneficiary, event_type=event_type

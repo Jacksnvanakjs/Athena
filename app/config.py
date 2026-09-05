@@ -161,6 +161,11 @@ DEAL_LLM_MODEL = os.getenv("DEAL_LLM_MODEL", "gemini-3.6-flash")
 DEAL_INGEST_MAX_AGE_DAYS = int(os.getenv("DEAL_INGEST_MAX_AGE_DAYS", "3"))
 # 发稿超过 N 天：若已入库则不推送（兜底；正常应由 INGEST 先行丢弃）
 DEAL_PUSH_MAX_AGE_DAYS = int(os.getenv("DEAL_PUSH_MAX_AGE_DAYS", "3"))
+# 列表默认隐藏软整合/融资/空话（首日回测≥70 仍保留作对照）
+DEAL_HIDE_WEAK_QUALITY = os.getenv("DEAL_HIDE_WEAK_QUALITY", "true").lower() == "true"
+# 分数与首日回测分差≥此值视为分差大（重打分/筛选）
+DEAL_SCORE_OUTCOME_GAP = int(os.getenv("DEAL_SCORE_OUTCOME_GAP", "15"))
+DEAL_SCORE_OUTCOME_GAP_DISPLAY = int(os.getenv("DEAL_SCORE_OUTCOME_GAP_DISPLAY", "20"))
 
 # ── 黄仁勋 / NVDA A 档产业动作监控 ──
 NVDA_SIGNAL_ENABLED = os.getenv("NVDA_SIGNAL_ENABLED", "true").lower() == "true"

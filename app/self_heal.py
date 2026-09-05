@@ -23,6 +23,7 @@ _LAST_RUN: dict[str, datetime] = {}
 _MIN_GAP = {
     "earnings_outcome": timedelta(minutes=25),
     "deal_first_day": timedelta(minutes=25),
+    "deal_rescore": timedelta(hours=6),
     "earnings_calendar": timedelta(minutes=45),
     "deal_poll": timedelta(minutes=max(5, DEAL_POLL_INTERVAL_MIN)),
 }
@@ -274,6 +275,74 @@ async def run_self_heal(*, force: bool = False) -> dict:
                 actions.append(
                     {"action": "deal_first_day", "ok": False, "error": str(exc)[:200]}
                 )
+
+        # 4) 分数 vs 首日回测分差大 → 按新规则重打分
+        if force or _cooldown_ok("deal_rescore"):
+            from app.config import DEAL_SCORE_OUTCOME_GAP
+            from app.database import DealEvent, db_session
+            from app.deal_monitor.content_filter import should_hide_deal_event
+            from app.deal_monitor.materiality import is_large_score_outcome_gap
+            from app.deal_monitor.rescore import rescore_deal_events
+            from app.source_url_guard import is_test_source_url
+
+            large_n = 0
+            try:
+                with db_session() as db:
+                    since = now_beijing() - timedelta(days=120)
+                    for e in (
+                        db.query(DealEvent)
+                        .filter(DealEvent.published_at >= since)
+                        .filter(DealEvent.first_day_score.isnot(None))
+                        .all()
+                    ):
+                        if is_test_source_url(e.source_url) or should_hide_deal_event(e):
+                            continue
+                        if is_large_score_outcome_gap(
+                            e.materiality_score,
+                            e.first_day_score,
+                            threshold=DEAL_SCORE_OUTCOME_GAP,
+                        ):
+                            large_n += 1
+            except Exception as exc:
+                logger.warning("自检扫描分差失败: %s", exc)
+                large_n = 0
+
+            if large_n > 0 or force:
+                logger.info("自检补全: deal_rescore，分差大 %d 条", large_n)
+                try:
+                    with db_session() as db:
+                        result = rescore_deal_events(
+                            db,
+                            lookback_days=120,
+                            gap_only=True,
+                            gap_threshold=DEAL_SCORE_OUTCOME_GAP,
+                            calibrate=True,
+                            dry_run=False,
+                            limit=300,
+                        )
+                    _mark_ran("deal_rescore")
+                    actions.append(
+                        {
+                            "action": "deal_rescore",
+                            "ok": True,
+                            "large_before": large_n,
+                            "result": {
+                                k: result[k]
+                                for k in (
+                                    "considered",
+                                    "updated",
+                                    "large_gap_before",
+                                    "large_gap_after",
+                                )
+                                if k in result
+                            },
+                        }
+                    )
+                except Exception as exc:
+                    logger.exception("自检补全 deal_rescore 失败")
+                    actions.append(
+                        {"action": "deal_rescore", "ok": False, "error": str(exc)[:200]}
+                    )
 
         after = audit_data_gaps() if actions else audit
         summary = {

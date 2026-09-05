@@ -277,10 +277,16 @@ async def process_item(db: Session, item: RawItem) -> dict:
             continue
 
         plan = build_trade_plan(classification.signal_tier, item.published_at)
+        from app.deal_monitor.headline_zh import build_zh_headline
+
         event = NvdaSignalEvent(
             published_at=item.published_at.replace(tzinfo=None),
             fetched_at=now_beijing(),
-            headline=item.headline,
+            headline=build_zh_headline(
+                entity.ticker or "",
+                item.headline,
+                item.summary,
+            )[:500],
             summary=item.summary,
             source=item.source,
             source_url=item.source_url,

@@ -490,9 +490,20 @@
         <div class="field">
           <div class="field-label">
             最低材料性分数
-            <span class="help" title="0～100 分。默认 0 表示显示全部已入库记录。">?</span>
+            <span class="help" title="只显示「分数」列不低于此值的记录。0=全部显示。">?</span>
           </div>
           <input type="number" class="short" id="min_score" value="0" min="0" max="100">
+        </div>
+        <div class="field">
+          <div class="field-label">
+            首日回测
+            <span class="help" title="按受益股发稿后首个交易日涨跌筛选：上涨=首日收盘相对前收 &gt;0；下跌=&lt;0。无行情的不纳入涨/跌。">?</span>
+          </div>
+          <select id="first_day_move">
+            <option value="">全部</option>
+            <option value="up">上涨</option>
+            <option value="down">下跌</option>
+          </select>
         </div>
         <div class="field">
           <div class="field-label">
@@ -602,10 +613,10 @@
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
-            <th title="系统材料性评分">分数</th>
-            <th title="首日回测档：≥+3%高 · +1%~+3%中高 · ±1%中 · ≤-1%低；中/低计异常">档</th>
-            <th title="首日回测分：高85 / 中高70 / 中55 / 低35">回测</th>
-            <th title="发稿后首个交易日收盘相对前收">首日</th>
+            <th>分数 <span class="help" title="系统给这条新闻的「材料性」分（0–100）：条款越硬（金额/年限/正式协议等）分越高。黄仁勋条目下方还会显示「置信」分。">?</span></th>
+            <th>档 <span class="help" title="受益股发稿后「首个交易日」涨跌强弱：高≥+3% · 中高+1%~+3% · 中约±1% · 低≤-1%。中/低会标异常，方便人工复核。">?</span></th>
+            <th>回测 <span class="help" title="把上面的「档」换成固定分数：高85 / 中高70 / 中55 / 低35，方便和历史比。无行情时显示 —。">?</span></th>
+            <th>首日 <span class="help" title="受益股发稿后首个交易日：收盘相对前收的涨跌幅（%）。「档」「回测」都由它换算而来。">?</span></th>
             <th>关系/策略</th>
             <th>已推送</th>
             <th>来源</th>
@@ -1049,7 +1060,9 @@
       else if (b === '中高') cls = 'fd-midhigh';
       else if (b === '中') cls = 'fd-mid';
       else if (b === '低') cls = 'fd-low';
-      const anom = row.first_day_anomaly ? ' title="首日中/低：计入异常，供人工复核"' : '';
+      const anom = row.score_gap_large
+        ? ` title="分数${row.materiality_score}与回测${row.first_day_score}分差${row.score_gap > 0 ? '+' : ''}${row.score_gap}：异常，供人工复核"`
+        : '';
       return `<span class="fd-band ${cls}"${anom}>${b}</span>`;
     }
 
@@ -1075,6 +1088,8 @@
         days: document.getElementById('days').value,
         category: cat,
       });
+      const fdMove = document.getElementById('first_day_move').value;
+      if (fdMove) params.set('first_day_move', fdMove);
       const res = await fetch('/api/deals/stats?' + params);
       const data = await res.json();
       const pairs = Object.entries(data.by_tier_pair || {}).map(([k, v]) => k + ' ' + v + '条').join(' · ');
@@ -1082,12 +1097,12 @@
       if (cat === 'all') {
         extra = ` · AI合作 ${data.ai_cooperation_total || 0} · 黄仁勋 ${data.nvda_signal_total || 0}`;
       }
-      const anom = data.first_day_anomalies || 0;
+      const anom = data.score_gap_large || 0;
       document.getElementById('stats').innerHTML =
         `筛选范围内：共 ${data.total} 条 · 已推送 ${data.pushed} 条${extra}` +
         (pairs ? ' · ' + pairs : '') +
-        ` · 首日异常 <strong>${anom}</strong>` +
-        `<span class="help" title="受益方首日涨跌档为「中」或「低」的条数（档位标识不变）。规则：≥+3%高 · +1%~+3%中高 · ±1%中 · ≤-1%低。请定期人工复核。">?</span>`;
+        ` · 分差异常 <strong>${anom}</strong>` +
+        `<span class="help" title="「分数」与「回测」相差≥20 的条数（粉红行）。分差小即使首日涨跌为中/低也不标红。">?</span>`;
     }
 
     async function loadDeals() {
@@ -1100,6 +1115,8 @@
       const st = document.getElementById('signal_tier').value;
       if (st) params.set('signal_tier', st);
       params.set('min_score', document.getElementById('min_score').value);
+      const fdMove = document.getElementById('first_day_move').value;
+      if (fdMove) params.set('first_day_move', fdMove);
       if (document.getElementById('pushed_only').checked) params.set('pushed_only', 'true');
 
       const res = await fetch('/api/deals?' + params);
@@ -1116,9 +1133,12 @@
       empty.style.display = 'none';
       for (const row of items) {
         const tr = document.createElement('tr');
-        tr.className = rowClass(row) + (row.first_day_anomaly ? ' fd-anom' : '');
+        tr.className = rowClass(row) + (row.score_gap_large ? ' fd-anom' : '');
         const titleExtra = row.category === 'nvda_signal' && row.buy_window
           ? `<div class="strategy-hint">买: ${row.buy_window} · 卖: ${row.sell_window || ''}</div>`
+          : '';
+        const gapHint = row.score_gap_large
+          ? `<div class="strategy-hint">分差${row.score_gap > 0 ? '+' : ''}${row.score_gap}</div>`
           : '';
         tr.innerHTML = `
           <td>${fmtCategory(row)}</td>
@@ -1126,7 +1146,7 @@
           <td>${fmtBeneficiary(row)}</td>
           <td>${fmtAnchor(row)}</td>
           <td>${row.headline}${titleExtra}</td>
-          <td class="score">${row.materiality_score}${row.confidence != null ? '<div class="strategy-hint">置信' + row.confidence + '</div>' : ''}</td>
+          <td class="score">${row.materiality_score}${row.confidence != null ? '<div class="strategy-hint">置信' + row.confidence + '</div>' : ''}${gapHint}</td>
           <td>${fmtFirstDayBand(row)}</td>
           <td class="score">${fmtFirstDayScore(row)}</td>
           <td>${fmtFirstDayRet(row)}</td>
@@ -1184,7 +1204,7 @@
       else loadDeals();
     }
 
-    ['days', 'category', 'tier_pair', 'signal_tier', 'min_score', 'pushed_only'].forEach(id => {
+    ['days', 'category', 'tier_pair', 'signal_tier', 'min_score', 'pushed_only', 'first_day_move'].forEach(id => {
       document.getElementById(id).addEventListener('change', loadDeals);
     });
     ['er_days', 'er_sector', 'er_min_score', 'er_push_eligible'].forEach(id => {
