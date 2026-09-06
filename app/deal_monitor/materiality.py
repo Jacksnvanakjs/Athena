@@ -20,7 +20,8 @@ SCORE_OUTCOME_GAP = 15
 SCORE_OUTCOME_GAP_DISPLAY = 20
 
 _HYPERSCALER = re.compile(
-    r"\b(?:google|alphabet|microsoft|amazon|aws|azure|meta|nvidia|openai|anthropic)\b",
+    r"\b(?:google|alphabet|microsoft|amazon|aws|azure|meta|nvidia|openai|anthropic|"
+    r"oracle|\boci\b)\b",
     re.I,
 )
 _POWER_STORAGE = re.compile(
@@ -116,6 +117,20 @@ _FRONTIER_GPU = re.compile(
     re.I,
 )
 _FRONTIER_LAB = re.compile(r"\b(?:anthropic|openai|google deepmind|deepmind)\b", re.I)
+# 云/hyperscaler × AI 数据中心网络（HPE Juniper × Oracle 等）；摘要常无 $ 金额但仍是基建落地
+_AI_NETWORK_INFRA = re.compile(
+    r"(?:"
+    r"juniper\s+networking|"
+    r"gigawatt[- ]scale|"
+    r"ai\s+(?:data\s*centers?|networking|network\s+infra)|"
+    r"data\s*center\s+networking|"
+    r"deploying\s+.{0,60}(?:networking|routing|switching).{0,80}"
+    r"(?:ai\s+)?data\s*centers?|"
+    r"networking.{0,40}(?:across|into).{0,40}(?:ai\s+)?data\s*centers?|"
+    r"AI\s*网络|数据中心网络"
+    r")",
+    re.I,
+)
 
 
 def has_commercial_terms(text: str) -> bool:
@@ -129,6 +144,12 @@ def is_telco_cloud_deal(text: str) -> bool:
 def is_frontier_gpu_deploy(text: str) -> bool:
     """大模型实验室 + 具名 GPU/加速器部署（如 AMD Instinct × Anthropic）。"""
     return bool(_FRONTIER_LAB.search(text or "") and _FRONTIER_GPU.search(text or ""))
+
+
+def is_ai_network_infra_deal(text: str) -> bool:
+    """云/hyperscaler AI 机房网络部署（如 HPE Juniper × Oracle）。"""
+    norm = text or ""
+    return bool(_HYPERSCALER.search(norm) and _AI_NETWORK_INFRA.search(norm))
 
 
 def classify_deal_quality(text: str) -> str:
@@ -162,6 +183,15 @@ def classify_deal_quality(text: str) -> str:
     if is_frontier_gpu_deploy(norm):
         return QUALITY_HARD
 
+    # 云 × AI 数据中心网络落地（HPE/Juniper×Oracle）：勿当「加深协作」空话
+    if is_ai_network_infra_deal(norm) and re.search(
+        r"(?:collaborat\w*|partnership|agreement|deploy(?:ing|s|ed)?|expand\w*|"
+        r"deepen\w*|合作|协作|部署|加深)",
+        norm,
+        re.I,
+    ):
+        return QUALITY_HARD
+
     # 并购优先于「有金额→hard」：首日往往对不上纯并购溢价叙事
     if _MA.search(norm):
         return QUALITY_MA
@@ -171,6 +201,7 @@ def classify_deal_quality(text: str) -> str:
         and not _COMMERCIAL_TERMS.search(norm)
         and not _PLATFORM_ON_CLOUD_RE.search(norm)
         and not is_frontier_gpu_deploy(norm)
+        and not is_ai_network_infra_deal(norm)
     ):
         return QUALITY_SOFT_PRODUCT
 
@@ -237,6 +268,8 @@ def score_materiality(text: str, source: str, matched_keywords: list[str]) -> in
 
     if quality == QUALITY_HARD and _HYPERSCALER.search(norm) and _POWER_STORAGE.search(norm):
         score += 20
+    elif quality == QUALITY_HARD and is_ai_network_infra_deal(norm):
+        score += 16
 
     if source in ("pr_newswire", "globe", "sec_8k") or source.startswith(
         ("finnhub:", "google_news", "business_wire", "ir:")
@@ -361,6 +394,10 @@ def finalize_materiality_score(
 
     if is_frontier_gpu_deploy(text or ""):
         score = max(score, 68)
+
+    # HPE×Oracle 类：首日常 + 中高档；地板对齐回测高档附近，避免 vague 压到 60 出头
+    if is_ai_network_infra_deal(text or ""):
+        score = max(score, 78)
 
     return max(0, min(100, int(score)))
 

@@ -12,6 +12,11 @@ def test_high_score_expects_bullish():
     assert expected_direction(score_total=90, push_eligible=True, eliminate_reason=None) == "bullish"
 
 
+def test_elevated_score_expects_bullish():
+    """近推送带（如旧 ZS 72）在日历上已偏强，应按看涨做对照。"""
+    assert expected_direction(score_total=72, push_eligible=False, eliminate_reason=None) == "bullish"
+
+
 def test_low_score_expects_bearish():
     assert expected_direction(score_total=61, push_eligible=False, eliminate_reason=None) == "bearish"
 
@@ -50,10 +55,15 @@ def test_false_positive_zs_style_small_drop():
 
 
 def test_aligned_mild_drop_mid_score_no_anomaly():
-    """未达推送线的中分、小跌 → 不按高分异常处理。"""
+    """近推送带小跌（未超 2%）→ 不进异常。"""
     j = judge_anomaly(expected="bullish", post_ret=-0.015, score_total=70)
-    # 70 分仍可能 bullish（若 expected 已是 bullish）；阈值用默认 5%
     assert j.anomaly is None
+
+
+def test_elevated_score_drop_is_anomaly():
+    """旧 ZS：72 分却跌 4.5% → 应标高分却大跌（即便未达推送线）。"""
+    j = judge_anomaly(expected="bullish", post_ret=-0.045, score_total=72)
+    assert j.anomaly == ANOMALY_FALSE_POSITIVE
 
 
 def test_push_eligible_small_drop_is_anomaly():

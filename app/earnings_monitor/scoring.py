@@ -12,6 +12,11 @@
 - ZS：10日-6%、月线仍+5% 却当健康回调 →82 分后仍跌；改为 soft_dip（须月线未涨或明确脱离高点才算吸筹）
 - AI：10日仅+1% 漂移进场却 78 可推 → 财报后跌；改为 drift，形态分压低
 - SNOW/DELL：双确认健康回调恢复满档形态分（20/22），避免真赢家被压到 82
+
+2026-09-06 对照补丁（ZS -4.5% 仍 72 分）：
+- soft_dip 由 +4 改为负分：假回调不应贴近推送线（结构封顶 68+4=72 误导）
+- drift：走平进场默认 0 分；若月线仍明显上涨 → drift_extended 负分（ZS 完整特征复现约 74→低分）
+- 近推送带（≥70）在 outcome 中按看涨对照，跌幅异常可标 false_positive
 """
 
 from __future__ import annotations
@@ -212,16 +217,17 @@ def _setup_into_er_score(
 
     # 4) 软回撤（假回调）：周线回一点，但月线仍在涨，且未明确脱离 21 日高
     #    或缺形态特征时宁可不给「健康回调」高分（ZS：10日-6%、月线+5% → 高分后跌）
+    #    形态分必须为负：否则结构封顶 68+4≈72，日历上看起来仍像「还行」
     if -0.15 < g10 <= -0.04:
         month_still_up = pre_30d_gain is not None and pre_30d_gain > 0.02
         off_highs = from_21d_high is not None and from_21d_high <= -0.06
         features_thin = down_streak is None and from_21d_high is None
         if month_still_up and (not off_highs or features_thin):
-            return 4, "soft_dip"
+            return (-12 if features_thin else -10), "soft_dip"
 
     # 5) 健康回调吸筹：周线回撤，且（月线未同步走强 或 已明确脱离高点）
     #    DELL / SNOW：月线近乎走平或略负 + 脱离高点 → 给回满档形态分（财报后弹性已验证）
-    #    与 soft_dip 对立：假回调不给高分，真吸筹必须维持高分
+    #    与 soft_dip 对立：假回调给负分，真吸筹必须维持高分
     if -0.15 < g10 <= -0.04 and (down_streak is None or down_streak <= 3):
         month_ok = pre_30d_gain is None or pre_30d_gain <= 0.02
         off_highs = from_21d_high is not None and from_21d_high <= -0.06
@@ -233,7 +239,7 @@ def _setup_into_er_score(
                 return (22 if deep else 20), "healthy_pullback"
             # 单确认：仍算健康回调，但略低于双确认
             return (16 if deep else 14), "healthy_pullback"
-        return 4, "soft_dip"
+        return -8, "soft_dip"
 
     # 6) 建设性动量进财报（近 10 日仍上行，非硬杀）：如 GTLB
     if 0.05 < g10 <= 0.18 and (pre_30d_gain is None or pre_30d_gain < 0.45):
@@ -266,8 +272,16 @@ def _setup_into_er_score(
         return 4, "extended_chase"
 
     # 11) 漂移进场：近乎走平/微涨，无清晰形态 → 如 AI（C3.ai）
+    #     若月线仍明显上涨（或未脱离高点），视为「涨完走平进财报」→ 负分
+    #     （ZS 完整特征：10日+1.6%、月线+10% → 旧逻辑 drift=+6 →74 分后跌 4.5%）
     if -0.02 <= g10 <= 0.03:
-        return 6, "drift"
+        month_extended = pre_30d_gain is not None and pre_30d_gain > 0.08
+        still_near_high = from_21d_high is None or from_21d_high > -0.08
+        if month_extended and still_near_high:
+            return -8, "drift_extended"
+        if month_extended:
+            return -4, "drift_extended"
+        return 0, "drift"
 
     # 12) 其余分段
     if -0.04 < g10 < -0.02 or 0.03 < g10 <= 0.05:
@@ -376,6 +390,7 @@ def score_candidate(
         "crash": "暴跌进场",
         "extended_chase": "追高延伸",
         "drift": "漂移进场",
+        "drift_extended": "涨后漂移",
         "neutral": "近乎走平",
         "mild_up": "温和上行",
         "unknown": "形态未知",

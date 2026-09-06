@@ -53,6 +53,10 @@ class OutcomeJudgement:
     note: str
 
 
+# 近推送带：日历上已像「偏强」，跌了应进异常对照（即便未达推送线 75）
+EARNINGS_ELEVATED_SCORE = 70
+
+
 def expected_direction(
     *,
     score_total: int | None,
@@ -67,14 +71,18 @@ def expected_direction(
         return "bearish"
     if score_total is None:
         return "skip"
-    if push_eligible or score_total >= EARNINGS_PUSH_MIN_SCORE:
+    if (
+        push_eligible
+        or score_total >= EARNINGS_PUSH_MIN_SCORE
+        or score_total >= EARNINGS_ELEVATED_SCORE
+    ):
         return "bullish"
     return "bearish"
 
 
 def false_positive_threshold_pct(score_total: int | None) -> float:
-    """可推送/高分票用更严阈值：跌超约 2% 即进异常区（覆盖 ZS 91→-2.1% 类）。"""
-    if score_total is not None and score_total >= EARNINGS_PUSH_MIN_SCORE:
+    """可推送/近推送高分票用更严阈值：跌超约 2% 即进异常区（覆盖 ZS 72→-4.5% 类）。"""
+    if score_total is not None and score_total >= EARNINGS_ELEVATED_SCORE:
         return min(EARNINGS_OUTCOME_FALSE_POS_PCT, 2.0)
     return EARNINGS_OUTCOME_FALSE_POS_PCT
 
@@ -104,7 +112,7 @@ def judge_anomaly(
             expected=expected,
             anomaly=ANOMALY_FALSE_POSITIVE,
             note=(
-                f"评分{score_txt}≥{EARNINGS_PUSH_MIN_SCORE}看涨，"
+                f"评分{score_txt}≥{EARNINGS_ELEVATED_SCORE}偏强，"
                 f"财报后却{post_ret * 100:.1f}%≤-{neg_th_pct:g}%"
             ),
         )

@@ -43,6 +43,16 @@ class TestDealQuality(unittest.TestCase):
             "across Oracle’s AI data centers, with support services and financing capabilities."
         )
         self.assertNotEqual(classify_deal_quality(text), QUALITY_FINANCING)
+        self.assertEqual(classify_deal_quality(text), QUALITY_HARD)
+        score = finalize_materiality_score(text, "finnhub:ORCL", ["LLM"], llm_score=70)
+        self.assertGreaterEqual(score, 78)
+
+    def test_hpe_oracle_ai_network_zh_headline(self):
+        """中文标题也要识别 AI 网络基建，勿当空话压到 60 出头。"""
+        text = "HPE：与 Oracle 加深 AI 网络协作"
+        self.assertEqual(classify_deal_quality(text), QUALITY_HARD)
+        score = finalize_materiality_score(text, "finnhub:ORCL", ["LLM"], llm_score=70)
+        self.assertGreaterEqual(score, 78)
 
     def test_eose_power_boost(self):
         text = (

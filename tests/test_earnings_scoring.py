@@ -90,7 +90,7 @@ def test_setup_cien_weak_slide_not_healthy():
 
 
 def test_setup_zs_soft_dip_not_healthy():
-    """ZS：月线仍正、周线小回调、形态特征缺失 → soft_dip，不是健康回调。"""
+    """ZS：月线仍正、周线小回调、形态特征缺失 → soft_dip 负分，不是健康回调。"""
     score, label = _setup_into_er_score(
         -0.064,
         0.058,
@@ -98,7 +98,7 @@ def test_setup_zs_soft_dip_not_healthy():
         from_21d_high=None,
     )
     assert label == "soft_dip"
-    assert score <= 6
+    assert score <= -10
 
 
 def test_setup_ai_drift_into_er():
@@ -110,7 +110,36 @@ def test_setup_ai_drift_into_er():
         from_21d_high=None,
     )
     assert label == "drift"
-    assert score <= 6
+    assert score <= 0
+
+
+def test_setup_zs_drift_extended_not_near_push():
+    """ZS 完整特征：月线仍涨 + 近乎走平进财报 → drift_extended，总分远离推送线。"""
+    score, label = _setup_into_er_score(
+        0.0163,
+        0.0999,
+        pre_5d_gain=-0.0507,
+        down_streak=0,
+        from_21d_high=-0.0562,
+    )
+    assert label == "drift_extended"
+    assert score <= -6
+    zs = score_candidate(
+        sector="AI_SEC",
+        tier="T1",
+        session="AMC",
+        confirmed=True,
+        days_to=1,
+        eliminate_reason=None,
+        market_cap_usd=28e9,
+        pre_10d_gain=0.0163,
+        pre_30d_gain=0.0999,
+        pre_5d_gain=-0.0507,
+        down_streak=0,
+        from_21d_high=-0.0562,
+    )
+    assert zs.score_total is not None and zs.score_total <= 62
+    assert zs.push_eligible is False
 
 
 def test_cien_zs_ai_rescore_below_push():
@@ -152,7 +181,8 @@ def test_cien_zs_ai_rescore_below_push():
         pre_30d_gain=0.0468,
     )
     assert cien.score_total is not None and cien.score_total < 75
-    assert zs.score_total is not None and zs.score_total < 75
+    # soft_dip 负分后应明显低于旧的 72，避免日历误导
+    assert zs.score_total is not None and zs.score_total <= 58
     assert ai.score_total is not None and ai.score_total < 75
     assert cien.push_eligible is False
     assert zs.push_eligible is False
