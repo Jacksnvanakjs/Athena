@@ -223,6 +223,12 @@
     .badge-cat-er { background: #fef3c7; color: #b45309; }
     .badge-tier-a { background: #dcfce7; color: #166534; }
     .badge-tier-ab { background: #ffedd5; color: #c2410c; }
+    .badge-q-hard { background: #dcfce7; color: #166534; }
+    .badge-q-soft_product { background: #f1f5f9; color: #64748b; }
+    .badge-q-financing { background: #fef3c7; color: #b45309; }
+    .badge-q-m_and_a { background: #ffedd5; color: #c2410c; }
+    .badge-q-vague { background: #fee2e2; color: #b91c1c; }
+    .badge-q-normal { background: #e0e7ff; color: #3730a3; }
     .tabs {
       display: flex;
       gap: 6px;
@@ -395,12 +401,12 @@
     </div>
 
     <div class="tabs" id="mainTabs">
-      <button type="button" class="tab active" data-tab="mainline" onclick="switchTab('mainline')">AI 主线</button>
+      <button type="button" class="tab" data-tab="mainline" onclick="switchTab('mainline')">AI 主线</button>
       <button type="button" class="tab" data-tab="earnings" onclick="switchTab('earnings')">财报日历</button>
-      <button type="button" class="tab" data-tab="deals" onclick="switchTab('deals')">合作 / 黄仁勋</button>
+      <button type="button" class="tab active" data-tab="deals" onclick="switchTab('deals')">合作 / 黄仁勋</button>
     </div>
 
-    <div id="mainlinePanel">
+    <div id="mainlinePanel" style="display:none">
       <div class="ml-card" id="mlCard">
         <div class="ml-card-top">
           <div class="ml-title" id="mlTitle">加载主线…</div>
@@ -439,7 +445,7 @@
       </div>
     </div>
 
-    <div id="dealsPanel" style="display:none">
+    <div id="dealsPanel">
     <div class="panel filter-panel">
       <div class="panel-title">筛选条件</div>
       <div class="filters">
@@ -601,9 +607,9 @@
       </div>
     </div>
 
-    <div class="stats" id="stats" style="display:none"></div>
+    <div class="stats" id="stats"></div>
 
-    <div class="panel table-panel" id="dealsTablePanel" style="display:none">
+    <div class="panel table-panel" id="dealsTablePanel">
       <div class="table-wrap">
       <table>
         <thead>
@@ -634,7 +640,7 @@
   </div>
 
   <script>
-    let currentTab = 'mainline';
+    let currentTab = 'deals';
 
     function switchTab(tab) {
       currentTab = tab;
@@ -667,14 +673,20 @@
     }
 
     async function loadMainline() {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 20000);
       try {
-        const res = await fetch('/api/ai-mainline');
+        const res = await fetch('/api/ai-mainline', { signal: ctrl.signal });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         renderMainline(data);
         loadStatus();
       } catch (e) {
-        document.getElementById('mlTitle').textContent = '主线加载失败';
+        document.getElementById('mlTitle').textContent = '主线加载失败（行情较慢或超时）';
         document.getElementById('mlEmpty').style.display = 'block';
+        document.getElementById('mlTbody').innerHTML = '';
+      } finally {
+        clearTimeout(timer);
       }
     }
 
@@ -831,7 +843,22 @@
         return `<span class="badge ${tierCls}">${tierLabel}</span>${buy}
           <div class="strategy-hint">${strat}</div>`;
       }
-      return `<span class="badge">${row.tier_pair}</span>`;
+      const q = row.deal_quality;
+      const qLabel = row.deal_quality_label || '';
+      const qBadge = q
+        ? `<span class="badge badge-q-${q}" title="催化质量">${qLabel || q}</span>`
+        : '';
+      return `<span class="badge">${row.tier_pair || '—'}</span>${qBadge ? ' ' + qBadge : ''}`;
+    }
+
+    function fmtPushChannel(row) {
+      if (row.pushed) return '✓';
+      const ch = row.push_channel;
+      if (ch === 'stale') return '过旧';
+      if (ch === 'soft_skip') return '弱催化';
+      if (ch === 'tier_skip') return '档位不推';
+      if (ch === 'unconfigured' || ch === 'failed' || ch === 'none') return '未送达';
+      return '—';
     }
 
     function rowClass(row) {
@@ -1151,7 +1178,7 @@
           <td class="score">${fmtFirstDayScore(row)}</td>
           <td>${fmtFirstDayRet(row)}</td>
           <td>${fmtRelation(row)}</td>
-          <td class="${row.pushed ? 'pushed' : ''}">${row.pushed ? '✓' : (row.push_channel === 'stale' ? '过旧' : (row.push_channel === 'soft_skip' ? '弱催化' : (row.push_channel === 'unconfigured' || row.push_channel === 'failed' || row.push_channel === 'none' ? '未送达' : '—')))}</td>
+          <td class="${row.pushed ? 'pushed' : ''}">${fmtPushChannel(row)}</td>
           <td>${fmtSource(row)}</td>
         `;
         tbody.appendChild(tr);
@@ -1211,7 +1238,7 @@
       document.getElementById(id).addEventListener('change', loadEarnings);
     });
 
-    loadMainline();
+    loadDeals();
     setInterval(() => {
       if (currentTab === 'mainline') loadMainline();
       else if (currentTab === 'earnings') loadEarnings();

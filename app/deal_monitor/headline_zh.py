@@ -112,6 +112,10 @@ def _brief_from_text(text: str, ticker: str) -> str | None:
     # 命名产品优先（避免 Claudeforce 文里的 Agentforce 抢匹配）
     if re.search(r"\bclaudeforce\b", low):
         return "Salesforce×Anthropic 推出 Claudeforce"
+    if re.search(r"\b(?:pwc|pricewaterhouse|普华永道)\b", low) and re.search(
+        r"\b(?:palantir|pltr|aip|enterprise\s+ai|战略联盟|合作联盟)\b", low, re.I
+    ):
+        return "与普华永道扩大企业 AI 联盟"
     if "wayfinder" in low or "frontier ai services" in low:
         return "扩展 Wayfinder Frontier AI 服务"
     if re.search(r"\bagentforce\b", low) and "claudeforce" not in low:

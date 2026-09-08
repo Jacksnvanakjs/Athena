@@ -60,7 +60,12 @@
     {"names": ["Lambda", "Lambda Labs"], "id": "lambda"},
     {"names": ["Nscale"], "id": "nscale"},
     {"names": ["Hugging Face", "HuggingFace"], "id": "huggingface"},
-    {"names": ["xAI", "X.AI"], "id": "xai"}
+    {"names": ["xAI", "X.AI"], "id": "xai"},
+    {"names": ["PwC", "PwC US", "PricewaterhouseCoopers", "普华永道"], "id": "pwc"},
+    {"names": ["Deloitte", "德勤"], "id": "deloitte"},
+    {"names": ["EY", "Ernst & Young", "Ernst and Young", "安永"], "id": "ey"},
+    {"names": ["KPMG", "毕马威"], "id": "kpmg"},
+    {"names": ["Accenture", "埃森哲"], "id": "accenture"}
   ],
   "t0_listed_tickers": ["MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "ORCL", "AAPL", "TSM", "SFTBY"],
   "channel_partners": [

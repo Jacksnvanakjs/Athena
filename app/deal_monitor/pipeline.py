@@ -39,6 +39,7 @@ from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
 from app.deal_monitor.materiality import (
     QUALITY_FINANCING,
+    QUALITY_HARD,
     QUALITY_SOFT_PRODUCT,
     QUALITY_VAGUE,
     classify_deal_quality,
@@ -184,7 +185,7 @@ def _push_succeeded(event: DealEvent) -> bool:
     return bool(
         event.pushed_at
         and ch
-        and ch not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip"}
+        and ch not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip", "tier_skip"}
     )
 
 
@@ -483,7 +484,12 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             if is_channel_partner_entity(benef, text):
                 continue
             roles = assign_roles(anchor, benef)
-            if roles and roles.should_push:
+            if not roles:
+                continue
+            hard_ok = (
+                classify_deal_quality(text) == QUALITY_HARD and bool(benef.ticker)
+            )
+            if roles.should_push or hard_ok:
                 role_pairs.append((roles, benef))
         if not role_pairs:
             stats["reason"] = "LLM 受益方规则不推送"
@@ -558,9 +564,13 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         if not roles:
             stats["reason"] = "角色判定失败"
             return stats
+        # T0↔T0 / 无 ticker 等默认不推：硬催化仍可入库对照（如 PLTR×PwC）
+        quality_early = classify_deal_quality(text)
         if not roles.should_push:
-            stats["reason"] = roles.skip_reason or "规则不推送"
-            return stats
+            listed_benef = bool(roles.beneficiary and roles.beneficiary.ticker)
+            if not (quality_early == QUALITY_HARD and listed_benef):
+                stats["reason"] = roles.skip_reason or "规则不推送"
+                return stats
 
         role_pairs = [(roles, roles.beneficiary)]
         if roles.push_both:
@@ -570,6 +580,8 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
                     r = assign_roles(entity_a, entity_b)
                     if r and r.should_push:
                         role_pairs.append((r, ent))
+            if not role_pairs and roles.beneficiary and roles.beneficiary.ticker:
+                role_pairs = [(roles, roles.beneficiary)]
 
     quality = classify_deal_quality(text)
     # 空话合作默认不入库；软整合/融资可入库对照但不推送，且封顶低分
@@ -636,7 +648,12 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
                 DEAL_PUSH_MAX_AGE_DAYS,
             )
         elif not should_push:
-            event.push_channel = "soft_skip"
+            if should_soft_skip_push(quality):
+                event.push_channel = "soft_skip"
+            elif not roles.should_push:
+                event.push_channel = "tier_skip"
+            else:
+                event.push_channel = "soft_skip"
             event.pushed_at = None
         else:
             await _maybe_push(db, event, True)

@@ -252,7 +252,7 @@ def _push_ok(event) -> bool:
         event.pushed_at
         and event.push_channel
         and event.push_channel
-        not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip"}
+        not in {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip", "tier_skip"}
     )
 
 
@@ -288,10 +288,14 @@ def _first_day_fields(event) -> dict:
 
 
 def _deal_quality_fields(event) -> dict:
-    from app.deal_monitor.materiality import classify_deal_quality
+    from app.deal_monitor.materiality import classify_deal_quality, deal_quality_label
 
     text = f"{getattr(event, 'headline', '') or ''}\n{getattr(event, 'summary', None) or ''}"
-    return {"deal_quality": classify_deal_quality(text)}
+    quality = classify_deal_quality(text)
+    return {
+        "deal_quality": quality,
+        "deal_quality_label": deal_quality_label(quality),
+    }
 
 
 def _deal_to_dict(event) -> dict:
@@ -389,7 +393,7 @@ def _nvda_to_dict(event) -> dict:
 
 
 _PUSH_OK_EXCLUDE = frozenset(
-    {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip"}
+    {"none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip", "tier_skip"}
 )
 
 

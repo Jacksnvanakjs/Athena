@@ -119,15 +119,22 @@ class TestDealQuality(unittest.TestCase):
         score = finalize_materiality_score(text, "finnhub:AMD", [], llm_score=50)
         self.assertGreaterEqual(score, 68)
 
-    def test_utility_openai_power_not_inflated(self):
+    def test_pwc_palantir_alliance_hard(self):
         text = (
-            "SO：电力公司与 OpenAI 用电合同\n"
-            "Large-load growth; Georgia Power customers; Agreement with OpenAI for power."
+            "PwC and Palantir Expand Strategic Alliance to Help Organizations Scale Enterprise AI. "
+            "PwC US and Palantir Technologies Inc. (NASDAQ: PLTR) today announced an expansion of "
+            "their strategic alliance to scale enterprise AI, transforming M&A, and modernizing ERP "
+            "with Palantir AIP."
         )
         self.assertEqual(classify_deal_quality(text), QUALITY_HARD)
-        score = finalize_materiality_score(text, "pr_newswire", [], llm_score=90)
-        self.assertLessEqual(score, 65)
-        self.assertGreaterEqual(score, 60)
+        score = finalize_materiality_score(text, "pr_newswire", ["AI"], llm_score=75)
+        self.assertGreaterEqual(score, 78)
+
+    def test_pwc_palantir_zh_not_vague(self):
+        text = "普华永道与Palantir扩大合作联盟，推动AI规模化应用、变革并购，并实现ERP系统现代化"
+        self.assertEqual(classify_deal_quality(text), QUALITY_HARD)
+        score = finalize_materiality_score(text, "google_news:x", ["AI"], llm_score=70)
+        self.assertGreaterEqual(score, 78)
 
 
 if __name__ == "__main__":

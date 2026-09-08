@@ -14,6 +14,21 @@ QUALITY_MA = "m_and_a"  # 并购补强
 QUALITY_VAGUE = "vague"  # 「战略合作」空话、无商业条款
 QUALITY_NORMAL = "normal"
 
+QUALITY_LABELS = {
+    QUALITY_HARD: "硬催化",
+    QUALITY_SOFT_PRODUCT: "软整合",
+    QUALITY_FINANCING: "融资",
+    QUALITY_MA: "并购",
+    QUALITY_VAGUE: "空话",
+    QUALITY_NORMAL: "一般",
+}
+
+
+def deal_quality_label(quality: str | None) -> str:
+    if not quality:
+        return "—"
+    return QUALITY_LABELS.get(quality, quality)
+
 # 分数 vs 回测分（高85/中高70/中55/低35）差≥此值视为分差大（重打分）
 SCORE_OUTCOME_GAP = 15
 # 列表高亮可略严，避免满屏橙色
@@ -152,6 +167,53 @@ def is_ai_network_infra_deal(text: str) -> bool:
     return bool(_HYPERSCALER.search(norm) and _AI_NETWORK_INFRA.search(norm))
 
 
+# 四大/咨询巨头 × 上市企业 AI 平台（PLTR×PwC）：扩联盟/规模化落地，勿当空话
+_BIG_CONSULTING = re.compile(
+    r"(?:"
+    r"\b(?:pwc|pricewaterhouse\s*coopers|deloitte|kpmg|accenture|"
+    r"mckinsey|bain\b|boston\s+consulting|\bbcg\b)\b|"
+    r"\bey\b|ernst\s*&\s*young|"
+    r"普华永道|德勤|安永|毕马威|埃森哲|麦肯锡"
+    r")",
+    re.I,
+)
+_ENTERPRISE_AI_CO = re.compile(
+    r"(?:"
+    r"\b(?:palantir|\bpltr\b|foundry|\baip\b|snowflake|servicenow|databricks|c3\.?ai)\b|"
+    r"enterprise\s+ai|scale(?:d|ing)?\s+(?:enterprise\s+)?ai|"
+    r"ai-native\s+deals?\s+platform|erp\s+moderniz|"
+    r"企业\s*AI|ERP\s*现代化|规模化\s*应用"
+    r")",
+    re.I,
+)
+_ALLIANCE_EXPAND = re.compile(
+    r"(?:"
+    r"strategic\s+alliance|"
+    r"expand(?:ed|s|ing)?\s+(?:their\s+)?(?:strategic\s+)?(?:alliance|partnership|collaboration)|"
+    r"expansion\s+of\s+(?:their\s+)?(?:strategic\s+)?(?:alliance|partnership)|"
+    r"扩大.{0,16}(?:战略)?(?:联盟|合作)|战略联盟|扩大合作联盟"
+    r")",
+    re.I,
+)
+
+
+def is_enterprise_ai_consulting_alliance(text: str) -> bool:
+    """上市企业 AI 平台 × 大所扩大联盟 / 规模化落地（如 Palantir×PwC）。"""
+    norm = text or ""
+    if not (_BIG_CONSULTING.search(norm) and _ENTERPRISE_AI_CO.search(norm)):
+        return False
+    return bool(
+        _ALLIANCE_EXPAND.search(norm)
+        or re.search(
+            r"scale(?:d|ing)?\s+enterprise\s+ai|erp\s+moderniz|ai-native\s+deals|"
+            r"managed\s+services|production[- ]grade|"
+            r"规模化|ERP|并购交易平台",
+            norm,
+            re.I,
+        )
+    )
+
+
 def classify_deal_quality(text: str) -> str:
     norm = text or ""
     if _MINING_PIVOT.search(norm):
@@ -192,6 +254,10 @@ def classify_deal_quality(text: str) -> str:
     ):
         return QUALITY_HARD
 
+    # 上市 AI 平台 × 大所扩大联盟（PLTR×PwC）：首日可大涨，勿当空话丢弃
+    if is_enterprise_ai_consulting_alliance(norm):
+        return QUALITY_HARD
+
     # 并购优先于「有金额→hard」：首日往往对不上纯并购溢价叙事
     if _MA.search(norm):
         return QUALITY_MA
@@ -202,6 +268,7 @@ def classify_deal_quality(text: str) -> str:
         and not _PLATFORM_ON_CLOUD_RE.search(norm)
         and not is_frontier_gpu_deploy(norm)
         and not is_ai_network_infra_deal(norm)
+        and not is_enterprise_ai_consulting_alliance(norm)
     ):
         return QUALITY_SOFT_PRODUCT
 
@@ -270,6 +337,8 @@ def score_materiality(text: str, source: str, matched_keywords: list[str]) -> in
         score += 20
     elif quality == QUALITY_HARD and is_ai_network_infra_deal(norm):
         score += 16
+    elif quality == QUALITY_HARD and is_enterprise_ai_consulting_alliance(norm):
+        score += 14
 
     if source in ("pr_newswire", "globe", "sec_8k") or source.startswith(
         ("finnhub:", "google_news", "business_wire", "ir:")
@@ -397,6 +466,10 @@ def finalize_materiality_score(
 
     # HPE×Oracle 类：首日常 + 中高档；地板对齐回测高档附近，避免 vague 压到 60 出头
     if is_ai_network_infra_deal(text or ""):
+        score = max(score, 78)
+
+    # PLTR×PwC 类：企业 AI 平台 × 大所扩联盟，首日可大涨
+    if is_enterprise_ai_consulting_alliance(text or ""):
         score = max(score, 78)
 
     return max(0, min(100, int(score)))
