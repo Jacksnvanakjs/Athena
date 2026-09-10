@@ -11,20 +11,12 @@ import httpx
 
 from app.deal_monitor.config import FINNHUB_API_KEY, FINNHUB_NEWS_LOOKBACK_DAYS, FINNHUB_NEWS_TICKERS
 from app.deal_monitor.fetchers.pr_wire import RawItem
+from app.deal_monitor.fetchers.prefilter import BROAD_DEAL_PREFILTER
 
 logger = logging.getLogger(__name__)
 
-# 进管线前粗筛，控制 LLM 成本；正式相关性仍由 LLM/规则决定
-_PREFILTER = re.compile(
-    r"(anthropic|openai|claude|gpt|xai|nvidia|agentforce|ai\s*agent|agentic|"
-    r"\bai\b|inference|large\s*language\s*model|\bllm\b|generative\s*ai|copilot|"
-    r"partnership|collaboration|integration|plugin|"
-    r"data\s*center|datacenter|gpu|custom\s*semiconductor|hyperscale|"
-    r"geothermal|\bppa\b|power\s+purchase|carbon-?free|offtake|"
-    r"\bmegawatt|\bgigawatt|\b\d+\s*mw\b|fervo|eos\s*energy|"
-    r"算力|数据中心|人工智能|地热|购电|电力协议)",
-    re.I,
-)
+_PREFILTER = BROAD_DEAL_PREFILTER
+
 
 
 def _prefer_url(url: str, summary: str) -> str:

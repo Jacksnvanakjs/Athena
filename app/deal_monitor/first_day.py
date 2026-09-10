@@ -41,8 +41,16 @@ class FirstDayOutcome:
     note: str
 
 
-def score_first_day_return(ret: float | None) -> FirstDayOutcome:
-    """≥+3% 高(85)，+1%~+3% 中高(70)，±1% 中(55)，≤-1% 低(35)。"""
+def score_first_day_return(
+    ret: float | None,
+    *,
+    mega_cap: bool = False,
+) -> FirstDayOutcome:
+    """首日涨跌打档。
+
+    默认（小票/中票）：≥+3% 高(85)，+1%~+3% 中高(70)，±1% 中(55)，≤-1% 低(35)。
+    大票（NVDA / 黄仁勋 T0）：≥+1.5% 高，≥+0.7% 中高（体量大、同样百分比含金量更高）。
+    """
     if ret is None:
         return FirstDayOutcome(
             ret=None,
@@ -53,14 +61,24 @@ def score_first_day_return(ret: float | None) -> FirstDayOutcome:
             note="无日线",
         )
     pct = ret * 100.0
-    if pct >= 3.0:
-        band = BAND_HIGH
-    elif pct >= 1.0:
-        band = BAND_MID_HIGH
-    elif pct > -1.0:
-        band = BAND_MID
+    if mega_cap:
+        if pct >= 1.5:
+            band = BAND_HIGH
+        elif pct >= 0.7:
+            band = BAND_MID_HIGH
+        elif pct > -0.7:
+            band = BAND_MID
+        else:
+            band = BAND_LOW
     else:
-        band = BAND_LOW
+        if pct >= 3.0:
+            band = BAND_HIGH
+        elif pct >= 1.0:
+            band = BAND_MID_HIGH
+        elif pct > -1.0:
+            band = BAND_MID
+        else:
+            band = BAND_LOW
     return FirstDayOutcome(
         ret=ret,
         band=band,
@@ -69,6 +87,17 @@ def score_first_day_return(ret: float | None) -> FirstDayOutcome:
         anomaly=band in ANOMALY_BANDS,
         note="",
     )
+
+
+def _is_mega_cap_first_day(event, ticker: str) -> bool:
+    """黄仁勋 / NVDA：用大票首日阈值。AI 合作小票仍用原阈值。"""
+    t = (ticker or "").upper()
+    if t == "NVDA":
+        return True
+    cls = type(event).__name__ if event is not None else ""
+    if cls == "NvdaSignalEvent":
+        return (getattr(event, "beneficiary_tier", None) or "").upper() == "T0"
+    return False
 
 
 def _published_et(published_at: datetime) -> datetime:
@@ -96,18 +125,20 @@ def reaction_start_date(published_at: datetime) -> date:
 async def compute_first_day_move(
     ticker: str,
     published_at: datetime,
+    *,
+    mega_cap: bool = False,
 ) -> FirstDayOutcome:
     """新闻后第一个可交易日：收盘相对前收（买得越早越接近吃满这根 K）。"""
     from app.market_data import fetch_daily_closes
 
     ticker = (ticker or "").upper().strip()
     if not ticker or not published_at:
-        return score_first_day_return(None)
+        return score_first_day_return(None, mega_cap=mega_cap)
 
     start = reaction_start_date(published_at)
     closes = await fetch_daily_closes(ticker, lookback_days=40)
     if len(closes) < 2:
-        out = score_first_day_return(None)
+        out = score_first_day_return(None, mega_cap=mega_cap)
         out.note = "无日线"
         return out
 
@@ -117,12 +148,17 @@ async def compute_first_day_move(
             idx = i
             break
     if idx is None:
-        out = score_first_day_return(None)
-        out.note = "待收盘（新闻后首个交易日尚未结束）"
+        out = score_first_day_return(None, mega_cap=mega_cap)
         out.band = BAND_NONE
+        last_d = closes[-1][0]
+        # 日线停在新闻日之前很久：多半退市/长期停牌，而非「还在等收盘」
+        if last_d < start - timedelta(days=14):
+            out.note = f"无近期日线（末根 {last_d.isoformat()}，疑退市/停牌）"
+        else:
+            out.note = "待收盘（新闻后首个交易日尚未结束）"
         return out
     if idx < 1:
-        out = score_first_day_return(None)
+        out = score_first_day_return(None, mega_cap=mega_cap)
         out.note = "缺前收"
         return out
 
@@ -130,16 +166,17 @@ async def compute_first_day_move(
     day_close = closes[idx][1]
     session_d = closes[idx][0]
     if not prev_close or prev_close <= 0:
-        out = score_first_day_return(None)
+        out = score_first_day_return(None, mega_cap=mega_cap)
         out.note = "缺前收"
         return out
 
     ret = (day_close - prev_close) / prev_close
-    out = score_first_day_return(ret)
+    out = score_first_day_return(ret, mega_cap=mega_cap)
     out.session_date = session_d
     et = _published_et(published_at)
     timing = "盘后→下一交易日" if et.hour >= 16 else "当日盘前/盘中"
-    out.note = f"{session_d.isoformat()} 收盘 vs 前收（{timing}）"
+    scale = "大票阈值" if mega_cap else "常规阈值"
+    out.note = f"{session_d.isoformat()} 收盘 vs 前收（{timing} · {scale}）"
     return out
 
 
@@ -156,7 +193,8 @@ def apply_first_day_to_event(event, outcome: FirstDayOutcome) -> None:
 async def refresh_event_first_day(event) -> FirstDayOutcome:
     ticker = getattr(event, "beneficiary_ticker", None) or ""
     published = getattr(event, "published_at", None)
-    outcome = await compute_first_day_move(ticker, published)
+    mega = _is_mega_cap_first_day(event, ticker)
+    outcome = await compute_first_day_move(ticker, published, mega_cap=mega)
     apply_first_day_to_event(event, outcome)
     return outcome
 

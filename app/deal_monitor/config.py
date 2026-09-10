@@ -5,6 +5,8 @@ from pathlib import Path
 from app.config import (
     DEAL_DEDUP_DAYS,
     DEAL_INGEST_MAX_AGE_DAYS,
+    DEAL_LLM_MIN_SCORE,
+    DEAL_LLM_PRIMARY,
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
     DEAL_LLM_MODEL,
@@ -145,6 +147,11 @@ GOOGLE_NEWS_QUERIES = [
     '"strategic partnership" (Anthropic OR OpenAI OR Claude) when:3d',
     '("cloud deal" OR "compute deal" OR "capacity agreement") '
     "(Anthropic OR Lambda OR Hut 8 OR CoreWeave OR Nscale) when:7d",
+    # AI 光纤 / DCI / 电信骨干供应（Verizon×Corning 类一手；官网 RSS 常漏）
+    '(Corning OR GLW OR Verizon OR VZ) '
+    '("supply agreement" OR "multi-year" OR "multi-billion" OR fiber OR optical) '
+    '(AI OR "data center" OR hyperscale OR broadband OR DCI) when:3d',
+    'site:verizon.com/about/news (Corning OR fiber OR optical OR AI) when:5d',
 ]
 
 # Finnhub：无稳定 IR RSS 的标的走此通道（IR 失败时亦作备份）
@@ -158,8 +165,8 @@ FINNHUB_NEWS_TICKERS = sorted(set([
     "EQIX", "DLR", "VRT", "ANET", "CSCO", "NTNX", "CIEN",
     # 算力租赁 / 挖矿
     "CRWV", "NBIS", "APLD", "CORZ", "WULF", "IREN", "RIOT", "MARA", "CLSK", "CIFR", "HUT", "BITF",
-    # 光模块
-    "LITE", "COHR",
+    # 光模块 / AI 光纤骨干（康宁×电信长单）
+    "LITE", "COHR", "GLW", "VZ",
     # 企业 AI / 安全
     "DDOG", "MDB", "PATH", "AI", "CRWD", "PANW", "FTNT", "ZS",
     # 存储

@@ -14,12 +14,15 @@
 from __future__ import annotations
 
 from app.market_data.cascade import SourceResult, first_success
-from app.market_data.daily_closes import fetch_daily_closes
+from app.market_data.daily_closes import fetch_daily_bars, fetch_daily_closes
 from app.market_data.quotes import fetch_quotes
+from app.market_data.tradability import is_us_tradable
 
 __all__ = [
     "SourceResult",
     "first_success",
     "fetch_daily_closes",
+    "fetch_daily_bars",
     "fetch_quotes",
+    "is_us_tradable",
 ]

@@ -260,6 +260,12 @@ class EarningsEvent(Base):
     post_er_sessions = Column(Integer, nullable=True)
     post_er_as_of = Column(Date, nullable=True)
     post_er_source = Column(String(40), nullable=True)
+    post_er_open_return = Column(Float, nullable=True)  # T+1 开盘
+    post_er_d1_return = Column(Float, nullable=True)  # T+1 收盘
+    post_er_d2_return = Column(Float, nullable=True)  # T+2 收盘
+    post_er_d3_return = Column(Float, nullable=True)  # T+3 收盘
+    post_er_d4_return = Column(Float, nullable=True)  # T+4 收盘
+    post_er_d5_return = Column(Float, nullable=True)  # T+5 收盘
     outcome_expected = Column(String(20), nullable=True)
     outcome_anomaly = Column(String(40), nullable=True)
     outcome_note = Column(String(300), nullable=True)
@@ -571,6 +577,12 @@ def _ensure_sqlite_columns() -> None:
         ("earnings_events", "post_er_sessions", "INTEGER"),
         ("earnings_events", "post_er_as_of", "DATE"),
         ("earnings_events", "post_er_source", "VARCHAR(40)"),
+        ("earnings_events", "post_er_open_return", "FLOAT"),
+        ("earnings_events", "post_er_d1_return", "FLOAT"),
+        ("earnings_events", "post_er_d2_return", "FLOAT"),
+        ("earnings_events", "post_er_d3_return", "FLOAT"),
+        ("earnings_events", "post_er_d4_return", "FLOAT"),
+        ("earnings_events", "post_er_d5_return", "FLOAT"),
         ("earnings_events", "outcome_expected", "VARCHAR(20)"),
         ("earnings_events", "outcome_anomaly", "VARCHAR(40)"),
         ("earnings_events", "outcome_note", "VARCHAR(300)"),

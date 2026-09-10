@@ -13,6 +13,7 @@ from xml.etree import ElementTree
 import httpx
 
 from app.deal_monitor.config import PR_WIRE_FEEDS
+from app.deal_monitor.fetchers.prefilter import BROAD_DEAL_PREFILTER
 
 logger = logging.getLogger(__name__)
 
@@ -21,16 +22,9 @@ NS = {
     "content": "http://purl.org/rss/1.0/modules/content/",
 }
 
-# BW/GNW 行业流很宽，进管线前粗筛（与 Finnhub/IR 一致），控制 LLM 成本
-_WIRE_PREFILTER = re.compile(
-    r"(anthropic|openai|claude|gpt|xai|nvidia|agentforce|ai\s*agent|agentic|"
-    r"\bai\b|inference|large\s*language\s*model|\bllm\b|generative\s*ai|copilot|"
-    r"partnership|collaboration|integration|plugin|strategic|"
-    r"data\s*center|gpu|custom\s*semiconductor|hyperscale|"
-    r"merger|acquisition|funding|"
-    r"算力|数据中心|人工智能)",
-    re.I,
-)
+# BW/GNW 行业流很宽：宽粗筛进管线，正式相关性由 LLM 决定
+_WIRE_PREFILTER = BROAD_DEAL_PREFILTER
+
 
 
 @dataclass

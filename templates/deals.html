@@ -229,6 +229,7 @@
     .badge-q-m_and_a { background: #ffedd5; color: #c2410c; }
     .badge-q-vague { background: #fee2e2; color: #b91c1c; }
     .badge-q-normal { background: #e0e7ff; color: #3730a3; }
+    .badge-q-verbal { background: #ffedd5; color: #c2410c; }
     .tabs {
       display: flex;
       gap: 6px;
@@ -303,8 +304,8 @@
     }
     .er-anom-fp { color: #b91c1c; font-weight: 600; }
     .er-anom-fn { color: #c2410c; font-weight: 600; }
-    .er-ret-up { color: #166534; }
-    .er-ret-dn { color: #b91c1c; }
+    .er-ret-up { color: var(--green); font-weight: 600; }
+    .er-ret-dn { color: var(--red, #c0392b); font-weight: 600; }
     .score-hi { color: var(--green); font-weight: 700; }
     .row-nvda td { border-left: 3px solid #f97316; }
     .row-nvda-a td { border-left: 3px solid #22c55e; }
@@ -395,7 +396,7 @@
       <ul>
         <li><strong>AI 主线</strong>：用各子板块相对 AI 综合基准的 5 日强弱判断资金偏向哪条链，<strong>不是</strong>软硬件互斥。「已确认」约需连续 3 个交易日排名靠前。</li>
         <li><strong>合作 / 黄仁勋</strong>：事件驱动即时推送；入库 ≠ 一定推送。</li>
-        <li><strong>财报日历</strong>：监控 AI 链相关标的（含 DELL 等）；可提前数周上网站；手机推送<strong>仅财报前 2 天</strong>且须过市值/评分门槛，同日多家合并一条。揭晓后自动对照涨跌与评分，对不上的进<strong>评分异常区</strong>。行情/日线/市值均<strong>多源自动切换</strong>。</li>
+        <li><strong>财报日历</strong>：监控 AI 链相关标的（含 DELL 等）；可提前数周上网站；手机推送<strong>仅财报前 2 天</strong>且须过市值/评分门槛，同日多家合并一条。揭晓后展示 <strong>开盘·D1～D5</strong>（皆相对「财报前收」的累计涨跌，非日涨跌；评分异常主对照取 <strong>D2</strong>）。时点随<strong>财报发布时间</strong>不同：<strong>财报盘后发布</strong>时前收=财报日收盘、开盘/D1=次一交易日；<strong>财报盘前发布</strong>时前收=前一交易日收盘、开盘/D1=财报日当天。对不上的进<strong>评分异常区</strong>。行情/日线/市值均<strong>多源自动切换</strong>。</li>
         <li>仅供研究，非投资建议。</li>
       </ul>
     </div>
@@ -452,7 +453,7 @@
         <div class="field field-category">
           <div class="field-label">
             分类
-            <span class="help" title="AI合作：原产业链合作快讯。黄仁勋：NVDA A/A+B 档产业动作与买卖窗口。">?</span>
+            <span class="help" title="AI合作：产业链合作快讯。黄仁勋：英伟达相关官宣（投资/并购/产能等）与口头催化。两边关系列同一套：档位组合 + 质量标签。">?</span>
           </div>
           <select id="category">
             <option value="all">全部</option>
@@ -482,15 +483,25 @@
             <option value="T2_T2">T2_T2 · 双小票</option>
           </select>
         </div>
-        <div class="field" id="signalTierField" style="display:none">
+        <div class="field" id="qualityField">
           <div class="field-label">
-            NVDA 档位
-            <span class="help" title="A：投资/产能锁定等硬条款。A_PLUS_B：90天内有A档后的口头催化。">?</span>
+            质量
+            <span class="help" title="与列表「关系/质量」列同一套标签：硬催化、并购、口头催化、软整合等。">?</span>
           </div>
-          <select id="signal_tier">
-            <option value="">全部档位</option>
-            <option value="A">A · 硬条款</option>
-            <option value="A_PLUS_B">A+B · 二次催化</option>
+          <select id="deal_quality">
+            <option value="">全部质量</option>
+            <option value="hard">硬催化</option>
+            <option value="m_and_a">并购</option>
+            <option value="verbal">口头催化</option>
+            <option value="soft_product">软整合</option>
+            <option value="financing">融资</option>
+            <option value="vague">空话</option>
+            <option value="normal">一般</option>
+          </select>
+        </div>
+        <div class="field" id="signalTierField" style="display:none">
+          <select id="signal_tier" aria-hidden="true">
+            <option value="" selected>全部</option>
           </select>
         </div>
         <div class="field">
@@ -561,7 +572,7 @@
       <div class="er-anomaly-panel hidden" id="erAnomalyPanel">
         <div class="er-anomaly-head">
           评分异常区 <span id="erAnomalyCount"></span>
-          <span class="hint">财报后涨跌与评分对不上时自动出现，便于回头改机制</span>
+          <span class="hint">异常对照用 D2（无则 D1）；涨跌列与下表同一套时点（随财报盘前/盘后发布而分）</span>
         </div>
         <div class="table-wrap">
           <table>
@@ -571,7 +582,12 @@
                 <th>公司</th>
                 <th>财报日</th>
                 <th>评分</th>
-                <th>财报后</th>
+                <th>开盘 <span class="help" title="相对「财报前收」的累计涨跌（绿涨红跌）。&#10;财报前收：财报盘后发布=财报日当天收盘；财报盘前发布=财报日前一交易日收盘。&#10;开盘价：财报盘后发布=揭晓后第1个交易日约09:30；财报盘前发布=财报日当天约09:30。">?</span></th>
+                <th>D1 <span class="help" title="财报后第1个交易日收盘 ÷ 财报前收（累计）。&#10;财报盘后发布=揭晓后第1个交易日收盘；财报盘前发布=财报日当天收盘。">?</span></th>
+                <th>D2 <span class="help" title="财报后第2个交易日收盘 ÷ 财报前收（累计）。异常判定主字段。&#10;财报盘后发布=揭晓后第2个交易日收盘；财报盘前发布=财报日后第1个交易日收盘。">?</span></th>
+                <th>D3 <span class="help" title="财报后第3个交易日收盘 ÷ 同一「财报前收」。交易日不足则 —。">?</span></th>
+                <th>D4 <span class="help" title="财报后第4个交易日收盘 ÷ 同一「财报前收」。交易日不足则 —。">?</span></th>
+                <th>D5 <span class="help" title="财报后第5个交易日收盘 ÷ 同一「财报前收」。交易日不足则 —。">?</span></th>
                 <th>说明</th>
               </tr>
             </thead>
@@ -589,10 +605,13 @@
                 <th>公司</th>
                 <th>赛道</th>
                 <th>得分</th>
-                <th title="待发：距揭晓天数；历史：财报后涨跌">距今 / 财报后</th>
-                <th>建议买入</th>
-                <th>卖出首选</th>
-                <th>卖出最晚</th>
+                <th>距今 <span class="help" title="待发财报：距揭晓还有几天。已揭晓显示 —。">?</span></th>
+                <th>开盘 <span class="help" title="相对「财报前收」的累计涨跌（绿涨红跌；待发 —）。&#10;财报前收：财报盘后发布=财报日当天收盘；财报盘前发布=财报日前一交易日收盘。&#10;开盘价：财报盘后发布=揭晓后第1个交易日约09:30；财报盘前发布=财报日当天约09:30。">?</span></th>
+                <th>D1 <span class="help" title="财报后第1个交易日收盘 ÷ 财报前收（累计，非日涨跌）。&#10;财报盘后发布=揭晓后第1个交易日收盘；财报盘前发布=财报日当天收盘。">?</span></th>
+                <th>D2 <span class="help" title="财报后第2个交易日收盘 ÷ 财报前收（累计）。评分异常主对照优先用本列。&#10;财报盘后发布=揭晓后第2个交易日收盘；财报盘前发布=财报日后第1个交易日收盘。">?</span></th>
+                <th>D3 <span class="help" title="财报后第3个交易日收盘 ÷ 同一「财报前收」。交易日不足则 —。">?</span></th>
+                <th>D4 <span class="help" title="财报后第4个交易日收盘 ÷ 同一「财报前收」。交易日不足则 —。">?</span></th>
+                <th>D5 <span class="help" title="财报后第5个交易日收盘 ÷ 同一「财报前收」。交易日不足则 —。">?</span></th>
                 <th>推送</th>
                 <th>一句话</th>
               </tr>
@@ -619,11 +638,11 @@
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
-            <th>分数 <span class="help" title="系统给这条新闻的「材料性」分（0–100）：条款越硬（金额/年限/正式协议等）分越高。黄仁勋条目下方还会显示「置信」分。">?</span></th>
-            <th>档 <span class="help" title="受益股发稿后「首个交易日」涨跌强弱：高≥+3% · 中高+1%~+3% · 中约±1% · 低≤-1%。中/低会标异常，方便人工复核。">?</span></th>
-            <th>回测 <span class="help" title="把上面的「档」换成固定分数：高85 / 中高70 / 中55 / 低35，方便和历史比。无行情时显示 —。">?</span></th>
+            <th>分数 <span class="help" title="【两套独立刻度，勿直接横比】材料性分：条款越硬分越高。&#10;· AI合作：并购约≤65；硬催化常见 70–85（小票弹性大）&#10;· 黄仁勋：强并购约 78–82；硬催化可到 85（按 NVDA 产业动作单独打分，与 AI 合作封顶不同）">?</span></th>
+            <th>档 <span class="help" title="首日涨跌档（由「首日%」换算）。&#10;· AI合作（常规）：高≥+3% · 中高≥+1%&#10;· 黄仁勋 NVDA/T0（大票）：高≥+1.5% · 中高≥+0.7%（同涨幅对大票含金量更高）">?</span></th>
+            <th>回测 <span class="help" title="【两边不完全一样】高85 / 中高70 / 中55 / 低35（分值映射相同），但进档门槛不同，同涨幅可能得到不同回测分：&#10;· AI合作：≥+3% 才「高→85」；≥+1%「中高→70」&#10;· 黄仁勋 NVDA/T0：≥+1.5% 即「高→85」；≥+0.7%「中高→70」&#10;勿把两边回测分直接横比。">?</span></th>
             <th>首日 <span class="help" title="受益股发稿后首个交易日：收盘相对前收的涨跌幅（%）。「档」「回测」都由它换算而来。">?</span></th>
-            <th>关系/策略</th>
+            <th>关系/质量</th>
             <th>已推送</th>
             <th>来源</th>
           </tr>
@@ -835,20 +854,16 @@
     }
 
     function fmtRelation(row) {
-      if (row.category === 'nvda_signal') {
-        const tierCls = row.signal_tier === 'A_PLUS_B' ? 'badge-tier-ab' : 'badge-tier-a';
-        const tierLabel = row.signal_tier === 'A_PLUS_B' ? 'A+B' : 'A';
-        const buy = row.buy_ok === false ? ' · 仅观察' : '';
-        const strat = row.strategy_label || row.strategy || '';
-        return `<span class="badge ${tierCls}">${tierLabel}</span>${buy}
-          <div class="strategy-hint">${strat}</div>`;
-      }
+      // AI合作 / 黄仁勋共用：档位组合 + 质量标签（不再展示内部 A/A+B）
       const q = row.deal_quality;
       const qLabel = row.deal_quality_label || '';
       const qBadge = q
         ? `<span class="badge badge-q-${q}" title="催化质量">${qLabel || q}</span>`
         : '';
-      return `<span class="badge">${row.tier_pair || '—'}</span>${qBadge ? ' ' + qBadge : ''}`;
+      const observe = (row.category === 'nvda_signal' && row.buy_ok === false)
+        ? ' <span class="strategy-hint">仅观察</span>'
+        : '';
+      return `<span class="badge">${row.tier_pair || '—'}</span>${qBadge ? ' ' + qBadge : ''}${observe}`;
     }
 
     function fmtPushChannel(row) {
@@ -863,13 +878,11 @@
 
     function rowClass(row) {
       if (row.category !== 'nvda_signal') return '';
-      return row.signal_tier === 'A' ? 'row-nvda-a' : 'row-nvda';
+      return row.deal_quality === 'verbal' ? 'row-nvda' : 'row-nvda-a';
     }
 
     function updateFilterVisibility() {
-      const cat = document.getElementById('category').value;
-      document.getElementById('signalTierField').style.display =
-        (cat === 'nvda_signal' || cat === 'all') ? 'flex' : 'none';
+      // 质量筛选对 AI合作 / 黄仁勋都可用；合作类型仍主要用于 AI
     }
 
     async function loadStatus() {
@@ -931,6 +944,24 @@
       return `<span class="${cls}">${n >= 0 ? '+' : ''}${n.toFixed(1)}%</span>`;
     }
 
+    function erRetCells(row, isHistory) {
+      if (!isHistory) {
+        return `<td>${fmtDaysTo(row)}</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>`;
+      }
+      const anom = row.outcome_anomaly
+        ? `<div class="strategy-hint">${row.outcome_anomaly === 'false_positive' ? '高分却跌' : '低分却涨'}</div>`
+        : '';
+      return (
+        `<td>—${anom}</td>` +
+        `<td>${fmtErRet(row.post_er_open_return_pct)}</td>` +
+        `<td>${fmtErRet(row.post_er_d1_return_pct)}</td>` +
+        `<td>${fmtErRet(row.post_er_d2_return_pct)}</td>` +
+        `<td>${fmtErRet(row.post_er_d3_return_pct)}</td>` +
+        `<td>${fmtErRet(row.post_er_d4_return_pct)}</td>` +
+        `<td>${fmtErRet(row.post_er_d5_return_pct)}</td>`
+      );
+    }
+
     function renderErAnomalies(items) {
       const panel = document.getElementById('erAnomalyPanel');
       const tbody = document.getElementById('erAnomalyTbody');
@@ -953,7 +984,12 @@
           <td><span class="ticker">${row.ticker}</span></td>
           <td>${row.earnings_date || '—'}</td>
           <td>${score}</td>
-          <td>${fmtErRet(row.post_er_return_pct)}</td>
+          <td>${fmtErRet(row.post_er_open_return_pct)}</td>
+          <td>${fmtErRet(row.post_er_d1_return_pct)}</td>
+          <td>${fmtErRet(row.post_er_d2_return_pct)}</td>
+          <td>${fmtErRet(row.post_er_d3_return_pct)}</td>
+          <td>${fmtErRet(row.post_er_d4_return_pct)}</td>
+          <td>${fmtErRet(row.post_er_d5_return_pct)}</td>
           <td>${row.outcome_note || '—'}</td>
         `;
         tbody.appendChild(tr);
@@ -973,19 +1009,13 @@
       const sess = row.session_label || ({AMC:'盘后', BMO:'盘前', TBD:'待定'}[row.session] || row.session);
       const conf = row.confirmed ? '' : ' <span class="strategy-hint">待确认</span>';
       const sectorCn = row.sector_label || row.sector || '—';
-      const retCell = isHistory
-        ? `<div>${fmtErRet(row.post_er_return_pct)}</div>${row.outcome_anomaly ? `<div class="strategy-hint">${row.outcome_anomaly === 'false_positive' ? '高分却跌' : '低分却涨'}</div>` : ''}`
-        : fmtDaysTo(row);
       tr.innerHTML = `
         <td>${fmtDualTime(row.earnings_release_bj, row.earnings_release_et)}${conf}</td>
         <td>${sess}</td>
         <td><span class="ticker">${row.ticker}</span><div class="strategy-hint">${row.company_name || ''}</div></td>
         <td>${sectorCn}</td>
         <td>${score}</td>
-        <td>${retCell}</td>
-        <td class="er-trade">${fmtDualTime(row.buy_window_bj, row.buy_window_et)}</td>
-        <td class="er-trade">${fmtDualTime(row.sell_window_bj, row.sell_window_et)}</td>
-        <td class="er-trade">${fmtDualTime(row.sell_deadline_bj, row.sell_deadline_et)}</td>
+        ${erRetCells(row, isHistory)}
         <td class="${row.push_status === 'pushed' ? 'pushed' : ''}">${fmtErPush(row)}</td>
         <td>${row.eliminate_reason ? row.eliminate_reason : (row.one_liner || '—')}</td>
       `;
@@ -1044,7 +1074,7 @@
         ` · 近30日已推送 <strong>${stats.batches_30d}</strong>` +
         `<span class="help" title="近30天内成功发出的手机推送次数。同一天多家公司合并为 1 次。">?</span>` +
         ` · 评分异常 <strong>${stats.anomalies || 0}</strong>` +
-        `<span class="help" title="财报后涨跌与评分方向明显对不上的条数（高分大跌 / 低分大涨）。下方异常区可点开看明细。">?</span>`;
+        `<span class="help" title="财报后涨跌与评分方向明显对不上的条数（高分大跌 / 低分大涨）。对照优先取 D2 收盘÷财报前收（无 D2 用 D1）。财报盘后发布：前收=财报日收盘、开盘=次一交易日；财报盘前发布：前收=前一交易日收盘、开盘=财报日。下方异常区可看明细。">?</span>`;
 
       const tbody = document.getElementById('erTbody');
       const empty = document.getElementById('erEmpty');
@@ -1060,7 +1090,7 @@
         const toggle = document.createElement('tr');
         toggle.className = 'er-history-toggle';
         toggle.innerHTML = `
-          <td colspan="11">
+          <td colspan="14">
             <button type="button" class="er-hist-btn" onclick="toggleErHistory()" aria-expanded="false">
               <span class="er-hist-chevron" id="erHistChevron">▶</span>
               <span id="erHistLabel" data-count="${history.length}">展开历史日历（${history.length}）</span>
@@ -1139,8 +1169,8 @@
       params.set('category', document.getElementById('category').value);
       const tp = document.getElementById('tier_pair').value;
       if (tp) params.set('tier_pair', tp);
-      const st = document.getElementById('signal_tier').value;
-      if (st) params.set('signal_tier', st);
+      const dq = document.getElementById('deal_quality').value;
+      if (dq) params.set('deal_quality', dq);
       params.set('min_score', document.getElementById('min_score').value);
       const fdMove = document.getElementById('first_day_move').value;
       if (fdMove) params.set('first_day_move', fdMove);
@@ -1161,10 +1191,7 @@
       for (const row of items) {
         const tr = document.createElement('tr');
         tr.className = rowClass(row) + (row.score_gap_large ? ' fd-anom' : '');
-        const titleExtra = row.category === 'nvda_signal' && row.buy_window
-          ? `<div class="strategy-hint">买: ${row.buy_window} · 卖: ${row.sell_window || ''}</div>`
-          : '';
-        const gapHint = row.score_gap_large
+        const gapHint = (row.category !== 'nvda_signal' && row.score_gap_large)
           ? `<div class="strategy-hint">分差${row.score_gap > 0 ? '+' : ''}${row.score_gap}</div>`
           : '';
         tr.innerHTML = `
@@ -1172,8 +1199,8 @@
           <td>${fmtPublished(row)}</td>
           <td>${fmtBeneficiary(row)}</td>
           <td>${fmtAnchor(row)}</td>
-          <td>${row.headline}${titleExtra}</td>
-          <td class="score">${row.materiality_score}${row.confidence != null ? '<div class="strategy-hint">置信' + row.confidence + '</div>' : ''}${gapHint}</td>
+          <td>${row.headline}</td>
+          <td class="score">${row.materiality_score}${gapHint}</td>
           <td>${fmtFirstDayBand(row)}</td>
           <td class="score">${fmtFirstDayScore(row)}</td>
           <td>${fmtFirstDayRet(row)}</td>
@@ -1231,7 +1258,7 @@
       else loadDeals();
     }
 
-    ['days', 'category', 'tier_pair', 'signal_tier', 'min_score', 'pushed_only', 'first_day_move'].forEach(id => {
+    ['days', 'category', 'tier_pair', 'deal_quality', 'min_score', 'pushed_only', 'first_day_move'].forEach(id => {
       document.getElementById(id).addEventListener('change', loadDeals);
     });
     ['er_days', 'er_sector', 'er_min_score', 'er_push_eligible'].forEach(id => {

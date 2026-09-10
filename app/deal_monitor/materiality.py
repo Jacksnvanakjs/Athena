@@ -13,6 +13,7 @@ QUALITY_FINANCING = "financing"  # 融资/授信
 QUALITY_MA = "m_and_a"  # 并购补强
 QUALITY_VAGUE = "vague"  # 「战略合作」空话、无商业条款
 QUALITY_NORMAL = "normal"
+QUALITY_VERBAL = "verbal"  # 黄仁勋口头催化（AI 合作无此档，标签仍统一展示）
 
 QUALITY_LABELS = {
     QUALITY_HARD: "硬催化",
@@ -21,6 +22,7 @@ QUALITY_LABELS = {
     QUALITY_MA: "并购",
     QUALITY_VAGUE: "空话",
     QUALITY_NORMAL: "一般",
+    QUALITY_VERBAL: "口头催化",
 }
 
 
@@ -146,6 +148,32 @@ _AI_NETWORK_INFRA = re.compile(
     r")",
     re.I,
 )
+# 电信/hyperscale × 光纤/光缆多年供应（Verizon×Corning、Amazon×Corning 类 AI 骨干）
+_AI_OPTICAL_FIBER_SUPPLY = re.compile(
+    r"(?:"
+    r"(?:optical\s+fiber|fiber\s+optic|high[- ]density\s+(?:optical\s+)?fiber|"
+    r"data\s*center\s+interconnect|\bdci\b|long[- ]haul|"
+    r"光纤|光缆|光通信)"
+    r".{0,120}?"
+    r"(?:supply\s+agreement|purchase\s+agreement|multi[- ]year|multi[- ]billion|"
+    r"供应协议|采购协议|多年)"
+    r"|"
+    r"(?:supply\s+agreement|purchase\s+agreement|multi[- ]year|multi[- ]billion|"
+    r"供应协议|采购协议)"
+    r".{0,120}?"
+    r"(?:optical\s+fiber|fiber\s+optic|high[- ]density\s+(?:optical\s+)?fiber|"
+    r"data\s*center\s+interconnect|\bdci\b|光纤|光缆)"
+    r")",
+    re.I,
+)
+_AI_OPTICAL_CONTEXT = re.compile(
+    r"(?:"
+    r"\bai\b|artificial\s+intelligence|gen\s*ai|generative\s+ai|"
+    r"hyperscal(?:e|er)|data\s*cent(?:er|re)|llm|"
+    r"人工智能|算力|智算"
+    r")",
+    re.I,
+)
 
 
 def has_commercial_terms(text: str) -> bool:
@@ -165,6 +193,14 @@ def is_ai_network_infra_deal(text: str) -> bool:
     """云/hyperscaler AI 机房网络部署（如 HPE Juniper × Oracle）。"""
     norm = text or ""
     return bool(_HYPERSCALER.search(norm) and _AI_NETWORK_INFRA.search(norm))
+
+
+def is_ai_optical_fiber_supply(text: str) -> bool:
+    """电信/云厂 × 光纤多年供应，且正文挂 AI/hyperscale/DC 叙事（如 Verizon×Corning）。"""
+    norm = text or ""
+    if not _AI_OPTICAL_FIBER_SUPPLY.search(norm):
+        return False
+    return bool(_AI_OPTICAL_CONTEXT.search(norm) or _TELCO.search(norm) or _HYPERSCALER.search(norm))
 
 
 # 四大/咨询巨头 × 上市企业 AI 平台（PLTR×PwC）：扩联盟/规模化落地，勿当空话
@@ -254,6 +290,10 @@ def classify_deal_quality(text: str) -> str:
     ):
         return QUALITY_HARD
 
+    # 电信/云 × AI 光纤多年供应（Verizon×Corning）：硬商业条款，勿当空话
+    if is_ai_optical_fiber_supply(norm):
+        return QUALITY_HARD
+
     # 上市 AI 平台 × 大所扩大联盟（PLTR×PwC）：首日可大涨，勿当空话丢弃
     if is_enterprise_ai_consulting_alliance(norm):
         return QUALITY_HARD
@@ -268,6 +308,7 @@ def classify_deal_quality(text: str) -> str:
         and not _PLATFORM_ON_CLOUD_RE.search(norm)
         and not is_frontier_gpu_deploy(norm)
         and not is_ai_network_infra_deal(norm)
+        and not is_ai_optical_fiber_supply(norm)
         and not is_enterprise_ai_consulting_alliance(norm)
     ):
         return QUALITY_SOFT_PRODUCT
@@ -300,13 +341,18 @@ def score_materiality(text: str, source: str, matched_keywords: list[str]) -> in
     quality = classify_deal_quality(text)
 
     amount_match = re.search(
-        r"\$[\d,.]+\s*(million|billion|m\b|b\b)|[\d,.]+\s*(million|billion)\s+dollars",
+        r"\$[\d,.]+\s*(million|billion|m\b|b\b)|[\d,.]+\s*(million|billion)\s+dollars|"
+        r"multi[- ]billion|数十亿|百亿",
         norm,
         re.I,
     )
     if amount_match:
         val_str = amount_match.group(0)
-        score += 25 if "billion" in val_str or re.search(r"\bb\b", val_str) else 15
+        score += 25 if (
+            "billion" in val_str
+            or "亿" in val_str
+            or re.search(r"\bb\b", val_str)
+        ) else 15
 
     if re.search(r"\d+\s*-?\s*year|multi-year|多年", norm):
         score += 12
@@ -337,11 +383,13 @@ def score_materiality(text: str, source: str, matched_keywords: list[str]) -> in
         score += 20
     elif quality == QUALITY_HARD and is_ai_network_infra_deal(norm):
         score += 16
+    elif quality == QUALITY_HARD and is_ai_optical_fiber_supply(norm):
+        score += 18
     elif quality == QUALITY_HARD and is_enterprise_ai_consulting_alliance(norm):
         score += 14
 
     if source in ("pr_newswire", "globe", "sec_8k") or source.startswith(
-        ("finnhub:", "google_news", "business_wire", "ir:")
+        ("finnhub:", "google_news", "business_wire", "ir:", "company_ir")
     ):
         score += 5
 
@@ -388,29 +436,59 @@ def finalize_materiality_score(
     *,
     llm_score: int | None = None,
     event_type: str | None = None,
+    llm_primary: bool | None = None,
 ) -> int:
-    """规则分 + LLM 分合并；按催化硬度封顶，避免软整合/空话被打到 80+。"""
+    """合并材料性分。
+
+    llm_primary=True：以 LLM 分为准，规则只对软整合/融资/并购/空话封顶。
+    llm_primary=False：旧版「规则底分 + LLM 小幅上修」。
+    """
+    if llm_primary is None:
+        try:
+            from app.deal_monitor.config import DEAL_LLM_PRIMARY, DEAL_USE_LLM
+
+            llm_primary = bool(DEAL_USE_LLM and DEAL_LLM_PRIMARY)
+        except Exception:
+            llm_primary = True
+
     base = score_materiality(text, source, matched_keywords)
     quality = classify_deal_quality(text)
     score = base
     et = (event_type or "").strip()
     commercial = has_commercial_terms(text)
+    ls = int(llm_score) if llm_score is not None else 0
 
-    if llm_score:
+    if ls > 0 and llm_primary:
+        # —— LLM 主导：硬单信任模型；软/融资/并购仍规则封顶（对照入库、默认不推）——
         if quality == QUALITY_SOFT_PRODUCT:
-            score = min(base + 4, int(llm_score), 52)
-        elif quality == QUALITY_VAGUE:
-            score = min(base + 3, int(llm_score), 48)
+            score = min(ls, 52)
         elif quality == QUALITY_FINANCING:
-            score = min(max(base, min(int(llm_score), base + 4)), 55)
+            score = min(ls, 55)
         elif quality == QUALITY_MA:
-            score = min(max(base, min(int(llm_score), base + 8)), 65)
+            score = min(ls, 65 if commercial else 58)
+        elif quality == QUALITY_VAGUE and ls < 70:
+            score = min(ls, 48)
+        else:
+            score = ls
+    elif ls > 0:
+        # —— 旧版合并 ——
+        if quality == QUALITY_SOFT_PRODUCT:
+            score = min(base + 4, ls, 52)
+        elif quality == QUALITY_VAGUE:
+            score = min(base + 3, ls, 48)
+        elif quality == QUALITY_FINANCING:
+            score = min(max(base, min(ls, base + 4)), 55)
+        elif quality == QUALITY_MA:
+            score = min(max(base, min(ls, base + 8)), 65)
         elif et == "ai_platform_deal":
-            score = min(100, max(base, min(int(llm_score), base + 10)))
+            score = min(100, max(base, min(ls, base + 10)))
             if quality != QUALITY_HARD and not commercial:
                 score = min(score, 58)
         else:
-            bump = min(int(llm_score), base + (10 if commercial else 6))
+            if quality == QUALITY_HARD and commercial:
+                bump = min(ls, max(base + 25, min(ls, 88)))
+            else:
+                bump = min(ls, base + (10 if commercial else 6))
             score = min(100, max(base, bump))
             if not commercial and quality == QUALITY_NORMAL:
                 score = min(score, 58)
@@ -427,16 +505,22 @@ def finalize_materiality_score(
 
     if quality == QUALITY_SOFT_PRODUCT:
         score = min(score, 48)
-    elif quality == QUALITY_VAGUE:
+    elif quality == QUALITY_VAGUE and not (llm_primary and ls >= 70):
         score = min(score, 48)
     elif quality == QUALITY_FINANCING:
         score = min(score, 55)
     elif quality == QUALITY_MA:
         score = min(score, 65 if commercial else 58)
-    elif quality == QUALITY_NORMAL and not commercial:
+    elif quality == QUALITY_NORMAL and not commercial and not (llm_primary and ls >= 70):
         score = min(score, 55)
 
-    if score >= 70 and quality != QUALITY_HARD and not commercial:
+    if (
+        score >= 70
+        and quality != QUALITY_HARD
+        and not commercial
+        and not (llm_primary and ls >= 70)
+        and quality not in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING, QUALITY_MA)
+    ):
         score = min(score, 58)
 
     # 硬催化地板放在封顶之后，避免被 vague/normal 盖掉
@@ -468,11 +552,16 @@ def finalize_materiality_score(
     if is_ai_network_infra_deal(text or ""):
         score = max(score, 78)
 
+    # Verizon×Corning 类：AI 光纤/DCI 多年供应，大票也要过 T0_T0=70
+    if is_ai_optical_fiber_supply(text or ""):
+        score = max(score, 72)
+
     # PLTR×PwC 类：企业 AI 平台 × 大所扩联盟，首日可大涨
     if is_enterprise_ai_consulting_alliance(text or ""):
         score = max(score, 78)
 
     return max(0, min(100, int(score)))
+
 
 def score_outcome_gap(materiality: int | None, first_day_score: int | None) -> int | None:
     if materiality is None or first_day_score is None:

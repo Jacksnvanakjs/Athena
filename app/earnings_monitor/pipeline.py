@@ -12,6 +12,8 @@ from app.deal_monitor.market_cap import fetch_market_cap, get_cached_market_cap,
 from app.deal_monitor.tiers import classify_tier
 from app.earnings_monitor.calendar_fetch import fetch_calendar_for_universe
 from app.earnings_monitor.config import (
+    EARNINGS_DISCOVERY_MAX_CHECKS,
+    EARNINGS_DYNAMIC_DISCOVERY,
     EARNINGS_LOOKAHEAD_DAYS,
     EARNINGS_MONITOR_ENABLED,
     EARNINGS_PUSH_ALLOW_T_DAY,
@@ -295,9 +297,12 @@ async def run_calendar_refresh() -> dict:
     if not EARNINGS_MONITOR_ENABLED:
         return {"skipped": True, "reason": "disabled"}
 
-    universe = load_universe()
+    universe = load_universe(include_discovered=True)
     summary = {
+        "universe_seed": len(load_universe(include_discovered=False)),
         "universe": len(universe),
+        "discovered": 0,
+        "discovery": {},
         "kept": 0,
         "calendar_hits": 0,
         "upserted": 0,
@@ -305,6 +310,22 @@ async def run_calendar_refresh() -> dict:
         "archived": 0,
         "outcome": {},
     }
+
+    if EARNINGS_DYNAMIC_DISCOVERY:
+        try:
+            from app.earnings_monitor.ai_discovery import discover_ai_from_market
+
+            found, dstats = await discover_ai_from_market(
+                load_universe(include_discovered=False),
+                max_checks=EARNINGS_DISCOVERY_MAX_CHECKS,
+            )
+            summary["discovered"] = len(found)
+            summary["discovery"] = dstats
+            universe = load_universe(include_discovered=True)
+            summary["universe"] = len(universe)
+        except Exception:
+            logger.exception("earnings dynamic discovery failed")
+
     if not universe:
         return summary
 
@@ -544,6 +565,30 @@ def event_to_dict(event: EarningsEvent) -> dict:
         "post_er_return_pct": None
         if event.post_er_return is None
         else round(event.post_er_return * 100, 2),
+        "post_er_open_return": event.post_er_open_return,
+        "post_er_open_return_pct": None
+        if event.post_er_open_return is None
+        else round(event.post_er_open_return * 100, 2),
+        "post_er_d1_return": event.post_er_d1_return,
+        "post_er_d1_return_pct": None
+        if event.post_er_d1_return is None
+        else round(event.post_er_d1_return * 100, 2),
+        "post_er_d2_return": event.post_er_d2_return,
+        "post_er_d2_return_pct": None
+        if event.post_er_d2_return is None
+        else round(event.post_er_d2_return * 100, 2),
+        "post_er_d3_return": getattr(event, "post_er_d3_return", None),
+        "post_er_d3_return_pct": None
+        if getattr(event, "post_er_d3_return", None) is None
+        else round(event.post_er_d3_return * 100, 2),
+        "post_er_d4_return": getattr(event, "post_er_d4_return", None),
+        "post_er_d4_return_pct": None
+        if getattr(event, "post_er_d4_return", None) is None
+        else round(event.post_er_d4_return * 100, 2),
+        "post_er_d5_return": getattr(event, "post_er_d5_return", None),
+        "post_er_d5_return_pct": None
+        if getattr(event, "post_er_d5_return", None) is None
+        else round(event.post_er_d5_return * 100, 2),
         "post_er_sessions": event.post_er_sessions,
         "post_er_as_of": event.post_er_as_of.isoformat() if event.post_er_as_of else None,
         "post_er_source": event.post_er_source,

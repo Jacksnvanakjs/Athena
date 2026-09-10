@@ -93,7 +93,8 @@ _PRICE_MOVE_HEADLINE = re.compile(
     r"climbs?|climbed|leaps?|plunges?)\s+(?:about\s+|over\s+|nearly\s+|more than\s+)?"
     r"\d{1,3}(?:\.\d+)?\s*%"
     r"|\b\d{1,3}(?:\.\d+)?\s*%\s+(?:gain|gains|rise|rises|jump|jumps|surge|surges|rally|rallies)"
-    r"|大涨|暴涨|飙升|涨超|涨近|涨逾|涨约|大跌|暴跌"
+    r"|大涨|暴涨|飙升|涨超|涨近|涨逾|涨约|大跌|暴跌|"
+    r"大漲|暴漲|飆升|漲超|漲近|漲逾|漲約|大跌|暴跌"
     r")",
     re.I,
 )
@@ -363,14 +364,12 @@ def _is_primary_wire_source(source: str) -> bool:
     return any(src == p or src.startswith(p) for p in _PRIMARY_SOURCE_PREFIXES)
 
 
-def reject_deal_item(item: RawItem) -> tuple[bool, str]:
-    """
-    入库第一步：非一手/已失去时效 → 拒绝。
-    仅 IR / PR 通稿 / SEC 视为一手通道；Google News / Finnhub 即使路透也须像新签通告。
+def hard_reject_deal_item(item: RawItem) -> tuple[bool, str]:
+    """人一眼会扔的垃圾：黑名单 / SEO 灌水 / 标题股价反应。
+
+    LLM 主导模式下，评论、弱催化、聚合源新鲜度等交给模型判断，不在此否决。
     """
     headline = item.headline or ""
-    text = f"{headline}\n{item.summary or ''}"
-    src = (item.source or "").lower()
 
     if is_blocked_news_source(item):
         return True, "低信源/SEO 站点"
@@ -378,9 +377,35 @@ def reject_deal_item(item: RawItem) -> tuple[bool, str]:
     if is_seo_spam_headline(headline):
         return True, "标题 SEO 灌水"
 
-    # 标题已写股价大涨/大跌：市场已反应完，无抢跑价值
     if is_price_reaction_rehash(headline):
         return True, "旧闻复述（股价反应稿）"
+
+    return False, ""
+
+
+def reject_deal_item(item: RawItem, *, llm_primary: bool | None = None) -> tuple[bool, str]:
+    """入库前过滤。
+
+    llm_primary=True（默认随 DEAL_LLM_PRIMARY）：仅 hard_reject。
+    llm_primary=False：保留旧版严规则（评论/弱催化/聚合源须像新签）。
+    """
+    if llm_primary is None:
+        try:
+            from app.deal_monitor.config import DEAL_LLM_PRIMARY, DEAL_USE_LLM
+
+            llm_primary = bool(DEAL_USE_LLM and DEAL_LLM_PRIMARY)
+        except Exception:
+            llm_primary = True
+
+    hard = hard_reject_deal_item(item)
+    if hard[0]:
+        return hard
+    if llm_primary:
+        return False, ""
+
+    headline = item.headline or ""
+    text = f"{headline}\n{item.summary or ''}"
+    src = (item.source or "").lower()
 
     if is_market_commentary(headline) or is_market_commentary(text):
         return True, "评论/展望稿，非一阶通稿"
@@ -421,7 +446,7 @@ def should_hide_deal_content(
     source_url: str | None,
     published_at=None,
 ) -> bool:
-    """列表/API：与入库同一标准，应拒则隐藏（不删库）。"""
+    """列表/API：硬否决 + 明显评论/弱催化标题隐藏（不删库）。"""
     from datetime import datetime, timezone
 
     item = RawItem(
@@ -431,27 +456,28 @@ def should_hide_deal_content(
         source_url=source_url or "",
         published_at=published_at or datetime.now(timezone.utc),
     )
-    return reject_deal_item(item)[0]
+    if hard_reject_deal_item(item)[0]:
+        return True
+    h = headline or ""
+    text = f"{h}\n{summary or ''}"
+    if is_market_commentary(h) or is_market_commentary(text):
+        return True
+    if is_weak_price_catalyst(h) or is_weak_price_catalyst(text):
+        return True
+    return False
 
 
 def should_hide_deal_event(event) -> bool:
-    """展示与入库一致：第一步会拒的，列表一律不展示（不因首日涨跌豁免）。"""
+    """展示：硬否决与评论/弱催化标题不展示（不因首日涨跌豁免）。"""
     from datetime import datetime, timezone
 
-    item = RawItem(
-        headline=event.headline or "",
-        summary=event.summary or "",
-        source=event.source or "",
-        source_url=event.source_url or "",
+    return should_hide_deal_content(
+        event.headline or "",
+        event.summary or "",
+        event.source or "",
+        event.source_url or "",
         published_at=getattr(event, "published_at", None) or datetime.now(timezone.utc),
     )
-    if reject_deal_item(item)[0]:
-        return True
-    # 标题已标明挖矿转型等弱叙事：即使正文有大额 MSA 也不展示
-    headline = event.headline or ""
-    if is_weak_price_catalyst(headline):
-        return True
-    return False
 
 
 def should_hide_weak_quality_event(event, *, keep_if_first_day_high: bool = True) -> bool:

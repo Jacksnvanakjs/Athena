@@ -15,6 +15,16 @@ class TestCompanyIrFeeds(unittest.TestCase):
         self.assertEqual(adbe[0]["type"], "google_news")
         self.assertIn("news.adobe.com", adbe[0]["query"])
 
+    def test_loads_corning_and_verizon_optical(self):
+        feeds = _load_company_ir_feeds()
+        glw = [f for f in feeds if f["ticker"] == "GLW"]
+        vz = [f for f in feeds if f["ticker"] == "VZ"]
+        self.assertEqual(len(glw), 1)
+        self.assertEqual(glw[0]["type"], "google_news")
+        self.assertIn("Corning", glw[0]["query"])
+        self.assertEqual(len(vz), 1)
+        self.assertIn("verizon.com", vz[0]["url"])
+
     def test_company_ir_feeds_non_empty(self):
         self.assertGreater(len(COMPANY_IR_FEEDS), 40)
 

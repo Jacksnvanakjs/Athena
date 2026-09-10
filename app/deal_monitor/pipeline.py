@@ -16,6 +16,7 @@ from app.database import DealEvent, DealSeenUrl, db_session
 from app.deal_monitor.config import (
     DEAL_DEDUP_DAYS,
     DEAL_INGEST_MAX_AGE_DAYS,
+    DEAL_LLM_MIN_SCORE,
     DEAL_LLM_MODEL,
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
@@ -33,10 +34,17 @@ from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
 from app.deal_monitor.fetchers.company_ir import fetch_finnhub_and_google
 from app.deal_monitor.fetchers.company_ir_rss import fetch_company_ir_feeds
-from app.deal_monitor.content_filter import deal_amount_keys, reject_deal_item
+from app.deal_monitor.content_filter import deal_amount_keys
+from app.deal_monitor.ingest_policy import (
+    llm_allows_beneficiary_ingest,
+    llm_primary_enabled,
+    pre_llm_reject,
+    should_skip_vague_despite_llm,
+)
 from app.deal_monitor.keywords import is_product_only_integration, is_update_headline, passes_keyword_filter
 from app.deal_monitor.llm_classifier import LlmDecision, classify_items
 from app.deal_monitor.market_cap import enrich_entity_tiers
+from app.market_data.tradability import is_us_tradable
 from app.deal_monitor.materiality import (
     QUALITY_FINANCING,
     QUALITY_HARD,
@@ -441,12 +449,13 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
     if is_test_source_url(item.source_url):
         stats["reason"] = "测试/占位链接，不入库"
         return stats
-    reject, reject_reason = reject_deal_item(item)
+    reject, reject_reason = pre_llm_reject(item)
     if reject:
         stats["reason"] = f"内容过滤: {reject_reason}"
         return stats
     text = f"{item.headline}\n{item.summary}"
     matched: list[str] = []
+    primary = llm_primary_enabled()
 
     if DEAL_USE_LLM:
         if not llm_decision:
@@ -489,7 +498,10 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             hard_ok = (
                 classify_deal_quality(text) == QUALITY_HARD and bool(benef.ticker)
             )
-            if roles.should_push or hard_ok:
+            llm_ok = primary and llm_allows_beneficiary_ingest(
+                llm_decision, has_ticker=bool(benef.ticker)
+            )
+            if roles.should_push or hard_ok or llm_ok:
                 role_pairs.append((roles, benef))
         if not role_pairs:
             stats["reason"] = "LLM 受益方规则不推送"
@@ -584,7 +596,7 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
                 role_pairs = [(roles, roles.beneficiary)]
 
     quality = classify_deal_quality(text)
-    # 空话合作默认不入库；软整合/融资可入库对照但不推送，且封顶低分
+    # 空话合作：LLM 主导时仅低分丢弃；旧模式一律不入库
 
     event_type = (llm_decision.event_type if llm_decision else None) or EVENT_TYPE
     is_update = is_update_headline(item.headline)
@@ -592,7 +604,10 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
     last_score = 0
     last_tier_pair = ""
 
-    if quality == QUALITY_VAGUE:
+    if llm_decision and should_skip_vague_despite_llm(text, llm_decision):
+        stats["reason"] = "空话合作/无商业条款，不入库"
+        return stats
+    if not llm_decision and quality == QUALITY_VAGUE:
         stats["reason"] = "空话合作/无商业条款，不入库"
         return stats
 
@@ -603,27 +618,39 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             matched,
             llm_score=(llm_decision.llm_score if llm_decision else None),
             event_type=event_type,
+            llm_primary=primary if DEAL_USE_LLM else False,
         )
         if (
             llm_decision
             and llm_decision.llm_score
-            and llm_decision.llm_score < 70
+            and llm_decision.llm_score < DEAL_LLM_MIN_SCORE
             and quality not in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING, QUALITY_VAGUE)
         ):
-            stats["reason"] = f"LLM 材料性不足 {llm_decision.llm_score} < 70"
+            stats["reason"] = (
+                f"LLM 材料性不足 {llm_decision.llm_score} < {DEAL_LLM_MIN_SCORE}"
+            )
             return stats
         threshold = score_threshold(roles.tier_pair)
-        # 软整合/融资：更高入库门槛（弱催化少占列表）；仍 soft_skip 不推送
-        if quality in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING):
+        # LLM 主导：门槛取 min(档位门槛, LLM 最低分)，避免规则门槛否决高分 LLM
+        if primary and llm_decision and llm_decision.llm_score:
+            effective_threshold = min(threshold, DEAL_LLM_MIN_SCORE)
+        elif quality in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING):
             effective_threshold = max(55, threshold)
         else:
             effective_threshold = threshold
+        # 软整合/融资：更高入库门槛（弱催化少占列表）；仍 soft_skip 不推送
+        if quality in (QUALITY_SOFT_PRODUCT, QUALITY_FINANCING) and not primary:
+            effective_threshold = max(55, threshold)
         if score < effective_threshold:
             stats["reason"] = f"材料性 {score} < {effective_threshold}"
             continue
 
         ticker = (beneficiary.ticker or "").upper()
         if not ticker:
+            continue
+        if not await is_us_tradable(ticker):
+            stats["reason"] = f"受益方 {ticker} 无美股可买行情（退市/停牌）"
+            logger.info("跳过不可交易受益方 %s", ticker)
             continue
         anchor_key = _anchor_dedup_key(roles.anchor.ticker, roles.anchor.name)
         if _is_duplicate(db, item.source_url, h_hash, ticker):
@@ -731,7 +758,7 @@ async def run_pipeline() -> dict:
                     )
                 )
                 continue
-            reject, reason = reject_deal_item(item)
+            reject, reason = pre_llm_reject(item)
             if reject:
                 content_rejected += 1
                 logger.info("内容过滤跳过: %s — %s", item.headline[:80], reason)

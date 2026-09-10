@@ -24,6 +24,8 @@
     {"names": ["Marvell Technology", "Marvell"], "ticker": "MRVL"},
     {"names": ["Lumentum", "LITE"], "ticker": "LITE"},
     {"names": ["Coherent", "COHR"], "ticker": "COHR"},
+    {"names": ["Corning", "康宁"], "ticker": "GLW"},
+    {"names": ["Verizon", "Verizon Communications"], "ticker": "VZ"},
     {"names": ["Best Buy"], "ticker": "BBY"},
     {"names": ["Equinix"], "ticker": "EQIX"},
     {"names": ["Digital Realty"], "ticker": "DLR"},
@@ -65,7 +67,8 @@
     {"names": ["Deloitte", "德勤"], "id": "deloitte"},
     {"names": ["EY", "Ernst & Young", "Ernst and Young", "安永"], "id": "ey"},
     {"names": ["KPMG", "毕马威"], "id": "kpmg"},
-    {"names": ["Accenture", "埃森哲"], "id": "accenture"}
+    {"names": ["Accenture", "埃森哲"], "id": "accenture"},
+    {"names": ["Innovid", "Innovid Corp"], "id": "innovid"}
   ],
   "t0_listed_tickers": ["MSFT", "GOOG", "GOOGL", "AMZN", "META", "NVDA", "ORCL", "AAPL", "TSM", "SFTBY"],
   "channel_partners": [

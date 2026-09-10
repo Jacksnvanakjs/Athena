@@ -31,7 +31,7 @@ from app.deal_monitor.pipeline import normalize_headline, _published_too_stale_f
 from app.nvda_signal.classifier import classify_signal
 from app.nvda_signal.config import ACTION_MIN_SCORE
 from app.nvda_signal.fetchers import fetch_all_nvda_items
-from app.nvda_signal.keywords import is_rumor, _norm
+from app.nvda_signal.keywords import has_acquire_terms, has_nvda, is_rumor, _norm
 from app.nvda_signal.materiality import score_a, score_a_plus_b
 from app.nvda_signal.prior_a_lookup import find_prior_a, prior_a_days_ago
 from app.nvda_signal.trade_window import build_trade_plan
@@ -69,7 +69,7 @@ def _entity_in_headline(entity: Entity, headline: str) -> bool:
 
 
 def _unlisted_target_in_headline(headline: str) -> bool:
-    """标题主标的若为未上市公司（如 Hugging Face），无可交易受益方。"""
+    """标题主标的若为未上市公司（如 Hugging Face）。"""
     registry.load_seed()
     h = headline.lower()
     for alias, ticker, uid in registry._aliases:
@@ -80,6 +80,18 @@ def _unlisted_target_in_headline(headline: str) -> bool:
         if len(alias) <= 4 and re.search(rf"\b{re.escape(alias)}\b", h):
             return True
     return False
+
+
+def _is_nvda_acquire_unlisted(headline: str, text: str) -> bool:
+    """NVDA 官宣收购未上市标的：受益方记 NVDA 自身。"""
+    blob = _norm(f"{headline}\n{text}")
+    if not has_nvda(blob) or not has_acquire_terms(blob):
+        return False
+    return _unlisted_target_in_headline(headline) or _unlisted_target_in_headline(text)
+
+
+def _nvda_as_beneficiary() -> Entity:
+    return Entity(name="NVIDIA", ticker="NVDA", tier="T0")
 
 
 def _extract_beneficiaries(text: str, headline: str) -> list[Entity]:
@@ -98,6 +110,14 @@ def _extract_beneficiaries(text: str, headline: str) -> list[Entity]:
             continue
         found[ticker] = entity
     return list(found.values())
+
+
+def _allow_t0_beneficiary(entity: Entity, action_type: str) -> bool:
+    """仅 NVDA 收购未上市巨头时允许 T0（NVDA）入库。"""
+    return (
+        (entity.ticker or "").upper() == "NVDA"
+        and action_type == "NVDA_ACQUIRE_UNLISTED"
+    )
 
 
 def _is_t0(entity: Entity) -> bool:
@@ -206,13 +226,17 @@ async def process_item(db: Session, item: RawItem) -> dict:
         stats["reason"] = "标题含传闻措辞，非官宣"
         return stats
 
-    if _unlisted_target_in_headline(headline):
+    text = f"{headline}\n{item.summary}"
+    acquire_unlisted = _is_nvda_acquire_unlisted(headline, text)
+
+    if _unlisted_target_in_headline(headline) and not acquire_unlisted:
         stats["reason"] = "交易标的未上市，无可操作美股"
         return stats
 
-    text = f"{headline}\n{item.summary}"
     clean_text = clean_article_text(text)
     beneficiaries = _extract_beneficiaries(text, headline)
+    if not beneficiaries and acquire_unlisted:
+        beneficiaries = [_nvda_as_beneficiary()]
     if not beneficiaries:
         stats["reason"] = "未识别美股受益方"
         return stats
@@ -220,6 +244,8 @@ async def process_item(db: Session, item: RawItem) -> dict:
     saved: list[str] = []
     for raw_entity in beneficiaries:
         entity = await resolve_entity(raw_entity.name, context=text)
+        if not entity.ticker and acquire_unlisted and (raw_entity.ticker or "").upper() == "NVDA":
+            entity = raw_entity
         if not entity.ticker:
             continue
 
@@ -228,6 +254,9 @@ async def process_item(db: Session, item: RawItem) -> dict:
         if not classification:
             stats["reason"] = "不符合 NVDA 信号语义"
             continue
+
+        if acquire_unlisted and classification.signal_tier == "A":
+            classification.action_type = "NVDA_ACQUIRE_UNLISTED"
 
         if classification.signal_tier in ("B", "C"):
             stats["reason"] = f"{classification.signal_tier}档仅日志"
@@ -250,7 +279,7 @@ async def process_item(db: Session, item: RawItem) -> dict:
                 continue
 
         await enrich_entity_tiers(db, [entity])
-        if _is_t0(entity):
+        if _is_t0(entity) and not _allow_t0_beneficiary(entity, classification.action_type):
             stats["reason"] = "T0 受益方不推送"
             continue
 

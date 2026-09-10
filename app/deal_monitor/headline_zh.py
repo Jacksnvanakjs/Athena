@@ -47,6 +47,8 @@ def needs_zh_headline(headline: str) -> bool:
 
 
 def _amount_cn(text: str) -> str | None:
+    if re.search(r"multi[- ]billion|数十亿", text or "", re.I):
+        return "数十亿美元"
     m = re.search(
         r"\$?\s*([\d,.]+)\s*(billion|million|bn|b\b|m\b)",
         text,
@@ -61,12 +63,14 @@ def _amount_cn(text: str) -> str | None:
     except ValueError:
         return None
     if unit.startswith("b"):
-        if val >= 10:
-            return f"约{val:g}亿美元"
-        return f"约{val:g}亿美元" if val >= 1 else f"约{int(val * 10)}亿美元"
-    # million
-    if val >= 1000:
-        return f"约{val / 1000:g}亿美元"
+        # $1 billion = 10 亿美元
+        yi = val * 10
+        if yi >= 1:
+            return f"约{yi:g}亿美元"
+        return f"约{int(val * 10000)}万美元"
+    # million: $1 million = 0.01 亿美元 = 100 万美元
+    if val >= 100:
+        return f"约{val / 100:g}亿美元"
     return f"约{val:g}万美元"
 
 
@@ -81,6 +85,8 @@ def _party_hint(text: str) -> str | None:
         ("AWS", "AWS"),
         ("NVIDIA", "英伟达"),
         ("Nvidia", "英伟达"),
+        ("Verizon", "Verizon"),
+        ("Corning", "康宁"),
         ("Salesforce", "Salesforce"),
         ("Oracle", "Oracle"),
         ("Meta", "Meta"),
@@ -144,6 +150,8 @@ def _brief_from_text(text: str, ticker: str) -> str | None:
         return f"出售给 {buyer[:20]}（{amt or '大额'}）"
 
     if re.search(r"\b(?:acquires?|acquired|acquisition|to\s+acquire)\b", low):
+        if "hugging face" in low or "huggingface" in low:
+            return f"收购 Hugging Face（{amt}）" if amt else "收购 Hugging Face"
         target = party or "标的"
         return f"收购相关交易（{amt}）" if amt else f"收购/并购相关（{target}）"
 
@@ -153,6 +161,15 @@ def _brief_from_text(text: str, ticker: str) -> str | None:
         y = f"{years.group(1)}年" if years else ""
         who = party or "合作方"
         return f"与{who}签{y}电力协议" if y else f"与{who}电力/购电合作"
+
+    # AI 光纤 / DCI 多年供应（Verizon×Corning）
+    if re.search(
+        r"(?:optical\s+fiber|fiber\s+optic|high[- ]density\s+(?:optical\s+)?fiber|"
+        r"data\s*center\s+interconnect|\bdci\b|光纤|光缆)",
+        low,
+    ) and re.search(r"(?:supply\s+agreement|purchase\s+agreement|供应协议|multi[- ]year)", low):
+        who = party or "合作方"
+        return f"与{who}签光纤供应协议" + (f"（{amt}）" if amt else "")
 
     if re.search(r"\b(?:bess|battery\s+energy|storage|储能)\b", low) and re.search(
         r"\b(?:mw|gwh|megawatt|construction|constructie)\b", low

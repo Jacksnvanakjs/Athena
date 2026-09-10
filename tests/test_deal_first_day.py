@@ -39,6 +39,17 @@ class TestFirstDayScore(unittest.TestCase):
         self.assertEqual(score_first_day_return(-0.01).band, BAND_LOW)
         self.assertEqual(score_first_day_return(-0.009).band, BAND_MID)
 
+    def test_mega_cap_bands(self):
+        """NVDA / 黄仁勋 T0：+1.5% 即高，+0.7% 中高。"""
+        self.assertEqual(score_first_day_return(0.018, mega_cap=True).band, BAND_HIGH)
+        self.assertEqual(score_first_day_return(0.018, mega_cap=True).score, 85)
+        self.assertEqual(score_first_day_return(0.015, mega_cap=True).band, BAND_HIGH)
+        self.assertEqual(score_first_day_return(0.01, mega_cap=True).band, BAND_MID_HIGH)
+        self.assertEqual(score_first_day_return(0.007, mega_cap=True).band, BAND_MID_HIGH)
+        self.assertEqual(score_first_day_return(0.005, mega_cap=True).band, BAND_MID)
+        # 常规阈值不变
+        self.assertEqual(score_first_day_return(0.018).band, BAND_MID_HIGH)
+
     def test_reaction_start_after_hours_rolls_next_day(self):
         # 2026-09-02 23:06 UTC = 19:06 ET 盘后 → 下一交易日起算
         pub = datetime(2026, 9, 2, 23, 6, tzinfo=timezone.utc)

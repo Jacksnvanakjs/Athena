@@ -156,7 +156,10 @@ GEMINI_API_KEYS = list(
     )
 )
 DEAL_USE_LLM = os.getenv("DEAL_USE_LLM", "true").lower() == "true"
+# LLM 主导入库：规则只做硬否决；相关与材料性分以 LLM 为准（默认开）
+DEAL_LLM_PRIMARY = os.getenv("DEAL_LLM_PRIMARY", "true").lower() == "true"
 DEAL_LLM_MODEL = os.getenv("DEAL_LLM_MODEL", "gemini-3.6-flash")
+DEAL_LLM_MIN_SCORE = int(os.getenv("DEAL_LLM_MIN_SCORE", "70"))
 # 发稿超过 N 天：不入库（消 IR/聚合器历史稿造成的假 lag）；0=关闭
 DEAL_INGEST_MAX_AGE_DAYS = int(os.getenv("DEAL_INGEST_MAX_AGE_DAYS", "3"))
 # 发稿超过 N 天：若已入库则不推送（兜底；正常应由 INGEST 先行丢弃）
@@ -197,6 +200,9 @@ EARNINGS_LOOKAHEAD_DAYS = int(os.getenv("EARNINGS_LOOKAHEAD_DAYS", "90"))
 EARNINGS_SCORE_LOOKAHEAD_DAYS = int(os.getenv("EARNINGS_SCORE_LOOKAHEAD_DAYS", "14"))
 EARNINGS_CALENDAR_REFRESH_HOURS = int(os.getenv("EARNINGS_CALENDAR_REFRESH_HOURS", "6"))
 EARNINGS_CALENDAR_SOURCE = os.getenv("EARNINGS_CALENDAR_SOURCE", "finnhub")
+# 全市场财报日历 + Finnhub 同行/锚点判定，动态发现 AI 相关票（补固定名单）
+EARNINGS_DYNAMIC_DISCOVERY = os.getenv("EARNINGS_DYNAMIC_DISCOVERY", "true").lower() == "true"
+EARNINGS_DISCOVERY_MAX_CHECKS = int(os.getenv("EARNINGS_DISCOVERY_MAX_CHECKS", "100"))
 EARNINGS_STRATEGY = os.getenv("EARNINGS_STRATEGY", "POST_ER_BUY_WITHIN_2D")
 EARNINGS_HOLD_TRADING_DAYS_MAX = int(os.getenv("EARNINGS_HOLD_TRADING_DAYS_MAX", "2"))
 EARNINGS_CHASE_GAP_PCT_BLOCK = float(os.getenv("EARNINGS_CHASE_GAP_PCT_BLOCK", "15"))

@@ -17,6 +17,8 @@ A_HARD_TOKENS = (
     "allocation", "reserved capacity", "slot reservation",
     "$ billion", "billion-dollar", "亿美元", "战略合作", "长期协议", "产能", "投资",
     "item 1.01", "material definitive agreement", "definitive agreement",
+    "acquire", "acquisition", "to acquire", "agreed to acquire", "acquires",
+    "并购", "收购", "同意收购",
 )
 
 VERBAL_B_TOKENS = (
@@ -39,6 +41,10 @@ RUMOR_TOKENS = (
     "people familiar with",
 )
 
+ACQUIRE_TOKENS = (
+    "acquire", "acquisition", "to acquire", "agreed to acquire", "acquires",
+    "并购", "收购", "同意收购",
+)
 INVEST_TOKENS = ("invest", "investment", "equity stake", "warrants", "投资")
 PURCHASE_TOKENS = ("purchase commitment", "offtake", "multi-year purchase", "采购承诺")
 CAPACITY_TOKENS = (
@@ -74,6 +80,10 @@ def has_a_hard_terms(blob: str) -> bool:
     return has_any(blob, A_HARD_TOKENS)
 
 
+def has_acquire_terms(blob: str) -> bool:
+    return has_any(blob, ACQUIRE_TOKENS)
+
+
 def has_verbal_terms(blob: str) -> bool:
     return has_any(blob, VERBAL_B_TOKENS)
 
@@ -85,6 +95,8 @@ def detect_action_type(blob: str, signal_tier: str) -> str:
         if has_any(blob, ("please make more", "多生产", "strong demand")):
             return "NVDA_VERBAL_DEMAND"
         return "NVDA_VERBAL_BULLISH"
+    if has_any(blob, ACQUIRE_TOKENS):
+        return "NVDA_ACQUIRE"
     if has_any(blob, INVEST_TOKENS):
         return "NVDA_INVEST"
     if has_any(blob, PURCHASE_TOKENS):

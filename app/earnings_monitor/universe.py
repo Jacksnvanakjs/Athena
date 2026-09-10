@@ -27,28 +27,36 @@ def _resolve_universe_path() -> Path | None:
     return None
 
 
-def load_universe() -> list[UniverseTicker]:
+def load_universe(*, include_discovered: bool = True) -> list[UniverseTicker]:
     path = _resolve_universe_path()
     if not path:
         logger.warning("earnings_universe.json 未找到")
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    rows = data.get("tickers") or []
-    out: list[UniverseTicker] = []
-    seen: set[str] = set()
-    for item in rows:
-        ticker = str(item.get("ticker") or "").strip().upper()
-        if not ticker or ticker in seen:
-            continue
-        seen.add(ticker)
-        out.append(
-            UniverseTicker(
-                ticker=ticker,
-                name=str(item.get("name") or ticker).strip(),
-                sector=str(item.get("sector") or "AI_SAAS").strip().upper(),
+        seed: list[UniverseTicker] = []
+    else:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        rows = data.get("tickers") or []
+        seed = []
+        seen: set[str] = set()
+        for item in rows:
+            ticker = str(item.get("ticker") or "").strip().upper()
+            if not ticker or ticker in seen:
+                continue
+            seen.add(ticker)
+            seed.append(
+                UniverseTicker(
+                    ticker=ticker,
+                    name=str(item.get("name") or ticker).strip(),
+                    sector=str(item.get("sector") or "AI_SAAS").strip().upper(),
+                )
             )
-        )
-    return out
+    if not include_discovered:
+        return seed
+    from app.earnings_monitor.ai_discovery import load_discovered
+
+    out = {u.ticker: u for u in seed}
+    for u in load_discovered():
+        out.setdefault(u.ticker, u)
+    return list(out.values())
 
 
 def filter_by_market_cap(

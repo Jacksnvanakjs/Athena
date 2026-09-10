@@ -40,10 +40,18 @@ EXPECTED_LABELS = {
 class PostErMove:
     pre_close: float
     last_price: float
-    ret: float
+    ret: float  # 主对照：优先 T+2 收，否则 T+1 收
     sessions_after: int
     as_of: date
     source: str
+    open_ret: float | None = None  # T+1 开盘 vs 前收
+    d1_ret: float | None = None
+    d2_ret: float | None = None
+    d3_ret: float | None = None
+    d4_ret: float | None = None
+    d5_ret: float | None = None
+    t1_date: date | None = None
+    t2_date: date | None = None
 
 
 @dataclass
@@ -141,31 +149,64 @@ async def fetch_post_er_move(
     max_sessions: int = 2,
     allow_live: bool = True,
 ) -> PostErMove | None:
-    """财报前收盘 → 财报后最多 max_sessions 个交易日收盘（或盘后/多源现价兜底）。"""
-    from app.market_data import fetch_daily_closes
+    """财报前收盘 → 开盘 / D1～D5 收盘。
+
+    主字段 ``ret`` 仍对齐策略：优先用 T+2 收盘涨跌（最多 max_sessions 日）。
+    展示用 d3/d4/d5 会尽量回填（最多看 5 个交易日）。
+    """
+    from app.market_data import fetch_daily_bars, fetch_daily_closes
 
     as_of = pre_earnings_price_as_of(earnings_date, session or "TBD")
-    closes = await fetch_daily_closes(ticker, lookback_days=40)
-    if not closes:
+    bars = await fetch_daily_bars(ticker, lookback_days=40)
+    if not bars:
+        closes = await fetch_daily_closes(ticker, lookback_days=40)
+        bars = [(d, c, c, c, c) for d, c in closes]
+    if not bars:
         return None
-    pre = [(d, c) for d, c in closes if d <= as_of and c is not None]
+
+    pre = [b for b in bars if b[0] <= as_of and b[4] is not None]
     if not pre:
         return None
-    pre_d, pre_c = pre[-1]
+    pre_d, _po, _ph, _pl, pre_c = pre[-1]
     if not pre_c or pre_c <= 0:
         return None
 
-    after = [(d, c) for d, c in closes if d > as_of and c is not None]
+    after = [b for b in bars if b[0] > as_of and b[4] is not None]
     if after:
-        use = after[: max(1, max_sessions)]
-        last_d, last_c = use[-1]
+        t1 = after[0]
+        t1_d, t1_o, _h, _l, t1_c = t1
+        open_ret = (t1_o - pre_c) / pre_c if t1_o and t1_o > 0 else None
+        d1_ret = (t1_c - pre_c) / pre_c
+
+        def _close_ret(i: int) -> float | None:
+            if len(after) <= i:
+                return None
+            return (after[i][4] - pre_c) / pre_c
+
+        d2_ret = _close_ret(1)
+        d3_ret = _close_ret(2)
+        d4_ret = _close_ret(3)
+        d5_ret = _close_ret(4)
+        t2_d = after[1][0] if len(after) >= 2 else None
+
+        use_n = min(len(after), max(1, max_sessions))
+        last_d, _lo, _lh, _ll, last_c = after[use_n - 1]
+        primary = d2_ret if (use_n >= 2 and d2_ret is not None) else d1_ret
         return PostErMove(
             pre_close=pre_c,
             last_price=last_c,
-            ret=(last_c - pre_c) / pre_c,
-            sessions_after=len(use),
+            ret=primary,
+            sessions_after=use_n,
             as_of=last_d,
-            source=f"daily:{pre_d}→{last_d}",
+            source=f"ohlc:{pre_d}→{last_d}",
+            open_ret=open_ret,
+            d1_ret=d1_ret,
+            d2_ret=d2_ret,
+            d3_ret=d3_ret,
+            d4_ret=d4_ret,
+            d5_ret=d5_ret,
+            t1_date=t1_d,
+            t2_date=t2_d,
         )
 
     if not allow_live:
@@ -181,6 +222,14 @@ async def fetch_post_er_move(
         sessions_after=0,
         as_of=live.as_of,
         source=live.source,
+        open_ret=(live.price - pre_c) / pre_c,
+        d1_ret=None,
+        d2_ret=None,
+        d3_ret=None,
+        d4_ret=None,
+        d5_ret=None,
+        t1_date=None,
+        t2_date=None,
     )
 
 
@@ -417,6 +466,12 @@ def apply_outcome_to_event(event, move: PostErMove | None) -> OutcomeJudgement:
         event.post_er_sessions = move.sessions_after
         event.post_er_as_of = move.as_of
         event.post_er_source = move.source
+        event.post_er_open_return = move.open_ret
+        event.post_er_d1_return = move.d1_ret
+        event.post_er_d2_return = move.d2_ret
+        event.post_er_d3_return = move.d3_ret
+        event.post_er_d4_return = move.d4_ret
+        event.post_er_d5_return = move.d5_ret
     else:
         # 保留旧值？无则清空 anomaly 等待下次
         if event.post_er_return is None:
@@ -499,6 +554,12 @@ async def run_outcome_check(*, lookback_days: int | None = None) -> dict:
                     sessions_after=0,
                     as_of=cand.as_of,
                     source=cand.source,
+                    open_ret=(cand.price - pre) / pre,
+                    d1_ret=None,
+                    d2_ret=None,
+                    d3_ret=None,
+                    d4_ret=None,
+                    d5_ret=None,
                 )
 
         for event in past:
@@ -575,6 +636,10 @@ async def _batch_resolve_live_prices(tickers: list[str]) -> dict[str, _LivePx]:
     return out
 
 
+def _pct(v: float | None) -> float | None:
+    return None if v is None else round(v * 100, 2)
+
+
 def anomaly_to_dict(event) -> dict:
     """网站异常区单行。"""
     ret = event.post_er_return
@@ -588,7 +653,19 @@ def anomaly_to_dict(event) -> dict:
         "eliminate_reason": event.eliminate_reason,
         "push_eligible": bool(event.push_eligible),
         "post_er_return": ret,
-        "post_er_return_pct": None if ret is None else round(ret * 100, 2),
+        "post_er_return_pct": _pct(ret),
+        "post_er_open_return": event.post_er_open_return,
+        "post_er_open_return_pct": _pct(event.post_er_open_return),
+        "post_er_d1_return": event.post_er_d1_return,
+        "post_er_d1_return_pct": _pct(event.post_er_d1_return),
+        "post_er_d2_return": event.post_er_d2_return,
+        "post_er_d2_return_pct": _pct(event.post_er_d2_return),
+        "post_er_d3_return": getattr(event, "post_er_d3_return", None),
+        "post_er_d3_return_pct": _pct(getattr(event, "post_er_d3_return", None)),
+        "post_er_d4_return": getattr(event, "post_er_d4_return", None),
+        "post_er_d4_return_pct": _pct(getattr(event, "post_er_d4_return", None)),
+        "post_er_d5_return": getattr(event, "post_er_d5_return", None),
+        "post_er_d5_return_pct": _pct(getattr(event, "post_er_d5_return", None)),
         "post_er_sessions": event.post_er_sessions,
         "post_er_as_of": event.post_er_as_of.isoformat() if event.post_er_as_of else None,
         "post_er_source": event.post_er_source,

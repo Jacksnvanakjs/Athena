@@ -56,7 +56,9 @@ THEME_TOKENS = (
     "custom semiconductor", "custom silicon", "custom chip", "asic", "tpu",
     "ai inference", "inference accelerator", "near-memory", "hbm",
     "memory interface", "network interface", "ethernet", "infiniband",
-    "optical", "光子", "foundry", "advanced packaging", "chiplet",
+    "optical", "optical fiber", "fiber optic", "data center interconnect", "dci",
+    "long-haul", "光子", "光纤", "光模块", "光通信",
+    "foundry", "advanced packaging", "chiplet",
     "semiconductor products", "wafer",
     # SaaS / Agent / 大模型产品整合（Claudeforce 类）
     "ai agent", "agentic", "agentforce", "claudeforce", "llm",
@@ -168,7 +170,10 @@ def _build_prompt(items: list[RawItem]) -> str:
     return (
         "你是美股「AI 产业链」材料性商业合作筛选器（含算力供给链 + 企业 AI 平台合作）。"
         "只根据标题和摘要判断，禁止脑补未出现的金额/对方/条款。\n\n"
-        "【解读原则】像人一样读稿：很多通稿**表面是产品上架/now available/GA**，"
+        "【解读原则】像交易员读一手通稿：先理解「发生了什么商业事实」，再判断是否值得入库。"
+        "不要死抠关键词清单；正文写明多年供应/金额/容量/联合部署且服务 AI/hyperscale/"
+        "数据中心/算力，即使公司是光纤、电力、电信，也应 relevant=true。\n"
+        "很多通稿**表面是产品上架/now available/GA**，"
         "实质是 hyperscaler×ISV 的**战略合作、分销渠道、联合发布**。"
         "遇到此类稿：看是否双方联合宣布、是否改变渠道/部署方式/采购路径；"
         "若是 → relevant=true，reason 开头写「实质：…合作；表面：…产品」；"
@@ -190,7 +195,10 @@ def _build_prompt(items: list[RawItem]) -> str:
         "明确服务 AI/hyperscale/data center（例：Google×Fervo 地热 PPA、Google×Eos 储能）\n"
         "T3 定制硅与芯片：ASIC/TPU/custom semiconductor|silicon|chip、"
         "inference accelerator、为云厂开发定制芯片、design win\n"
-        "T4 AI 集群互联与光模块：以太网/InfiniBand/NIC/光互联/交换，明确 AI 训练/推理场景\n"
+        "T4 AI 集群互联与光模块/光纤骨干：以太网/InfiniBand/NIC/光互联/交换；"
+        "以及电信或云厂与光纤/光缆厂商的多年供应协议，明确服务 AI 训练/推理/"
+        "hyperscale/data center interconnect（DCI）/long-haul AI 骨干"
+        "（例：Verizon×Corning multi-billion fiber supply for AI infrastructure）\n"
         "T5 AI 存储与先进封装：HBM、近存算、存储/内存控制器、foundry/advanced packaging "
         "且服务 AI 加速器\n"
         "T6 其他算力供应：明确写给 AI 训练/推理/智算用的长期供应或 offtake\n"
@@ -201,6 +209,9 @@ def _build_prompt(items: list[RawItem]) -> str:
         "纯财报超预期、无新合作细节 → false；财报稿中若同时宣布上述产品合作 → true。\n\n"
         "【模式正例】（抽象模板）\n"
         "- 美股芯片/光模块/DC 公司 + 云厂/hyperscaler + 正式商业协议/Item 1.01 → true\n"
+        "- 光纤/光缆厂商（如 Corning）+ 电信或云厂 + 多年/multi-billion 光纤供应，"
+        "正文写 AI/hyperscale/DCI/data center → true；beneficiary=光纤厂商，"
+        "anchor=电信或云厂；llm_score≥80\n"
         "- 算力/托管商 + 云厂或大模型公司 + 多年容量/MW 协议 → true\n"
         "- 供应链公司 + 采购挂钩 warrant/长期供应，标的是 AI 芯片或加速器生态 → true\n"
         "- 美股 SaaS + Anthropic/OpenAI + 命名产品整合/Agent 上线 → true "
@@ -368,7 +379,13 @@ def apply_heuristic_rescue(
 
 
 async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None:
-    models = [DEAL_LLM_MODEL, "gemini-2.5-flash", "gemini-2.0-flash"]
+    # 2.0-flash 已下线；2.5 易 429，保留 flash-latest / 3.6 作回退
+    models = [
+        DEAL_LLM_MODEL,
+        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-3.6-flash",
+    ]
     data = None
     last_exc: Exception | None = None
     body = {

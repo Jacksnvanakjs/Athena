@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from app.deal_monitor.content_filter import (
     deal_amount_keys,
+    hard_reject_deal_item,
     is_fresh_deal_announcement,
     is_material_signed_deal,
     is_price_reaction_rehash,
@@ -91,7 +92,9 @@ def test_gorilla_surges_rejected():
 
 def test_nebius_commentary_rejected():
     h = "How Nebius Group’s AI Data Center Power Surge Could Reshape Nebius Group (NBIS) Investors"
-    reject, reason = reject_deal_item(_item(h, source="finnhub:NBIS"))
+    # LLM 主导：硬否决不拦评论；旧模式仍拦
+    assert hard_reject_deal_item(_item(h, source="finnhub:NBIS"))[0] is False
+    reject, reason = reject_deal_item(_item(h, source="finnhub:NBIS"), llm_primary=False)
     assert reject is True, reason
 
 
@@ -100,7 +103,8 @@ def test_weak_mining_cease_rejected():
         "Hyperscale Data Has Ceased Bitcoin Mining Operations in Michigan as It Fulfills "
         "the Requirements of the AI Dat"
     )
-    reject, reason = reject_deal_item(_item(h, source="pr_newswire"))
+    assert hard_reject_deal_item(_item(h, source="pr_newswire"))[0] is False
+    reject, reason = reject_deal_item(_item(h, source="pr_newswire"), llm_primary=False)
     assert reject is True, reason
 
 
@@ -199,13 +203,14 @@ def test_reuters_signed_deal_wire_still_shown():
 
 
 def test_cfo_talk_agg_rejected():
-    """CFO 表态类二手简讯：聚合源且非新签 → 拒。"""
+    """CFO 表态类二手简讯：旧模式聚合源且非新签 → 拒；LLM 主导交给模型。"""
     item = _item(
         "Nvidia CFO talks AWS GPU ramp at Amazon",
         source="google_news:Reuters",
         summary="Nvidia's CFO discussed cloud GPU demand.",
     )
-    reject, reason = reject_deal_item(item)
+    assert hard_reject_deal_item(item)[0] is False
+    reject, reason = reject_deal_item(item, llm_primary=False)
     assert reject is True
     assert "非新签" in reason
 

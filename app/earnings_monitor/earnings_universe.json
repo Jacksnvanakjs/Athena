@@ -11,6 +11,7 @@
     {"ticker": "RPD", "sector": "AI_SEC", "name": "Rapid7"},
     {"ticker": "TENB", "sector": "AI_SEC", "name": "Tenable"},
     {"ticker": "QLYS", "sector": "AI_SEC", "name": "Qualys"},
+    {"ticker": "NTSK", "sector": "AI_SEC", "name": "Netskope"},
 
     {"ticker": "DELL", "sector": "AI_INFRA", "name": "Dell Technologies"},
     {"ticker": "HPE", "sector": "AI_INFRA", "name": "Hewlett Packard Enterprise"},

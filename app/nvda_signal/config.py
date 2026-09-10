@@ -28,7 +28,8 @@ NVDA_NEWSROOM_RSS = "https://nvidianews.nvidia.com/releases.xml"
 
 GOOGLE_NEWS_NVDA_QUERIES = [
     '(NVIDIA OR "Jensen Huang" OR NVDA) (invest OR investment OR "strategic partnership" OR '
-    '"purchase commitment" OR offtake OR "supply agreement") when:3d',
+    '"purchase commitment" OR offtake OR "supply agreement" OR acquire OR acquisition OR '
+    '"to acquire" OR "definitive agreement") when:3d',
     '(NVIDIA OR "Jensen Huang") ("trillion" OR "buy their stock" OR "buy the stock" OR '
     '"next trillion") when:7d',
 ]
@@ -37,11 +38,13 @@ GOOGLE_NEWS_NVDA_QUERIES = [
 NVDA_CIK = "0001045810"
 
 ACTION_MIN_SCORE = {
-    "NVDA_INVEST": 70,
-    "NVDA_PURCHASE_COMMIT": 75,
-    "NVDA_CAPACITY_LOCK": 75,
-    "NVDA_STRATEGIC_PARTNER": 65,
-    "NVDA_SUPPLY_LT": 70,
+    "NVDA_ACQUIRE_UNLISTED": 70,
+    "NVDA_ACQUIRE": 70,
+    "NVDA_INVEST": 72,
+    "NVDA_PURCHASE_COMMIT": 72,
+    "NVDA_CAPACITY_LOCK": 72,
+    "NVDA_STRATEGIC_PARTNER": 60,
+    "NVDA_SUPPLY_LT": 68,
     "NVDA_VERBAL_BULLISH": 55,
     "NVDA_VERBAL_BUY": 55,
     "NVDA_VERBAL_DEMAND": 55,

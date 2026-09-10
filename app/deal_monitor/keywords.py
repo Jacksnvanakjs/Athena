@@ -15,6 +15,9 @@ POSITIVE_KEYWORDS = [
     "power purchase agreement", "PPA", "geothermal", "carbon-free",
     "offtake", "enhanced geothermal",
     "hyperscaler", "definitive agreement", "material definitive agreement",
+    # AI 光纤 / DCI 供应
+    "optical fiber", "fiber optic", "data center interconnect", "DCI",
+    "supply agreement", "光纤", "光模块", "光通信",
     # 为了不让命中率为 0：加入少量“基础领域词”
     "lease", "data center", "data centre", "infrastructure", "cloud", "AI", "artificial intelligence",
     # 企业 AI 平台 / Agent
@@ -74,6 +77,17 @@ HIGH_VALUE_TOKENS = [
     "llm",
     "generative ai",
     "copilot",
+    # AI 光纤 / DCI / 电信骨干（康宁×Verizon 类）
+    "optical fiber",
+    "optical",
+    "fiber optic",
+    "fiber optics",
+    "data center interconnect",
+    "dci",
+    "long-haul",
+    "光纤",
+    "光模块",
+    "光通信",
 ]
 
 NEGATIVE_KEYWORDS = [

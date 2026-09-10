@@ -1,4 +1,4 @@
-"""日线收盘价多源：Yahoo → AKShare(新浪) → Stooq。"""
+"""日线：收盘价 / OHLC 多源：Yahoo → AKShare(新浪) → Stooq。"""
 
 from __future__ import annotations
 
@@ -19,18 +19,46 @@ _YAHOO_HEADERS = {
     "Referer": "https://finance.yahoo.com/",
 }
 
+# (date, open, high, low, close)
+Bar = tuple[date, float, float, float, float]
 
-def _normalize(rows: list[tuple[date, float]]) -> list[tuple[date, float]]:
+
+def _normalize_closes(rows: list[tuple[date, float]]) -> list[tuple[date, float]]:
     cleaned = [(d, float(c)) for d, c in rows if d and c is not None and float(c) > 0]
     cleaned.sort(key=lambda x: x[0])
-    # 去重：同日保留后者
     out: dict[date, float] = {}
     for d, c in cleaned:
         out[d] = c
     return sorted(out.items(), key=lambda x: x[0])
 
 
-async def _from_yahoo(ticker: str, lookback_days: int) -> list[tuple[date, float]]:
+def _normalize_bars(rows: list[Bar]) -> list[Bar]:
+    cleaned: list[Bar] = []
+    for row in rows:
+        if not row or row[0] is None:
+            continue
+        d, o, h, l, c = row
+        try:
+            o, h, l, c = float(o), float(h), float(l), float(c)
+        except (TypeError, ValueError):
+            continue
+        if c <= 0:
+            continue
+        if o <= 0:
+            o = c
+        if h <= 0:
+            h = max(o, c)
+        if l <= 0:
+            l = min(o, c)
+        cleaned.append((d, o, h, l, c))
+    cleaned.sort(key=lambda x: x[0])
+    out: dict[date, Bar] = {}
+    for row in cleaned:
+        out[row[0]] = row
+    return [out[k] for k in sorted(out)]
+
+
+async def _bars_from_yahoo(ticker: str, lookback_days: int) -> list[Bar]:
     span = max(lookback_days + 40, 60)
     urls = (
         f"https://query2.finance.yahoo.com/v8/finance/chart/{ticker}",
@@ -51,23 +79,32 @@ async def _from_yahoo(ticker: str, lookback_days: int) -> list[tuple[date, float
             if not result:
                 continue
             ts = result[0].get("timestamp") or []
-            closes = (
-                (result[0].get("indicators") or {}).get("quote", [{}])[0].get("close")
-                or []
-            )
-            out: list[tuple[date, float]] = []
-            for t, cl in zip(ts, closes):
+            q = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+            opens = q.get("open") or []
+            highs = q.get("high") or []
+            lows = q.get("low") or []
+            closes = q.get("close") or []
+            out: list[Bar] = []
+            for i, t in enumerate(ts):
+                cl = closes[i] if i < len(closes) else None
                 if cl is None:
                     continue
                 d = datetime.fromtimestamp(int(t), tz=timezone.utc).date()
-                out.append((d, float(cl)))
+                o = opens[i] if i < len(opens) and opens[i] is not None else cl
+                h = highs[i] if i < len(highs) and highs[i] is not None else cl
+                l = lows[i] if i < len(lows) and lows[i] is not None else cl
+                out.append((d, float(o), float(h), float(l), float(cl)))
             if out:
-                return _normalize(out)
+                return _normalize_bars(out)
     return []
 
 
-async def _from_stooq(ticker: str, lookback_days: int) -> list[tuple[date, float]]:
-    """Stooq 日线 CSV（美股符号加 .us）。"""
+async def _from_yahoo(ticker: str, lookback_days: int) -> list[tuple[date, float]]:
+    bars = await _bars_from_yahoo(ticker, lookback_days)
+    return _normalize_closes([(d, c) for d, _o, _h, _l, c in bars])
+
+
+async def _bars_from_stooq(ticker: str, lookback_days: int) -> list[Bar]:
     sym = f"{ticker.lower()}.us"
     url = "https://stooq.com/q/d/l/"
     params = {"s": sym, "i": "d"}
@@ -83,23 +120,34 @@ async def _from_stooq(ticker: str, lookback_days: int) -> list[tuple[date, float
         if not text or text.lower().startswith("<!"):
             return []
         reader = csv.DictReader(io.StringIO(text))
-        out: list[tuple[date, float]] = []
+        out: list[Bar] = []
         for row in reader:
             raw_d = (row.get("Date") or row.get("date") or "").strip()
+            raw_o = (row.get("Open") or row.get("open") or "").strip()
+            raw_h = (row.get("High") or row.get("high") or "").strip()
+            raw_l = (row.get("Low") or row.get("low") or "").strip()
             raw_c = (row.get("Close") or row.get("close") or "").strip()
             if not raw_d or not raw_c:
                 continue
             try:
                 d = date.fromisoformat(raw_d[:10])
                 c = float(raw_c)
+                o = float(raw_o) if raw_o else c
+                h = float(raw_h) if raw_h else c
+                l = float(raw_l) if raw_l else c
             except ValueError:
                 continue
             if c > 0:
-                out.append((d, c))
-        out = _normalize(out)
+                out.append((d, o, h, l, c))
+        out = _normalize_bars(out)
         if lookback_days and len(out) > lookback_days + 40:
             out = out[-(lookback_days + 40) :]
         return out
+
+
+async def _from_stooq(ticker: str, lookback_days: int) -> list[tuple[date, float]]:
+    bars = await _bars_from_stooq(ticker, lookback_days)
+    return _normalize_closes([(d, c) for d, _o, _h, _l, c in bars])
 
 
 async def _from_akshare_sina(ticker: str, lookback_days: int) -> list[tuple[date, float]]:
@@ -118,7 +166,6 @@ async def _from_akshare_sina(ticker: str, lookback_days: int) -> list[tuple[date
                 return []
         if df is None or getattr(df, "empty", True):
             return []
-        # 常见列：date / Date, close / Close
         cols = {str(c).lower(): c for c in df.columns}
         dcol = cols.get("date") or cols.get("日期")
         ccol = cols.get("close") or cols.get("收盘")
@@ -138,7 +185,7 @@ async def _from_akshare_sina(ticker: str, lookback_days: int) -> list[tuple[date
                 continue
             if c > 0:
                 out.append((d, c))
-        out = _normalize(out)
+        out = _normalize_closes(out)
         if lookback_days and len(out) > lookback_days + 40:
             out = out[-(lookback_days + 40) :]
         return out
@@ -168,4 +215,29 @@ async def fetch_daily_closes(
     )
     if not result:
         return []
+    return list(result.value)
+
+
+async def fetch_daily_bars(
+    ticker: str,
+    *,
+    lookback_days: int = 120,
+) -> list[Bar]:
+    """日线 OHLC [(date, open, high, low, close), ...] 升序。"""
+    t = (ticker or "").upper().strip()
+    if not t:
+        return []
+
+    result = await first_success(
+        "daily_bars",
+        [
+            ("yahoo", lambda: _bars_from_yahoo(t, lookback_days)),
+            ("stooq", lambda: _bars_from_stooq(t, lookback_days)),
+        ],
+        is_ok=lambda rows: isinstance(rows, list) and len(rows) >= 3,
+        context=t,
+    )
+    if not result:
+        closes = await fetch_daily_closes(t, lookback_days=lookback_days)
+        return [(d, c, c, c, c) for d, c in closes]
     return list(result.value)

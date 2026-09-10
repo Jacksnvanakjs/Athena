@@ -88,9 +88,14 @@ class TestDealQuality(unittest.TestCase):
         self.assertLessEqual(score, 65)
 
     def test_vague_capped(self):
-        text = "Company expands strategic partnership with OpenAI to explore collaboration."
+        text = (
+            "Acme Corp expands strategic partnership with a cloud vendor "
+            "to explore collaboration on future products."
+        )
         self.assertEqual(classify_deal_quality(text), QUALITY_VAGUE)
-        score = finalize_materiality_score(text, "google_news:x", [], llm_score=88)
+        score = finalize_materiality_score(
+            text, "google_news:x", [], llm_score=88, llm_primary=False
+        )
         self.assertLessEqual(score, 48)
 
     def test_power_deal_commercial(self):
@@ -112,6 +117,21 @@ class TestDealQuality(unittest.TestCase):
         self.assertEqual(classify_deal_quality(text), QUALITY_HARD)
         score = finalize_materiality_score(text, "finnhub:VZ", [], llm_score=60)
         self.assertGreaterEqual(score, 70)
+
+    def test_corning_verizon_ai_fiber_supply(self):
+        """一手：Verizon×Corning multi-billion 光纤供应，须过 T0_T0=70。"""
+        from app.deal_monitor.materiality import is_ai_optical_fiber_supply
+
+        text = (
+            "Verizon and Corning announce multi-year, multi-billion dollar supply agreement "
+            "for broadband expansion and next-gen AI infrastructure. "
+            "Verizon and Corning have reached a multi-billion dollar supply agreement through 2032 "
+            "for over 80 million miles of high-density optical fiber to support Gen AI compute needs."
+        )
+        self.assertTrue(is_ai_optical_fiber_supply(text))
+        self.assertEqual(classify_deal_quality(text), QUALITY_HARD)
+        score = finalize_materiality_score(text, "ir:VZ", ["AI", "multi-year"], llm_score=82)
+        self.assertGreaterEqual(score, 72)
 
     def test_amd_instinct_anthropic(self):
         text = "AMD：与 Anthropic 部署 Instinct GPU"

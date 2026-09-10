@@ -6,7 +6,8 @@ from sqlalchemy.orm import Session
 
 from app.config import CHANGE_HIGHLIGHT_DAYS, FUNDS_SOURCE_FILE, SCRAPE_SECRET, SCRAPE_TIMES, TIMEZONE, USE_TURSO
 from app.database import Fund, QuotaRecord, run_with_db_retry
-from app.nvda_signal.trade_window import strategy_label
+from app.nvda_signal.display import nvda_display_quality
+
 from app.source_url_guard import is_test_source_url
 from app.service import run_scrape_and_notify
 from app.time_display import (
@@ -344,6 +345,15 @@ def _deal_to_dict(event) -> dict:
 
 
 def _nvda_to_dict(event) -> dict:
+    quality, quality_label = nvda_display_quality(event.action_type, event.signal_tier)
+    fd = _first_day_fields(event)
+    # 黄仁勋列表只看分数+回测，不展示分差高亮（避免与 AI 合作「分差复核」混用）
+    fd["score_gap_large"] = False
+    benef_tier = (event.beneficiary_tier or "UNKNOWN").upper()
+    if benef_tier not in {"T0", "T1", "T2"}:
+        benef_tier = "T0" if (event.beneficiary_ticker or "").upper() == "NVDA" else "UNKNOWN"
+    # 与 AI 合作同一字段：锚点档_受益档（锚点固定 NVDA=T0）
+    tier_pair = f"T0_{benef_tier}"
     return {
         "id": event.id,
         "category": FEED_NVDA,
@@ -364,9 +374,9 @@ def _nvda_to_dict(event) -> dict:
         "anchor_tier": "T0",
         "beneficiary_ticker": event.beneficiary_ticker,
         "beneficiary_name": event.beneficiary_name,
-        "beneficiary_tier": event.beneficiary_tier,
+        "beneficiary_tier": benef_tier,
         "beneficiary_market_cap_usd": event.beneficiary_market_cap_usd,
-        "tier_pair": event.signal_tier,
+        "tier_pair": tier_pair,
         "materiality_score": event.materiality_score,
         "matched_keywords": event.action_type,
         "event_type": event.action_type,
@@ -377,18 +387,20 @@ def _nvda_to_dict(event) -> dict:
         "pushed_at_display": format_beijing_at_display(event.pushed_at) if event.pushed_at else None,
         "push_channel": event.push_channel,
         "pushed": _push_ok(event),
-        "signal_tier": event.signal_tier,
+        # 不向列表暴露内部 A/A_PLUS_B，避免页面误显「A」
+        "signal_tier": None,
         "strategy": event.strategy,
-        "buy_window": event.buy_window,
-        "sell_window": event.sell_window,
+        "buy_window": None,
+        "sell_window": None,
         "buy_ok": event.buy_ok,
-        "confidence": event.confidence,
+        "confidence": None,
         "position_pct": event.position_pct,
         "chase_risk": event.chase_risk,
         "prior_a_days_ago": event.prior_a_days_ago,
-        "strategy_label": strategy_label(event.strategy),
-        "deal_quality": event.signal_tier,
-        **_first_day_fields(event),
+        "strategy_label": None,
+        "deal_quality": quality,
+        "deal_quality_label": quality_label,
+        **fd,
     }
 
 
@@ -403,6 +415,7 @@ def list_deals(
     category: str = Query(default="all"),
     tier_pair: str | None = Query(default=None),
     signal_tier: str | None = Query(default=None),
+    deal_quality: str | None = Query(default=None),
     min_score: int = Query(default=0, ge=0, le=100),
     pushed_only: bool = Query(default=False),
     first_day_move: str | None = Query(default=None),
@@ -423,6 +436,9 @@ def list_deals(
     if move and move not in ("up", "down"):
         raise HTTPException(status_code=400, detail="first_day_move 支持: up, down")
     do_hide_weak = DEAL_HIDE_WEAK_QUALITY if hide_weak is None else hide_weak
+    quality_filter = (deal_quality or "").strip().lower() or None
+    # 兼容旧参数：A→官宣类，A_PLUS_B→口头催化
+    legacy_tier = (signal_tier or "").strip().upper() or None
 
     def _match_first_day_move(row: dict) -> bool:
         if not move:
@@ -433,6 +449,15 @@ def list_deals(
         if move == "up":
             return float(ret) > 0
         return float(ret) < 0
+
+    def _match_quality(row: dict) -> bool:
+        if quality_filter and (row.get("deal_quality") or "") != quality_filter:
+            return False
+        if legacy_tier == "A_PLUS_B":
+            return row.get("deal_quality") == "verbal"
+        if legacy_tier == "A":
+            return row.get("deal_quality") in {"hard", "m_and_a"}
+        return True
 
     def _query(db: Session):
         rows: list[dict] = []
@@ -456,14 +481,12 @@ def list_deals(
                 if do_hide_weak and should_hide_weak_quality_event(r):
                     continue
                 row = _deal_to_dict(r)
-                if not _match_first_day_move(row):
+                if not _match_first_day_move(row) or not _match_quality(row):
                     continue
                 rows.append(row)
 
         if category in ("all", FEED_NVDA):
             q = db.query(NvdaSignalEvent).filter(NvdaSignalEvent.published_at >= since)
-            if signal_tier:
-                q = q.filter(NvdaSignalEvent.signal_tier == signal_tier.upper())
             if min_score:
                 q = q.filter(NvdaSignalEvent.materiality_score >= min_score)
             if pushed_only:
@@ -477,7 +500,9 @@ def list_deals(
                 if is_test_source_url(r.source_url):
                     continue
                 row = _nvda_to_dict(r)
-                if not _match_first_day_move(row):
+                if tier_pair and row.get("tier_pair") != tier_pair:
+                    continue
+                if not _match_first_day_move(row) or not _match_quality(row):
                     continue
                 rows.append(row)
 
@@ -579,6 +604,11 @@ def deals_stats(
             ])
             nvda_fd_checked = len([e for e in nvda_rows if e.first_day_checked_at])
             for e in nvda_rows:
+                benef = (e.beneficiary_tier or "UNKNOWN").upper()
+                if benef not in {"T0", "T1", "T2"}:
+                    benef = "T0" if (e.beneficiary_ticker or "").upper() == "NVDA" else "UNKNOWN"
+                tp = f"T0_{benef}"
+                by_tier_pair[tp] = by_tier_pair.get(tp, 0) + 1
                 if e.first_day_return is not None:
                     if e.first_day_return > 0:
                         first_day_up += 1

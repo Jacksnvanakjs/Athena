@@ -1,9 +1,14 @@
 """财报后涨跌 vs 评分异常判定单测。"""
 
+import asyncio
+from datetime import date
+from unittest.mock import AsyncMock, patch
+
 from app.earnings_monitor.outcome import (
     ANOMALY_FALSE_NEGATIVE,
     ANOMALY_FALSE_POSITIVE,
     expected_direction,
+    fetch_post_er_move,
     judge_anomaly,
 )
 
@@ -84,3 +89,34 @@ def test_false_negative_low_score_rally():
 def test_aligned_no_anomaly():
     assert judge_anomaly(expected="bullish", post_ret=0.10, score_total=90).anomaly is None
     assert judge_anomaly(expected="bearish", post_ret=-0.13, score_total=61).anomaly is None
+
+
+def test_fetch_post_er_move_three_legs():
+    """AMC 财报后：开盘 / D1～D5；主字段用 D2。"""
+    bars = [
+        (date(2026, 9, 1), 98.0, 99.0, 97.0, 98.5),
+        (date(2026, 9, 2), 99.0, 101.0, 98.0, 100.0),
+        (date(2026, 9, 3), 112.8, 113.0, 103.0, 104.3),
+        (date(2026, 9, 4), 104.0, 105.0, 100.0, 101.4),
+        (date(2026, 9, 5), 101.0, 106.0, 100.0, 105.0),
+        (date(2026, 9, 8), 105.0, 108.0, 104.0, 107.0),
+        (date(2026, 9, 9), 107.0, 110.0, 106.0, 109.0),
+    ]
+
+    async def _run():
+        with patch(
+            "app.market_data.fetch_daily_bars",
+            new=AsyncMock(return_value=bars),
+        ):
+            return await fetch_post_er_move("NTSK", date(2026, 9, 2), "AMC")
+
+    move = asyncio.run(_run())
+    assert move is not None
+    assert abs(move.open_ret - 0.128) < 1e-9
+    assert abs(move.d1_ret - 0.043) < 1e-9
+    assert abs(move.d2_ret - 0.014) < 1e-9
+    assert abs(move.d3_ret - 0.05) < 1e-9
+    assert abs(move.d4_ret - 0.07) < 1e-9
+    assert abs(move.d5_ret - 0.09) < 1e-9
+    assert abs(move.ret - 0.014) < 1e-9
+    assert move.sessions_after == 2
