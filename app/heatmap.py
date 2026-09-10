@@ -1330,6 +1330,19 @@ async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], 
             sources_used.append(f"Yahoo:{len(yahoo)}")
         missing = [s for s in symbols if s not in merged]
 
+    # 覆盖已够则不再走 AKShare/Tushare 慢补（缺票在指标侧剔除，宁缺勿用错价）
+    if missing and _is_quality_ok(len(merged), len(symbols)):
+        label = "+".join(sources_used) if sources_used else "none"
+        primary = label.split("+")[0].split(":")[0] if label != "none" else "none"
+        logger.info(
+            "quotes coverage ok %s/%s via %s, skip slow fill for %s",
+            len(merged),
+            len(symbols),
+            label,
+            len(missing),
+        )
+        return merged, primary if len(sources_used) == 1 else label
+
     if missing:
         ak = await _fetch_akshare(missing)
         if ak:
@@ -1366,7 +1379,10 @@ async def get_quotes_for_symbols(symbols: list[str]) -> tuple[dict[str, dict[str
 async def fetch_period_returns(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
-    """近 5/20 交易日累计涨跌（%）。快照 → Yahoo → 全站多源日线。"""
+    """近 5/20 交易日累计涨跌（%）。快照 → Yahoo（可跳过）→ 多源日线。
+
+    缺数保持 None，绝不编造；``HEATMAP_SKIP_YAHOO=1`` 时跳过 Yahoo 图表，改走 Stooq 等日线。
+    """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     out: dict[str, dict[str, float | None]] = {
         s: {"ret_5d": None, "ret_20d": None} for s in uniq
@@ -1383,7 +1399,12 @@ async def fetch_period_returns(
         for s in uniq
         if out[s].get("ret_5d") is None or out[s].get("ret_20d") is None
     ]
-    if missing:
+    skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if missing and not skip_yahoo:
         from_yahoo = await _period_returns_from_yahoo(missing)
         for sym, vals in from_yahoo.items():
             cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
@@ -1411,20 +1432,18 @@ async def fetch_period_returns(
 async def _period_returns_from_daily_closes(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
-    """快照/Yahoo 不足时，走全站多源日线再算 5d/20d。"""
-    from app.market_data import fetch_daily_closes
+    """快照/Yahoo 不足时，走全站多源日线再算 5d/20d（并发，宁缺勿错）。"""
+    from app.market_data import fetch_daily_closes_many
 
+    closes_map = await fetch_daily_closes_many(symbols, lookback_days=60, concurrency=8)
     out: dict[str, dict[str, float | None]] = {}
-    for sym in symbols:
-        try:
-            rows = await fetch_daily_closes(sym, lookback_days=60)
-        except Exception:
-            continue
+    for sym, rows in closes_map.items():
         closes = [c for _, c in rows]
-        out[sym] = {
-            "ret_5d": _period_ret_from_closes(closes, 5),
-            "ret_20d": _period_ret_from_closes(closes, 20),
-        }
+        ret5 = _period_ret_from_closes(closes, 5)
+        ret20 = _period_ret_from_closes(closes, 20)
+        if ret5 is None and ret20 is None:
+            continue
+        out[sym] = {"ret_5d": ret5, "ret_20d": ret20}
     return out
 
 

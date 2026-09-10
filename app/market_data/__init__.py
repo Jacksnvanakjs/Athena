@@ -5,7 +5,8 @@
 
 已覆盖能力与默认链路：
 - 实时报价 ``fetch_quotes``：TickDB → Yahoo → AKShare → Tushare（见 heatmap）
-- 日线收盘 ``fetch_daily_closes``：Yahoo → AKShare(新浪) → Stooq
+- 日线收盘 ``fetch_daily_closes``：Yahoo → Stooq → AKShare；``HEATMAP_SKIP_YAHOO=1`` 时 Stooq → AKShare
+
 - 市值 ``fetch_market_cap``：Finnhub → Yahoo → 日线×股本（deal_monitor）
 - 财报日历：Finnhub → Nasdaq → Yahoo（earnings_monitor）
 - 盘后现价：报价多源 → CNBC → Yahoo AH → Finnhub（outcome）
@@ -14,7 +15,11 @@
 from __future__ import annotations
 
 from app.market_data.cascade import SourceResult, first_success
-from app.market_data.daily_closes import fetch_daily_bars, fetch_daily_closes
+from app.market_data.daily_closes import (
+    fetch_daily_bars,
+    fetch_daily_closes,
+    fetch_daily_closes_many,
+)
 from app.market_data.quotes import fetch_quotes
 from app.market_data.tradability import is_us_tradable
 
@@ -22,6 +27,7 @@ __all__ = [
     "SourceResult",
     "first_success",
     "fetch_daily_closes",
+    "fetch_daily_closes_many",
     "fetch_daily_bars",
     "fetch_quotes",
     "is_us_tradable",
