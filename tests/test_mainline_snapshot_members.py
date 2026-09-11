@@ -11,13 +11,11 @@ from app.ai_mainline.pipeline import _basket_members, _payload_from_db_snapshots
 
 class TestBasketMembers(unittest.TestCase):
     def test_known_theme_has_symbols(self):
-        # 用真实篮子里任意一条；若为空说明配置问题
         from app.ai_mainline.baskets import enabled_themes
 
         themes = enabled_themes()
         self.assertTrue(themes)
-        key = themes[0]["key"]
-        members = _basket_members(key)
+        members = _basket_members(themes[0]["key"])
         self.assertGreater(len(members), 0)
         self.assertIn("symbol", members[0])
 
@@ -57,14 +55,6 @@ class TestSnapshotIncludesMembers(unittest.TestCase):
         q.order_by.return_value.limit.return_value.scalar.return_value = "2026-09-10"
         q.filter.return_value.all.return_value = [theme_row, meta_row]
 
-        with patch("app.database.SessionLocal", return_value=MagicMock(__enter__=lambda s: mock_db, __exit__=lambda *a: False)):
-            # SessionLocal is imported inside the function from app.database
-            pass
-
-        with patch("app.ai_mainline.pipeline.SessionLocal", create=True):
-            pass
-
-        # patch where used: inside function `from app.database import ... SessionLocal`
         with patch("app.database.SessionLocal") as SL:
             SL.return_value.__enter__.return_value = mock_db
             SL.return_value.__exit__.return_value = False
