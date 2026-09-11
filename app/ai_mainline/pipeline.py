@@ -26,7 +26,7 @@ ET = ZoneInfo("America/New_York")
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 300  # 5 分钟：重复打开页不重打全市场
-_COMPUTE_BUDGET_SEC = 40.0  # 单次计算硬上限；超时返回上一版可靠缓存
+_COMPUTE_BUDGET_SEC = 28.0  # 单次实时计算硬上限；超时回退内存/库内快照
 
 
 def _today_et() -> date:
@@ -41,7 +41,128 @@ def _stale_payload(base: dict[str, Any], note: str) -> dict[str, Any]:
     out = dict(base)
     out["stale"] = True
     out["note"] = note
+    out["success"] = True
     return out
+
+
+def _theme_name_map() -> dict[str, str]:
+    return {t["key"]: t.get("name") or t["key"] for t in enabled_themes()}
+
+
+def _payload_from_db_snapshots() -> dict[str, Any] | None:
+    """用库内已落库的主线日快照组装页面（真实历史，非估算）。"""
+    from app.database import AiMainlineDailySnapshot, SessionLocal
+
+    try:
+        with SessionLocal() as db:
+            latest = (
+                db.query(AiMainlineDailySnapshot.trade_date)
+                .order_by(AiMainlineDailySnapshot.trade_date.desc())
+                .limit(1)
+                .scalar()
+            )
+            if not latest:
+                return None
+            rows = (
+                db.query(AiMainlineDailySnapshot)
+                .filter(AiMainlineDailySnapshot.trade_date == latest)
+                .all()
+            )
+    except Exception as exc:
+        logger.warning("load mainline db snapshots failed: %s", exc)
+        return None
+
+    if not rows:
+        return None
+
+    names = _theme_name_map()
+    meta_row = next((r for r in rows if r.theme_key == META_KEY), None)
+    meta: dict[str, Any] = {}
+    if meta_row and meta_row.payload_json:
+        try:
+            meta = json.loads(meta_row.payload_json)
+        except json.JSONDecodeError:
+            meta = {}
+
+    themes_out: list[dict[str, Any]] = []
+    primary_key = meta.get("primary_key")
+    secondary_key = meta.get("secondary_key")
+    status = meta.get("status") or "no_mainline"
+
+    for r in rows:
+        if r.theme_key == META_KEY:
+            continue
+        key = r.theme_key
+        role = None
+        status_label = "—"
+        if primary_key and key == primary_key:
+            role = "primary"
+            status_label = (
+                "主线·已确认" if status == "confirmed" else "主线·观察中"
+            )
+        elif secondary_key and key == secondary_key:
+            role = "secondary"
+            status_label = "次强"
+        themes_out.append(
+            {
+                "key": key,
+                "name": names.get(key, key),
+                "ret_1d": r.ret_1d,
+                "ret_5d": r.ret_5d,
+                "ret_20d": r.ret_20d,
+                "rel_1d": r.rel_1d,
+                "rel_5d": r.rel_5d,
+                "rel_20d": r.rel_20d,
+                "breadth": r.breadth,
+                "rank_5d": r.rank_5d,
+                "n_valid": r.n_valid,
+                "streak_days": meta.get("streak_days") if key == primary_key else 0,
+                "role": role,
+                "status_label": status_label,
+            }
+        )
+
+    themes_out.sort(
+        key=lambda x: (x.get("rank_5d") is None, x.get("rank_5d") or 999)
+    )
+    if not themes_out:
+        return None
+
+    primary = next((t for t in themes_out if t.get("role") == "primary"), None)
+    secondary = next((t for t in themes_out if t.get("role") == "secondary"), None)
+    if primary:
+        primary = {
+            **primary,
+            "status": status if status in ("confirmed", "emerging") else "emerging",
+        }
+
+    trade_s = latest.isoformat() if hasattr(latest, "isoformat") else str(latest)
+    return {
+        "success": True,
+        "enabled": True,
+        "as_of": _as_of_iso(),
+        "trade_date": trade_s,
+        "source": "db_snapshot",
+        "quote_count": None,
+        "quote_total": None,
+        "bench": {
+            "ret_1d": meta_row.ret_1d if meta_row else None,
+            "ret_5d": meta.get("bench_ret_5d")
+            or (meta_row.ret_5d if meta_row else None),
+            "ret_20d": meta_row.ret_20d if meta_row else None,
+        },
+        "primary": primary,
+        "secondary": secondary,
+        "status": status,
+        "streak_days": meta.get("streak_days"),
+        "summary": meta.get("summary")
+        or "展示最近一次已落库主线快照（真实收盘数据）。",
+        "themes": themes_out,
+        "disclaimer": "相对强弱判断，非互斥；不构成投资建议。",
+        "updated_bj": now_beijing().strftime("%Y-%m-%d %H:%M"),
+        "stale": True,
+        "note": f"实时行情较慢，展示库内 {trade_s} 主线快照（非估算）。",
+    }
 
 
 async def _compute_mainline_fresh() -> dict[str, Any]:
@@ -118,7 +239,7 @@ async def _compute_mainline_fresh() -> dict[str, Any]:
 
 
 async def compute_mainline(force: bool = False) -> dict[str, Any]:
-    """盘中/API：计算当前主线排名（带短缓存）。超时优先返回上一版正确结果。"""
+    """盘中/API：计算当前主线排名（带短缓存）。超时回退内存/库内真实快照。"""
     import asyncio
 
     if not AI_MAINLINE_ENABLED:
@@ -154,6 +275,11 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                 cached,
                 f"行情拉取超时（>{int(_COMPUTE_BUDGET_SEC)}s），展示上一版可靠结果，未使用估算数据。",
             )
+        db_payload = _payload_from_db_snapshots()
+        if db_payload:
+            _CACHE["ts"] = now
+            _CACHE["data"] = db_payload
+            return db_payload
         return {
             "success": False,
             "enabled": True,
@@ -162,7 +288,7 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
             "primary": None,
             "secondary": None,
             "status": "error",
-            "summary": "主线行情拉取超时，请稍后刷新。未编造任何涨跌数据。",
+            "summary": "主线行情拉取超时且无可用快照，请稍后刷新。未编造任何涨跌数据。",
             "note": "timeout",
         }
     except Exception as exc:
@@ -172,6 +298,9 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                 cached,
                 f"本次刷新失败（{type(exc).__name__}），展示上一版可靠结果。",
             )
+        db_payload = _payload_from_db_snapshots()
+        if db_payload:
+            return db_payload
         raise
 
     _CACHE["ts"] = now

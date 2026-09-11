@@ -109,15 +109,21 @@ async def _bars_from_stooq(ticker: str, lookback_days: int) -> list[Bar]:
     url = "https://stooq.com/q/d/l/"
     params = {"s": sym, "i": "d"}
     async with httpx.AsyncClient(
-        timeout=25,
-        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=8,
+        headers={"User-Agent": "Mozilla/5.0 AthenaMarketData/1.0"},
         follow_redirects=True,
     ) as client:
         resp = await client.get(url, params=params)
         if resp.status_code != 200:
             return []
         text = resp.text.strip()
-        if not text or text.lower().startswith("<!"):
+        # 反爬/挑战页常为短 HTML，勿当 CSV 解析
+        if (
+            not text
+            or text.lower().startswith("<!")
+            or text.lower().startswith("<html")
+            or "text/html" in (resp.headers.get("content-type") or "").lower()
+        ):
             return []
         reader = csv.DictReader(io.StringIO(text))
         out: list[Bar] = []

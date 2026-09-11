@@ -1208,6 +1208,11 @@ async def _fetch_tickdb(symbols: list[str]) -> dict[str, dict[str, Any]]:
                         TICKDB_TICKER,
                         params={"symbols": tick_syms, "type": "stock"},
                     )
+                    if resp.status_code == 401:
+                        logger.warning(
+                            "TickDB unauthorized/expired (401)，中止后续批次"
+                        )
+                        return out
                     if resp.status_code == 429:
                         wait = TICKDB_BATCH_PAUSE * (attempt + 2)
                         logger.warning("TickDB rate limited, retry in %.1fs", wait)
@@ -1224,6 +1229,9 @@ async def _fetch_tickdb(symbols: list[str]) -> dict[str, dict[str, Any]]:
                             code,
                             body.get("message") or body.get("error"),
                         )
+                        # 过期等业务错误：勿空耗后续批次
+                        if code in (1005, "1005"):
+                            return out
                         break
                     data = body.get("data") or []
                     if not isinstance(data, list):
@@ -1419,13 +1427,33 @@ async def fetch_period_returns(
         if out[s].get("ret_5d") is None or out[s].get("ret_20d") is None
     ]
     if still:
-        from_multi = await _period_returns_from_daily_closes(still)
-        for sym, vals in from_multi.items():
-            cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
-            if cur.get("ret_5d") is None and vals.get("ret_5d") is not None:
-                cur["ret_5d"] = vals["ret_5d"]
-            if cur.get("ret_20d") is None and vals.get("ret_20d") is not None:
-                cur["ret_20d"] = vals["ret_20d"]
+        # 快照已覆盖大半时，不再为缺票拖垮整页（缺数保持 None）
+        covered = len(uniq) - len(still)
+        if covered >= max(8, int(len(uniq) * 0.55)):
+            logger.info(
+                "period returns: snapshot coverage %s/%s, skip slow remote fill for %s",
+                covered,
+                len(uniq),
+                len(still),
+            )
+        else:
+            try:
+                from_multi = await asyncio.wait_for(
+                    _period_returns_from_daily_closes(still),
+                    timeout=18,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "period daily closes timed out (%s symbols); keep snapshot partial",
+                    len(still),
+                )
+                from_multi = {}
+            for sym, vals in from_multi.items():
+                cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
+                if cur.get("ret_5d") is None and vals.get("ret_5d") is not None:
+                    cur["ret_5d"] = vals["ret_5d"]
+                if cur.get("ret_20d") is None and vals.get("ret_20d") is not None:
+                    cur["ret_20d"] = vals["ret_20d"]
     return out
 
 
@@ -1474,7 +1502,7 @@ def _period_returns_from_snapshots(
                     db.query(HeatmapSnapshot.trade_date)
                     .order_by(desc(HeatmapSnapshot.trade_date))
                     .distinct()
-                    .limit(25)
+                    .limit(40)
                     .all()
                 )
             ]

@@ -693,7 +693,7 @@
 
     async function loadMainline() {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 55000);
+      const timer = setTimeout(() => ctrl.abort(), 65000);
       try {
         const res = await fetch('/api/ai-mainline', { signal: ctrl.signal });
         if (!res.ok) throw new Error('HTTP ' + res.status);
