@@ -191,11 +191,16 @@ def _alltick_token() -> str:
 
 
 async def fetch_alltick_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """AllTick /trade-tick：最新成交价；涨跌用近 2 根日 K 估算。"""
+    """AllTick /trade-tick：最新成交价；涨跌用近 2 根日 K 估算。
+
+    返回值附带 ``_meta``（仅内部用）：``error`` / ``ret`` / ``msg``。
+    """
     token = _alltick_token()
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    meta: dict[str, Any] = {"error": None, "ret": None, "msg": None}
     if not token or not uniq:
-        return {}
+        meta["error"] = "missing_token_or_symbols"
+        return {"_meta": meta}
     out: dict[str, dict[str, Any]] = {}
     query = {
         "trace": "athena-trade-tick",
@@ -211,7 +216,21 @@ async def fetch_alltick_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
             body = resp.json() if resp.status_code == 200 else {}
         except Exception as exc:
             logger.warning("AllTick trade-tick failed: %s", exc)
-            return {}
+            meta["error"] = f"request_failed:{exc}"
+            return {"_meta": meta}
+        if resp.status_code == 429 or body.get("error_msg"):
+            meta["error"] = "rate_limited"
+            meta["msg"] = body.get("error_msg") or "Too many requests"
+            return {"_meta": meta}
+        meta["ret"] = body.get("ret")
+        meta["msg"] = body.get("msg")
+        if body.get("ret") not in (None, 0, 200):
+            # 604=code unauthorized：当前套餐无该市场/代码权限
+            meta["error"] = f"api_ret_{body.get('ret')}"
+            logger.warning(
+                "AllTick trade-tick ret=%s msg=%s", body.get("ret"), body.get("msg")
+            )
+            return {"_meta": meta}
         ticks = ((body.get("data") or {}).get("tick_list")) or []
         prices: dict[str, float] = {}
         volumes: dict[str, float] = {}
@@ -246,6 +265,10 @@ async def fetch_alltick_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
                     data = r.json() if r.status_code == 200 else {}
                 except Exception:
                     return sym, None
+            if data.get("ret") not in (None, 0, 200) and not (
+                (data.get("data") or {}).get("kline_list")
+            ):
+                return sym, None
             klines = ((data.get("data") or {}).get("kline_list")) or []
             if len(klines) < 2:
                 return sym, None
@@ -265,6 +288,7 @@ async def fetch_alltick_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
             out[sym] = _quote_dict(
                 sym, price=px, change_pct=chg, volume=volumes.get(sym) or 0.0
             )
+    out["_meta"] = meta
     return out
 
 

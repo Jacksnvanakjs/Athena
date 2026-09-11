@@ -26,6 +26,14 @@ def _pct_diff(a: float | None, b: float | None) -> float | None:
     return round((float(a) - float(b)) / abs(float(b)) * 100, 2)
 
 
+def _split_alltick_payload(
+    raw: dict[str, Any],
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    meta = dict(raw.get("_meta") or {})
+    quotes = {k: v for k, v in raw.items() if k != "_meta" and isinstance(v, dict)}
+    return quotes, meta
+
+
 async def verify_mainline_vs_alltick(
     *,
     price_tol_pct: float = 1.0,
@@ -40,13 +48,54 @@ async def verify_mainline_vs_alltick(
     if not token:
         return {
             "success": False,
+            "ok": False,
+            "verdict": "no_alltick_token",
             "error": "未配置 ALLTICK_TOKEN（仅对照用，不进轮动）",
             "mismatches": [],
         }
 
     symbols = all_symbols()
     sys_quotes, sys_source = await fetch_quotes(symbols, allow_slow_fill=False)
-    at_quotes = await fetch_alltick_quotes(symbols)
+    raw_at = await fetch_alltick_quotes(symbols)
+    at_quotes, at_meta = _split_alltick_payload(raw_at)
+
+    # AllTick 完全无数据：无法对照，不能说「系统错了」
+    if not at_quotes:
+        hint = (
+            "AllTick 未返回任何美股报价，无法对照。"
+            "常见原因：套餐无美股权限（ret=604 code unauthorized）、"
+            "限流（429）、或 Token 无效。"
+            "系统侧已有行情时，请以 Finnhub/TradingView 等展示源为准，"
+            "或升级含 All US Stocks 的 AllTick 套餐后再测。"
+        )
+        return {
+            "success": True,
+            "ok": False,
+            "verdict": "alltick_unavailable",
+            "comparable": False,
+            "note": hint,
+            "system_source": sys_source,
+            "alltick_meta": at_meta,
+            "counts": {
+                "symbols": len(symbols),
+                "system_quotes": len(sys_quotes),
+                "alltick_quotes": 0,
+                "compared": 0,
+                "missing_system": sum(1 for s in symbols if s not in sys_quotes),
+                "missing_alltick": len(symbols),
+                "quote_mismatches": 0,
+                "period_mismatches": 0,
+                "theme_ret1d_diffs": 0,
+            },
+            "quote_mismatches": [],
+            "period_mismatches": [],
+            "theme_ret1d_diffs": [],
+            "how_to_read": {
+                "system": "当前页面展示源（本轮：" + str(sys_source) + "）",
+                "alltick": "对照源本次无数据，不能用来判对错",
+                "next": "等 AllTick 能拉到美股后，再看 quote_mismatches；有差异才需要核对谁更准",
+            },
+        }
 
     mismatches: list[dict[str, Any]] = []
     compared = 0
@@ -87,9 +136,10 @@ async def verify_mainline_vs_alltick(
                 }
             )
 
-    # 抽样 5D：系统 period vs AllTick 日 K
     period_mismatches: list[dict[str, Any]] = []
-    sample = [s for s in symbols if s in sys_quotes and s in at_quotes][: max(0, sample_period)]
+    sample = [s for s in symbols if s in sys_quotes and s in at_quotes][
+        : max(0, sample_period)
+    ]
     from app.heatmap import fetch_period_returns
 
     period = await fetch_period_returns(sample) if sample else {}
@@ -112,7 +162,6 @@ async def verify_mainline_vs_alltick(
                 }
             )
 
-    # 主题 1D：系统 quotes vs AllTick quotes 重算，看差异大的子线
     themes_cfg = enabled_themes()
     empty_period = {s: {"ret_5d": None, "ret_20d": None} for s in symbols}
     theme_diffs: list[dict[str, Any]] = []
@@ -141,11 +190,15 @@ async def verify_mainline_vs_alltick(
         and len(period_mismatches) == 0
         and len(theme_diffs) == 0
     )
+    verdict = "match" if ok else "mismatch"
     return {
         "success": True,
         "ok": ok,
+        "verdict": verdict,
+        "comparable": True,
         "note": "AllTick 仅对照，不参与轮动展示",
         "system_source": sys_source,
+        "alltick_meta": at_meta,
         "counts": {
             "symbols": len(symbols),
             "system_quotes": len(sys_quotes),
@@ -164,4 +217,9 @@ async def verify_mainline_vs_alltick(
         "quote_mismatches": mismatches[:40],
         "period_mismatches": period_mismatches,
         "theme_ret1d_diffs": theme_diffs[:20],
+        "how_to_read": {
+            "match": "两边接近 → 系统展示可信",
+            "mismatch": "有差异 → 看样例字段；现价差以交易所口径核对，1D 差可能来自昨收时点不同",
+            "prefer_system_if": "AllTick 套餐无美股/限流时，以系统多源（Finnhub/TV 等）为准",
+        },
     }

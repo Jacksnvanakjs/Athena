@@ -710,8 +710,25 @@
           return;
         }
         const c = data.counts || {};
+        const verdict = data.verdict || '';
+        if (verdict === 'alltick_unavailable' || data.comparable === false) {
+          const meta = data.alltick_meta || {};
+          const lines = [
+            '结论：AllTick 无美股数据，无法对照（不是系统算错）',
+            `系统源：${data.system_source || '—'}（已有 ${c.system_quotes || 0}/${c.symbols || 0} 只）`,
+            `AllTick：0 只 · ret=${meta.ret ?? '—'} · ${meta.msg || meta.error || '无返回'}`,
+            '',
+            data.note || '',
+            '',
+            '如何区分对错：本次不能用 AllTick 判对错；系统侧 Finnhub/TradingView 有数时可先信展示。',
+            '若要坚持 AllTick 对照，需套餐含美股（604=无该代码权限），再重测。',
+          ];
+          alert(lines.join('\n'));
+          note.textContent = 'AllTick 无数据，无法对照';
+          return;
+        }
         const lines = [
-          data.ok ? '结论：与 AllTick 基本一致' : '结论：发现差异，请核对',
+          data.ok ? '结论：与 AllTick 基本一致（可信任当前展示）' : '结论：两边有差异，请看样例核对',
           `系统源：${data.system_source || '—'}`,
           `报价对比 ${c.compared || 0} 只 · 差异 ${c.quote_mismatches || 0} · 缺系统 ${c.missing_system || 0} · 缺AllTick ${c.missing_alltick || 0}`,
           `5D抽样差异 ${c.period_mismatches || 0} · 子线1D差异 ${c.theme_ret1d_diffs || 0}`,
@@ -724,6 +741,9 @@
           `${t.theme}: 系统 ${t.sys_ret_1d}% / AllTick ${t.alltick_ret_1d}% (差 ${t.diff_pp})`
         );
         if (td.length) lines.push('子线1D差异：\n' + td.join('\n'));
+        if (!data.ok) {
+          lines.push('', '判读：现价接近则以系统为准也可；若现价差>1% 再人工对一下交易所/Yahoo。');
+        }
         alert(lines.join('\n'));
         note.textContent = data.ok
           ? `对照通过 · 比 ${c.compared || 0} 只`
