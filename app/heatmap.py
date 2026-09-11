@@ -7,7 +7,6 @@
   4. Yahoo Finance（本地可设 HEATMAP_SKIP_YAHOO=1）
   5. AKShare 其余 / Tushare
 区间 5/20 日：热力快照 → 东财日 K ∥ Yahoo → 其它日线轮动。
-AllTick 仅作对照检测（/api/ai-mainline/verify-alltick），不进轮动。
 资金流入 = 涨跌幅 × 成交额 / 10亿；排行占比为样本内比重。
 """
 
@@ -1512,7 +1511,7 @@ async def _fetch_quotes(
         sources_used.append(f"Finnhub:{len(fh)}")
 
     missing = [s for s in symbols if s not in merged]
-    # 轮动补缺：TradingView / Finviz / AllTick / Alpha Vantage（有 key 才启用）
+    # 轮动补缺：TradingView / Finviz / Alpha Vantage（有 key 才启用）
     if missing:
         try:
             from app.market_data.alt_sources import fill_quotes_rotating

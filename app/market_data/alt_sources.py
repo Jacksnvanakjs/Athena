@@ -1,4 +1,4 @@
-"""备用行情源：TradingView / Finviz / AllTick / Alpha Vantage / Twelve / Tiingo / Polygon / Marketstack。
+"""备用行情源：TradingView / Finviz / Alpha Vantage / Twelve / Tiingo / Polygon / Marketstack。
 
 口径：
 - 报价涨跌幅优先用 (price - prev_close) / prev_close；TV 的 change 已是百分比。
@@ -9,13 +9,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from html import unescape
 from typing import Any
-from urllib.parse import quote
 
 import httpx
 
@@ -179,162 +177,6 @@ async def fetch_finviz_quotes(
     async with httpx.AsyncClient(headers=_UA, timeout=20, follow_redirects=True) as client:
         await asyncio.gather(*[one(client, s) for s in uniq])
     return out
-
-
-# ── AllTick ─────────────────────────────────────────────────────────────────
-
-
-def _alltick_token() -> str:
-    from app.config import ALLTICK_TOKEN
-
-    return (ALLTICK_TOKEN or "").strip()
-
-
-async def fetch_alltick_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    """AllTick /trade-tick：最新成交价；涨跌用近 2 根日 K 估算。
-
-    返回值附带 ``_meta``（仅内部用）：``error`` / ``ret`` / ``msg``。
-    """
-    token = _alltick_token()
-    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
-    meta: dict[str, Any] = {"error": None, "ret": None, "msg": None}
-    if not token or not uniq:
-        meta["error"] = "missing_token_or_symbols"
-        return {"_meta": meta}
-    out: dict[str, dict[str, Any]] = {}
-    query = {
-        "trace": "athena-trade-tick",
-        "data": {"symbol_list": [{"code": f"{s}.US"} for s in uniq]},
-    }
-    url = (
-        "https://quote.alltick.co/quote-stock-b-api/trade-tick"
-        f"?token={quote(token)}&query={quote(json.dumps(query, separators=(',', ':')))}"
-    )
-    async with httpx.AsyncClient(headers=_UA, timeout=20, follow_redirects=True) as client:
-        try:
-            resp = await client.get(url)
-            body = resp.json() if resp.status_code == 200 else {}
-        except Exception as exc:
-            logger.warning("AllTick trade-tick failed: %s", exc)
-            meta["error"] = f"request_failed:{exc}"
-            return {"_meta": meta}
-        if resp.status_code == 429 or body.get("error_msg"):
-            meta["error"] = "rate_limited"
-            meta["msg"] = body.get("error_msg") or "Too many requests"
-            return {"_meta": meta}
-        meta["ret"] = body.get("ret")
-        meta["msg"] = body.get("msg")
-        if body.get("ret") not in (None, 0, 200):
-            # 604=code unauthorized：当前套餐无该市场/代码权限
-            meta["error"] = f"api_ret_{body.get('ret')}"
-            logger.warning(
-                "AllTick trade-tick ret=%s msg=%s", body.get("ret"), body.get("msg")
-            )
-            return {"_meta": meta}
-        ticks = ((body.get("data") or {}).get("tick_list")) or []
-        prices: dict[str, float] = {}
-        volumes: dict[str, float] = {}
-        for item in ticks:
-            code = str(item.get("code") or "")
-            sym = code.replace(".US", "").upper().strip()
-            px = _to_float(item.get("price"))
-            if sym and px and px > 0:
-                prices[sym] = px
-                volumes[sym] = _to_float(item.get("volume")) or 0.0
-
-        sem = asyncio.Semaphore(3)
-
-        async def prev_close(sym: str) -> tuple[str, float | None]:
-            q = {
-                "trace": f"athena-k-{sym}",
-                "data": {
-                    "code": f"{sym}.US",
-                    "kline_type": 8,
-                    "kline_timestamp_end": 0,
-                    "query_kline_num": 2,
-                    "adjust_type": 0,
-                },
-            }
-            u = (
-                "https://quote.alltick.co/quote-stock-b-api/kline"
-                f"?token={quote(token)}&query={quote(json.dumps(q, separators=(',', ':')))}"
-            )
-            async with sem:
-                try:
-                    r = await client.get(u)
-                    data = r.json() if r.status_code == 200 else {}
-                except Exception:
-                    return sym, None
-            if data.get("ret") not in (None, 0, 200) and not (
-                (data.get("data") or {}).get("kline_list")
-            ):
-                return sym, None
-            klines = ((data.get("data") or {}).get("kline_list")) or []
-            if len(klines) < 2:
-                return sym, None
-            ordered = sorted(klines, key=lambda x: int(x.get("timestamp") or 0))
-            return sym, _to_float(ordered[0].get("close_price"))
-
-        need = [s for s in prices if s in uniq]
-        prevs = dict(await asyncio.gather(*[prev_close(s) for s in need]))
-        for sym, px in prices.items():
-            if sym not in uniq:
-                continue
-            prev = prevs.get(sym)
-            if prev and prev > 0:
-                chg = round((px - prev) / prev * 100, 2)
-            else:
-                chg = 0.0
-            out[sym] = _quote_dict(
-                sym, price=px, change_pct=chg, volume=volumes.get(sym) or 0.0
-            )
-    out["_meta"] = meta
-    return out
-
-
-async def fetch_alltick_daily_closes(
-    ticker: str, *, lookback_days: int = 60
-) -> list[tuple[date, float]]:
-    token = _alltick_token()
-    t = (ticker or "").upper().strip()
-    if not token or not t:
-        return []
-    q = {
-        "trace": f"athena-daily-{t}",
-        "data": {
-            "code": f"{t}.US",
-            "kline_type": 8,
-            "kline_timestamp_end": 0,
-            "query_kline_num": max(lookback_days + 10, 40),
-            "adjust_type": 0,
-        },
-    }
-    url = (
-        "https://quote.alltick.co/quote-stock-b-api/kline"
-        f"?token={quote(token)}&query={quote(json.dumps(q, separators=(',', ':')))}"
-    )
-    async with httpx.AsyncClient(headers=_UA, timeout=20, follow_redirects=True) as client:
-        try:
-            resp = await client.get(url)
-            data = resp.json() if resp.status_code == 200 else {}
-        except Exception as exc:
-            logger.debug("AllTick daily %s: %s", t, exc)
-            return []
-    klines = ((data.get("data") or {}).get("kline_list")) or []
-    rows: list[tuple[date, float]] = []
-    for item in klines:
-        ts = item.get("timestamp")
-        close = _to_float(item.get("close_price"))
-        if not ts or close is None or close <= 0:
-            continue
-        try:
-            d = datetime.fromtimestamp(int(ts), tz=timezone.utc).date()
-        except (TypeError, ValueError, OSError):
-            continue
-        rows.append((d, close))
-    rows.sort(key=lambda x: x[0])
-    dedup: dict[date, float] = {d: c for d, c in rows}
-    return sorted(dedup.items(), key=lambda x: x[0])
 
 
 # ── Alpha Vantage ───────────────────────────────────────────────────────────
@@ -579,7 +421,6 @@ async def fill_quotes_rotating(
         ("TradingView", lambda syms: fetch_tradingview_quotes(syms)),
         ("Finviz", lambda syms: fetch_finviz_quotes(syms, limit=min(15, len(syms)))),
     ]
-    # AllTick 仅作对照检测，不进轮动（见 /api/ai-mainline/verify-alltick）
     if (ALPHA_VANTAGE_API_KEY or "").strip():
 
         async def _av(syms: list[str]) -> dict[str, dict[str, Any]]:

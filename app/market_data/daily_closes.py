@@ -498,7 +498,7 @@ def _daily_close_sources(ticker: str, lookback_days: int, *, skip_yahoo: bool):
     """美股日线多源（轮动起点由 first_success 控制）。
 
     含：东财、Alpha Vantage、Twelve、Tiingo、Polygon、Marketstack、Yahoo、Stooq、AKShare。
-    AllTick 不进轮动，仅作对照检测。无 Key 的源自动跳过。
+    无 Key 的源自动跳过。
     """
     from app.market_data.alt_sources import (
         fetch_alpha_vantage_daily_closes,
