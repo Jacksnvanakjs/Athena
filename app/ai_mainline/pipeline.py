@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.ai_mainline.baskets import all_symbols, enabled_themes
+from app.ai_mainline.baskets import all_symbols, enabled_themes, theme_by_key
 from app.ai_mainline.config import (
     AI_MAINLINE_CONFIRM_DAYS,
     AI_MAINLINE_ENABLED,
@@ -49,8 +49,32 @@ def _theme_name_map() -> dict[str, str]:
     return {t["key"]: t.get("name") or t["key"] for t in enabled_themes()}
 
 
+def _basket_members(theme_key: str) -> list[dict[str, Any]]:
+    """从篮子配置还原成分（快照未存 members 时的兜底）。"""
+    theme = theme_by_key(theme_key)
+    if not theme:
+        return []
+    out: list[dict[str, Any]] = []
+    for t in theme.get("tickers") or []:
+        sym = (t.get("symbol") or "").upper().strip()
+        if not sym:
+            continue
+        out.append(
+            {
+                "symbol": sym,
+                "name": (t.get("name") or "").strip(),
+                "ret_1d": None,
+            }
+        )
+    return out
+
+
 def _payload_from_db_snapshots() -> dict[str, Any] | None:
-    """用库内已落库的主线日快照组装页面（真实历史，非估算）。"""
+    """用库内已落库的主线日快照组装页面（真实历史，非估算）。
+
+    历史行只存了涨跌指标、未存 members；组装时从篮子补齐成分，
+    避免页面「成分」列空白（超时回退快照时尤其明显）。
+    """
     from app.database import AiMainlineDailySnapshot, SessionLocal
 
     try:
@@ -103,6 +127,22 @@ def _payload_from_db_snapshots() -> dict[str, Any] | None:
         elif secondary_key and key == secondary_key:
             role = "secondary"
             status_label = "次强"
+
+        members: list[dict[str, Any]] = []
+        leaders: list[str] = []
+        if r.payload_json:
+            try:
+                extra = json.loads(r.payload_json)
+                if isinstance(extra.get("members"), list) and extra["members"]:
+                    members = extra["members"]
+                leaders = list(extra.get("leaders") or [])
+                if extra.get("name"):
+                    names[key] = extra["name"]
+            except json.JSONDecodeError:
+                pass
+        if not members:
+            members = _basket_members(key)
+
         themes_out.append(
             {
                 "key": key,
@@ -119,6 +159,9 @@ def _payload_from_db_snapshots() -> dict[str, Any] | None:
                 "streak_days": meta.get("streak_days") if key == primary_key else 0,
                 "role": role,
                 "status_label": status_label,
+                "members": members,
+                "tickers": [m.get("symbol") for m in members if m.get("symbol")],
+                "leaders": leaders,
             }
         )
 
@@ -400,7 +443,11 @@ def _upsert_daily(db, trade_date: date, payload: dict[str, Any]) -> int:
                 rank_5d=t.get("rank_5d"),
                 n_valid=t.get("n_valid") or 0,
                 payload_json=json.dumps(
-                    {"leaders": t.get("leaders"), "name": t.get("name")},
+                    {
+                        "leaders": t.get("leaders"),
+                        "name": t.get("name"),
+                        "members": t.get("members") or [],
+                    },
                     ensure_ascii=False,
                 ),
             )
