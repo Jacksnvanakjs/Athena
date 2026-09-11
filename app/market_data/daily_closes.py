@@ -1,12 +1,14 @@
-"""日线：收盘价 / OHLC 多源：Yahoo → AKShare(新浪) → Stooq。"""
+"""日线：收盘价 / OHLC 多源：东财 → Yahoo → Stooq → AKShare。"""
 
 from __future__ import annotations
 
 import asyncio
 import csv
 import io
+import json
 import logging
 from datetime import date, datetime, timezone
+from pathlib import Path
 
 import httpx
 
@@ -18,6 +20,76 @@ _YAHOO_HEADERS = {
     "User-Agent": "Mozilla/5.0 AthenaMarketData/1.0",
     "Referer": "https://finance.yahoo.com/",
 }
+
+_EM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 AthenaMarketData/1.0",
+    "Referer": "https://quote.eastmoney.com/",
+}
+_EM_ULIST_URLS = (
+    "https://push2.eastmoney.com/api/qt/ulist.np/get",
+    "https://82.push2.eastmoney.com/api/qt/ulist.np/get",
+)
+_EM_KLINE_URLS = (
+    "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+    "https://82.push2his.eastmoney.com/api/qt/stock/kline/get",
+)
+_EM_MARKETS = (105, 106, 107)
+# symbol → 东财市场码（进程内缓存，避免反复扫 ulist）
+_EM_MARKET_CACHE: dict[str, int] = {}
+_EM_CACHE_LOADED = False
+_EM_CACHE_PATH = Path(__file__).resolve().parents[2] / "data" / "em_us_market_cache.json"
+
+
+def _load_em_market_cache() -> None:
+    global _EM_CACHE_LOADED
+    if _EM_CACHE_LOADED:
+        return
+    _EM_CACHE_LOADED = True
+    try:
+        if _EM_CACHE_PATH.is_file():
+            raw = json.loads(_EM_CACHE_PATH.read_text(encoding="utf-8"))
+            for k, v in (raw or {}).items():
+                sym = str(k).upper().strip()
+                try:
+                    mkt = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if sym and mkt in _EM_MARKETS:
+                    _EM_MARKET_CACHE.setdefault(sym, mkt)
+    except Exception as exc:
+        logger.debug("load em market cache failed: %s", exc)
+
+
+def _persist_em_market_cache() -> None:
+    try:
+        _EM_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = {k: _EM_MARKET_CACHE[k] for k in sorted(_EM_MARKET_CACHE)}
+        _EM_CACHE_PATH.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.debug("persist em market cache failed: %s", exc)
+
+
+def seed_eastmoney_markets(mapping: dict[str, int]) -> None:
+    """供报价 ulist 回填市场码，加速后续日 K。"""
+    _load_em_market_cache()
+    changed = False
+    for sym, mkt in mapping.items():
+        s = str(sym or "").upper().strip()
+        try:
+            m = int(mkt)
+        except (TypeError, ValueError):
+            continue
+        if not s or m not in _EM_MARKETS:
+            continue
+        if _EM_MARKET_CACHE.get(s) != m:
+            _EM_MARKET_CACHE[s] = m
+            changed = True
+    if changed:
+        _persist_em_market_cache()
+
 
 # (date, open, high, low, close)
 Bar = tuple[date, float, float, float, float]
@@ -102,6 +174,219 @@ async def _bars_from_yahoo(ticker: str, lookback_days: int) -> list[Bar]:
 async def _from_yahoo(ticker: str, lookback_days: int) -> list[tuple[date, float]]:
     bars = await _bars_from_yahoo(ticker, lookback_days)
     return _normalize_closes([(d, c) for d, _o, _h, _l, c in bars])
+
+
+async def _em_get_json(
+    client: httpx.AsyncClient, urls: tuple[str, ...], params: dict
+) -> dict:
+    """东财 JSON；先打主域名，失败再短重试/备域名（避免双域名×双次拖垮预算）。"""
+    last_exc: Exception | None = None
+    for idx, url in enumerate(urls):
+        attempts = 2 if idx == 0 else 1
+        for attempt in range(attempts):
+            try:
+                resp = await client.get(url, params=params)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data if isinstance(data, dict) else {}
+            except Exception as exc:
+                last_exc = exc
+                await asyncio.sleep(0.15 * (attempt + 1))
+        # 主域名彻底失败再试备域名
+    if last_exc:
+        logger.debug("eastmoney request failed: %s", last_exc)
+    return {}
+
+
+def _parse_em_klines(klines: list[str] | None, lookback_days: int) -> list[Bar]:
+    """东财日 K：``date,open,close,high,low,volume,amount,...``。"""
+    out: list[Bar] = []
+    for line in klines or []:
+        parts = str(line).split(",")
+        if len(parts) < 5:
+            continue
+        try:
+            d = date.fromisoformat(parts[0][:10])
+            o = float(parts[1])
+            c = float(parts[2])
+            h = float(parts[3])
+            l = float(parts[4])
+        except (TypeError, ValueError):
+            continue
+        if c > 0:
+            out.append((d, o, h, l, c))
+    out = _normalize_bars(out)
+    if lookback_days and len(out) > lookback_days + 40:
+        out = out[-(lookback_days + 40) :]
+    return out
+
+
+async def _resolve_eastmoney_markets(
+    client: httpx.AsyncClient, symbols: list[str]
+) -> dict[str, int]:
+    """解析美股 secid 市场码：磁盘/内存缓存优先，缺口再 ulist。"""
+    _load_em_market_cache()
+    uniq = [s.upper().strip() for s in symbols if s and str(s).strip()]
+    out: dict[str, int] = {}
+    for sym in uniq:
+        cached = _EM_MARKET_CACHE.get(sym)
+        if cached is not None:
+            out[sym] = cached
+    missing = [s for s in uniq if s not in out]
+    if not missing:
+        return out
+
+    for mkt in _EM_MARKETS:
+        still = [s for s in missing if s not in out]
+        if not still:
+            break
+        # 逐只解析，避免多 secid 批量触发东财断连
+        for sym in still:
+            data = await _em_get_json(
+                client,
+                _EM_ULIST_URLS,
+                {"fltt": "2", "secids": f"{mkt}.{sym}", "fields": "f12,f14,f2"},
+            )
+            for item in ((data.get("data") or {}).get("diff")) or []:
+                got = str(item.get("f12") or "").upper()
+                px = item.get("f2")
+                if got == sym and px not in (None, "", "-"):
+                    out[sym] = mkt
+                    _EM_MARKET_CACHE[sym] = mkt
+                    break
+            await asyncio.sleep(0.05)
+    if any(s in out for s in missing):
+        _persist_em_market_cache()
+    return out
+
+
+async def _bars_from_eastmoney_secid(
+    client: httpx.AsyncClient,
+    market: int,
+    ticker: str,
+    lookback_days: int,
+    *,
+    try_fallback_markets: bool = False,
+) -> list[Bar]:
+    lmt = max(lookback_days + 20, 40)
+    data = await _em_get_json(
+        client,
+        _EM_KLINE_URLS,
+        {
+            "secid": f"{market}.{ticker}",
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+            "klt": "101",
+            "fqt": "1",
+            "end": "20500101",
+            "lmt": str(lmt),
+        },
+    )
+    klines = ((data.get("data") or {}).get("klines")) or []
+    bars = _parse_em_klines(klines, lookback_days)
+    if bars or not try_fallback_markets:
+        return bars
+    # 单票路径才扫其它市场，避免批量时 3× 放大请求
+    for mkt in _EM_MARKETS:
+        if mkt == market:
+            continue
+        data = await _em_get_json(
+            client,
+            _EM_KLINE_URLS,
+            {
+                "secid": f"{mkt}.{ticker}",
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                "klt": "101",
+                "fqt": "1",
+                "end": "20500101",
+                "lmt": str(lmt),
+            },
+        )
+        klines = ((data.get("data") or {}).get("klines")) or []
+        bars = _parse_em_klines(klines, lookback_days)
+        if bars:
+            _EM_MARKET_CACHE[ticker] = mkt
+            _persist_em_market_cache()
+            return bars
+    return []
+
+
+async def _bars_from_eastmoney(ticker: str, lookback_days: int) -> list[Bar]:
+    t = (ticker or "").upper().strip()
+    if not t:
+        return []
+    async with httpx.AsyncClient(
+        headers=_EM_HEADERS,
+        timeout=12,
+        follow_redirects=True,
+        trust_env=False,  # 东财走直连；经海外代理易断连
+    ) as client:
+        mapping = await _resolve_eastmoney_markets(client, [t])
+        mkt = mapping.get(t)
+        if mkt is None:
+            return []
+        return await _bars_from_eastmoney_secid(
+            client, mkt, t, lookback_days, try_fallback_markets=True
+        )
+
+
+async def _from_eastmoney(ticker: str, lookback_days: int) -> list[tuple[date, float]]:
+    bars = await _bars_from_eastmoney(ticker, lookback_days)
+    return _normalize_closes([(d, c) for d, _o, _h, _l, c in bars])
+
+
+async def fetch_eastmoney_closes_many(
+    symbols: list[str],
+    *,
+    lookback_days: int = 60,
+    concurrency: int = 3,
+) -> dict[str, list[tuple[date, float]]]:
+    """批量东财日线：缓存市场码优先直拉 kline，缺口再 ulist（宁缺勿错）。"""
+    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    if not uniq:
+        return {}
+    _load_em_market_cache()
+    out: dict[str, list[tuple[date, float]]] = {}
+    async with httpx.AsyncClient(
+        headers=_EM_HEADERS,
+        timeout=8,
+        follow_redirects=True,
+        trust_env=False,
+        limits=httpx.Limits(max_connections=6, max_keepalive_connections=3),
+    ) as client:
+        mapping = {s: _EM_MARKET_CACHE[s] for s in uniq if s in _EM_MARKET_CACHE}
+        need_resolve = [s for s in uniq if s not in mapping]
+        if need_resolve:
+            resolved = await _resolve_eastmoney_markets(client, need_resolve)
+            mapping.update(resolved)
+
+        sem = asyncio.Semaphore(max(1, min(concurrency, 4)))
+
+        async def one(sym: str) -> None:
+            mkt = mapping.get(sym)
+            if mkt is None:
+                return
+            async with sem:
+                bars = await _bars_from_eastmoney_secid(
+                    client, mkt, sym, lookback_days
+                )
+                await asyncio.sleep(0.04)
+            if len(bars) >= 3:
+                out[sym] = _normalize_closes([(d, c) for d, _o, _h, _l, c in bars])
+
+        keys = list(mapping.keys())
+        for i in range(0, len(keys), 10):
+            await asyncio.gather(*[one(s) for s in keys[i : i + 10]])
+            if i + 10 < len(keys):
+                await asyncio.sleep(0.12)
+    logger.info(
+        "eastmoney daily closes %s/%s (mapped %s)",
+        len(out),
+        len(uniq),
+        len(mapping),
+    )
+    return out
 
 
 async def _bars_from_stooq(ticker: str, lookback_days: int) -> list[Bar]:
@@ -210,21 +495,45 @@ def _skip_yahoo_daily() -> bool:
 
 
 def _daily_close_sources(ticker: str, lookback_days: int, *, skip_yahoo: bool):
-    """可靠美股日线顺序。
+    """美股日线多源（轮动起点由 first_success 控制）。
 
-    跳过 Yahoo 时优先 Stooq（美股原生 CSV），再 AKShare；避免先卡在慢/不稳的新浪全表。
+    含文章/你点名的源：东财、AllTick、Alpha Vantage、Twelve、Tiingo、Polygon、
+    Marketstack、Yahoo、Stooq、AKShare。无 Key 的源自动跳过（返回空）。
     """
+    from app.market_data.alt_sources import (
+        fetch_alltick_daily_closes,
+        fetch_alpha_vantage_daily_closes,
+        fetch_marketstack_daily_closes,
+        fetch_polygon_daily_closes,
+        fetch_tiingo_daily_closes,
+        fetch_twelve_daily_closes,
+    )
+
     t = ticker
-    if skip_yahoo:
-        return [
+    sources: list = [
+        ("eastmoney", lambda: _from_eastmoney(t, lookback_days)),
+        ("alltick", lambda: fetch_alltick_daily_closes(t, lookback_days=lookback_days)),
+        (
+            "alpha_vantage",
+            lambda: fetch_alpha_vantage_daily_closes(t, lookback_days=lookback_days),
+        ),
+        ("twelve_data", lambda: fetch_twelve_daily_closes(t, lookback_days=lookback_days)),
+        ("tiingo", lambda: fetch_tiingo_daily_closes(t, lookback_days=lookback_days)),
+        ("polygon", lambda: fetch_polygon_daily_closes(t, lookback_days=lookback_days)),
+        (
+            "marketstack",
+            lambda: fetch_marketstack_daily_closes(t, lookback_days=lookback_days),
+        ),
+    ]
+    if not skip_yahoo:
+        sources.append(("yahoo", lambda: _from_yahoo(t, lookback_days)))
+    sources.extend(
+        [
             ("stooq", lambda: _from_stooq(t, lookback_days)),
             ("akshare_sina", lambda: _from_akshare_sina(t, lookback_days)),
         ]
-    return [
-        ("yahoo", lambda: _from_yahoo(t, lookback_days)),
-        ("stooq", lambda: _from_stooq(t, lookback_days)),
-        ("akshare_sina", lambda: _from_akshare_sina(t, lookback_days)),
-    ]
+    )
+    return sources
 
 
 async def fetch_daily_closes(
@@ -258,14 +567,30 @@ async def fetch_daily_closes_many(
     concurrency: int = 8,
     skip_yahoo: bool | None = None,
 ) -> dict[str, list[tuple[date, float]]]:
-    """并发拉多标的日线；缺数据的标的不写入（宁缺勿错）。"""
+    """并发拉多标的日线；缺数据的标的不写入（宁缺勿错）。
+
+    先批量东财（快），缺口再逐只走级联。
+    """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     if not uniq:
         return {}
     if skip_yahoo is None:
         skip_yahoo = _skip_yahoo_daily()
-    sem = asyncio.Semaphore(max(1, concurrency))
+
     out: dict[str, list[tuple[date, float]]] = {}
+    try:
+        em = await fetch_eastmoney_closes_many(
+            uniq, lookback_days=lookback_days, concurrency=min(5, concurrency)
+        )
+        out.update(em)
+    except Exception as exc:
+        logger.warning("eastmoney batch daily closes failed: %s", exc)
+
+    missing = [s for s in uniq if s not in out]
+    if not missing:
+        return out
+
+    sem = asyncio.Semaphore(max(1, concurrency))
 
     async def one(sym: str) -> None:
         async with sem:
@@ -279,7 +604,7 @@ async def fetch_daily_closes_many(
             if rows:
                 out[sym] = rows
 
-    await asyncio.gather(*[one(s) for s in uniq])
+    await asyncio.gather(*[one(s) for s in missing])
     return out
 
 
@@ -295,7 +620,7 @@ async def fetch_daily_bars(
         return []
     if skip_yahoo is None:
         skip_yahoo = _skip_yahoo_daily()
-    sources = []
+    sources = [("eastmoney", lambda: _bars_from_eastmoney(t, lookback_days))]
     if not skip_yahoo:
         sources.append(("yahoo", lambda: _bars_from_yahoo(t, lookback_days)))
     sources.append(("stooq", lambda: _bars_from_stooq(t, lookback_days)))

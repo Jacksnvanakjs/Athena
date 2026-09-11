@@ -143,6 +143,12 @@ SEC_USER_AGENT = os.getenv("SEC_USER_AGENT", "AthenaDealMonitor contact@example.
 FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 POLYGON_API_KEY = os.getenv("POLYGON_API_KEY", "")
 TICKDB_API_KEY = os.getenv("TICKDB_API_KEY", "")
+# 行情轮动补充源（有 key 才启用；无 key 仍可用 TradingView / Finviz / 东财）
+ALLTICK_TOKEN = os.getenv("ALLTICK_TOKEN", "") or os.getenv("ALLTICK_API_KEY", "")
+ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY", "")
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
+TIINGO_API_KEY = os.getenv("TIINGO_API_KEY", "")
+MARKETSTACK_API_KEY = os.getenv("MARKETSTACK_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 # 可选：逗号分隔多把 Gemini Key，429/配额时轮询（单 key 仍用 GEMINI_API_KEY）
 _GEMINI_EXTRA = [

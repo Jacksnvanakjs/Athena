@@ -7,8 +7,10 @@ from typing import Any
 
 async def fetch_quotes(
     symbols: list[str],
+    *,
+    allow_slow_fill: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """TickDB → Yahoo → AKShare → Tushare；返回 ({sym: row}, source_label)。"""
+    """东财∥Finnhub → 轮动补缺(TV/Finviz/AllTick/AV) → TickDB → Yahoo。"""
     from app.heatmap import get_quotes_for_symbols
 
-    return await get_quotes_for_symbols(symbols)
+    return await get_quotes_for_symbols(symbols, allow_slow_fill=allow_slow_fill)

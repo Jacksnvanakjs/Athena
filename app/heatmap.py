@@ -1,10 +1,12 @@
 """美股板块/个股热力图数据。
 
-行情源（按序尝试，前者成功则后者仅补缺）：
-  1. TickDB（需环境变量 TICKDB_API_KEY，美股格式 SYMBOL.US）
-  2. Yahoo Finance（含盘前/盘后价量分离；本地可设 HEATMAP_SKIP_YAHOO=1 跳过）
-  3. AKShare：东财 ulist → 新浪 stock_us_daily 逐只 → 东财全表
-  4. Tushare us_daily（需 TUSHARE_TOKEN，日频收盘非实时）
+行情源（轮动补缺，宁缺勿错）：
+  1. 东财 ulist 批量 ∥ Finnhub /quote
+  2. 轮动：TradingView / Finviz / AllTick / Alpha Vantage（有 Key）
+  3. TickDB（可选）
+  4. Yahoo Finance（本地可设 HEATMAP_SKIP_YAHOO=1）
+  5. AKShare 其余 / Tushare
+区间 5/20 日：热力快照 → 东财日 K ∥ Yahoo → 其它日线轮动。
 资金流入 = 涨跌幅 × 成交额 / 10亿；排行占比为样本内比重。
 """
 
@@ -36,6 +38,8 @@ HEADERS = {
 
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_SPARK = "https://query1.finance.yahoo.com/v7/finance/spark"
+FINNHUB_QUOTE = "https://finnhub.io/api/v1/quote"
+FINNHUB_QUOTE_CONCURRENCY = 6
 TICKDB_TICKER = "https://api.tickdb.ai/v1/market/ticker"
 TICKDB_BATCH_SIZE = 25
 TICKDB_BATCH_PAUSE = 1.5  # 秒，避免免费额度 429
@@ -866,11 +870,14 @@ def _parse_akshare_row(row: Any, symbol: str) -> dict[str, Any] | None:
 async def _fetch_akshare_em_direct(symbols: list[str]) -> dict[str, dict[str, Any]]:
     """AKShare 同源的东财 ulist 接口（库调用失败时的兜底）。"""
     out: dict[str, dict[str, Any]] = {}
+    market_hits: dict[str, int] = {}
     headers = {**HEADERS, "Referer": "https://quote.eastmoney.com/"}
     url = "https://push2.eastmoney.com/api/qt/ulist.np/get"
     markets = (105, 106, 107)
     fail_streak = 0
-    async with httpx.AsyncClient(headers=headers, timeout=12, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        headers=headers, timeout=12, follow_redirects=True, trust_env=False
+    ) as client:
         for mkt in markets:
             missing = [s for s in symbols if s not in out]
             if not missing:
@@ -912,6 +919,7 @@ async def _fetch_akshare_em_direct(symbols: list[str]) -> dict[str, dict[str, An
                             change_pct=change_pct,
                             volume=volume,
                         )
+                        market_hits[sym] = mkt
                 except Exception as exc:
                     fail_streak += 1
                     logger.warning("AKShare EM direct batch failed: %s", exc)
@@ -922,7 +930,15 @@ async def _fetch_akshare_em_direct(symbols: list[str]) -> dict[str, dict[str, An
                         len(out),
                         len(symbols),
                     )
+                    if market_hits:
+                        from app.market_data.daily_closes import seed_eastmoney_markets
+
+                        seed_eastmoney_markets(market_hits)
                     return out
+    if market_hits:
+        from app.market_data.daily_closes import seed_eastmoney_markets
+
+        seed_eastmoney_markets(market_hits)
     return out
 
 
@@ -1105,6 +1121,119 @@ def _symbol_from_tickdb(code: str) -> str:
     if text.endswith(".US"):
         return text[:-3]
     return text.split(".")[0]
+
+
+def _parse_finnhub_quote(data: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    """解析 Finnhub /quote。
+
+    字段约定（官方）：c=最新价，pc=昨收，d=涨跌额，dp=涨跌幅%。
+    涨跌幅用 (c-pc)/pc 重算，与昨收对齐；无效票常返回 c=0。
+    该接口不含成交量 → volume=0（资金流可由后续源补票，或不参与 flow）。
+    """
+    if not isinstance(data, dict):
+        return None
+    price = _to_float(data.get("c"))
+    prev = _to_float(data.get("pc"))
+    if price is None or price <= 0:
+        return None
+    ts = data.get("t")
+    if (prev is None or prev <= 0) and not ts:
+        return None
+
+    if prev and prev > 0:
+        change_pct = round((price - prev) / prev * 100, 2)
+    else:
+        dp = _to_float(data.get("dp"))
+        change_pct = round(dp, 2) if dp is not None else 0.0
+
+    quote_time = None
+    quote_time_et = None
+    if ts:
+        try:
+            dt = datetime.fromtimestamp(int(ts), tz=_US_TZ)
+            quote_time_et = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+            quote_time = dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError, OverflowError):
+            pass
+
+    return _quote_row(
+        symbol,
+        name=symbol,
+        price=price,
+        change_pct=change_pct,
+        volume=0.0,
+        quote_time=quote_time,
+        quote_time_et=quote_time_et,
+    )
+
+
+async def _fetch_finnhub_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """Finnhub 逐只 quote。
+
+    免费档约 60 次/分钟：控制并发；429 或总耗时超限则返回已得部分，
+    由下游东财/Yahoo 补缺（勿拖死主线）。
+    """
+    from app.config import FINNHUB_API_KEY
+
+    token = (FINNHUB_API_KEY or "").strip()
+    if not token or not symbols:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    sem = asyncio.Semaphore(FINNHUB_QUOTE_CONCURRENCY)
+    stop = asyncio.Event()
+    uniq = [s.upper().strip() for s in symbols if s and str(s).strip()]
+
+    async def one(client: httpx.AsyncClient, sym: str) -> None:
+        if stop.is_set():
+            return
+        async with sem:
+            if stop.is_set():
+                return
+            try:
+                resp = await client.get(
+                    FINNHUB_QUOTE,
+                    params={"symbol": sym, "token": token},
+                )
+            except Exception as exc:
+                logger.debug("Finnhub quote %s failed: %s", sym, exc)
+                return
+            if resp.status_code == 429:
+                stop.set()
+                logger.warning(
+                    "Finnhub rate limited，已得 %s 只，停止后续 Finnhub 请求",
+                    len(out),
+                )
+                return
+            if resp.status_code != 200:
+                return
+            try:
+                body = resp.json()
+            except Exception:
+                return
+            parsed = _parse_finnhub_quote(body, sym)
+            if parsed:
+                out[sym] = parsed
+
+    async def _run() -> None:
+        async with httpx.AsyncClient(
+            headers=HEADERS, timeout=12, follow_redirects=True
+        ) as client:
+            batch = 15
+            for i in range(0, len(uniq), batch):
+                if stop.is_set():
+                    break
+                chunk = uniq[i : i + batch]
+                await asyncio.gather(*[one(client, s) for s in chunk])
+                if i + batch < len(uniq) and not stop.is_set():
+                    await asyncio.sleep(0.25)
+
+    try:
+        await asyncio.wait_for(_run(), timeout=10)
+    except asyncio.TimeoutError:
+        stop.set()
+        logger.warning("Finnhub quote budget 10s，已得 %s/%s", len(out), len(uniq))
+    return out
 
 
 def _parse_tickdb_ticker(item: dict[str, Any], symbol: str) -> dict[str, Any] | None:
@@ -1316,15 +1445,87 @@ def _is_quality_ok(quote_count: int, total: int) -> bool:
     return quote_count >= max(20, int(total * _MIN_QUOTE_RATIO))
 
 
-async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
-    """TickDB → Yahoo → AKShare → Tushare（仅补缺）。"""
-    from app.config import TICKDB_API_KEY
+async def get_quotes_for_symbols(
+    symbols: list[str],
+    *,
+    allow_slow_fill: bool = True,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """按 symbols 拉取报价，供 ai_mainline 等复用。返回 ({sym: quote_row}, source)。
+
+    allow_slow_fill=False：不做新浪逐只等慢补，有多少用多少（主线用，避免拖垮页面）。
+    """
+    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    if not uniq:
+        return {}, "none"
+    return await _fetch_quotes(uniq, allow_slow_fill=allow_slow_fill)
+
+
+async def _fetch_quotes(
+    symbols: list[str],
+    *,
+    allow_slow_fill: bool = True,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """东财 ulist ∥ Finnhub → TickDB → Yahoo →（可选）AKShare 慢补 → Tushare。
+
+    东财与 Finnhub 并行：Finnhub 价/涨跌（昨收重算）优先；东财补成交量与缺票。
+    """
+    from app.config import FINNHUB_API_KEY, TICKDB_API_KEY
 
     sources_used: list[str] = []
     merged: dict[str, dict[str, Any]] = {}
 
-    if (TICKDB_API_KEY or "").strip():
-        tickdb = await _fetch_tickdb(symbols)
+    em_task = asyncio.create_task(_fetch_akshare_em_direct(symbols))
+    fh_task = None
+    if (FINNHUB_API_KEY or "").strip():
+        fh_task = asyncio.create_task(_fetch_finnhub_quotes(symbols))
+
+    em = await em_task
+    fh: dict[str, dict[str, Any]] = {}
+    if fh_task is not None:
+        try:
+            fh = await fh_task
+        except Exception as exc:
+            logger.warning("Finnhub quotes task failed: %s", exc)
+            fh = {}
+
+    if em:
+        merged.update(em)
+        sources_used.append(f"EastMoney:{len(em)}")
+
+    if fh:
+        for sym, row in fh.items():
+            base = merged.get(sym)
+            if base and (base.get("volume") or 0) > 0:
+                enriched = dict(row)
+                vol = float(base["volume"])
+                enriched["volume"] = int(vol)
+                enriched["dollar_volume"] = round(float(enriched["price"]) * vol, 0)
+                enriched["flow_score"] = round(
+                    float(enriched["change_pct"]) * enriched["dollar_volume"] / 1e9, 4
+                )
+                if base.get("name") and enriched.get("name") == sym:
+                    enriched["name"] = base["name"]
+                merged[sym] = enriched
+            else:
+                merged[sym] = row
+        sources_used.append(f"Finnhub:{len(fh)}")
+
+    missing = [s for s in symbols if s not in merged]
+    # 轮动补缺：TradingView / Finviz / AllTick / Alpha Vantage（有 key 才启用）
+    if missing:
+        try:
+            from app.market_data.alt_sources import fill_quotes_rotating
+
+            added, used = await fill_quotes_rotating(missing, existing=merged)
+            if added:
+                merged.update(added)
+                sources_used.extend(used)
+        except Exception as exc:
+            logger.warning("rotating quote fill failed: %s", exc)
+
+    missing = [s for s in symbols if s not in merged]
+    if missing and (TICKDB_API_KEY or "").strip():
+        tickdb = await _fetch_tickdb(missing)
         if tickdb:
             merged.update(tickdb)
             sources_used.append(f"TickDB:{len(tickdb)}")
@@ -1338,24 +1539,36 @@ async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], 
             sources_used.append(f"Yahoo:{len(yahoo)}")
         missing = [s for s in symbols if s not in merged]
 
-    # 覆盖已够则不再走 AKShare/Tushare 慢补（缺票在指标侧剔除，宁缺勿用错价）
-    if missing and _is_quality_ok(len(merged), len(symbols)):
+    # 覆盖够，或主线禁止慢补：直接返回（缺票在指标侧剔除）
+    if (not missing) or _is_quality_ok(len(merged), len(symbols)) or not allow_slow_fill:
         label = "+".join(sources_used) if sources_used else "none"
         primary = label.split("+")[0].split(":")[0] if label != "none" else "none"
-        logger.info(
-            "quotes coverage ok %s/%s via %s, skip slow fill for %s",
-            len(merged),
-            len(symbols),
-            label,
-            len(missing),
-        )
+        if missing and not allow_slow_fill:
+            logger.info(
+                "quotes fast mode %s/%s via %s, skip slow fill for %s",
+                len(merged),
+                len(symbols),
+                label,
+                len(missing),
+            )
+        elif missing:
+            logger.info(
+                "quotes coverage ok %s/%s via %s, skip slow fill for %s",
+                len(merged),
+                len(symbols),
+                label,
+                len(missing),
+            )
         return merged, primary if len(sources_used) == 1 else label
 
     if missing:
         ak = await _fetch_akshare(missing)
         if ak:
+            before = len(merged)
             merged.update(ak)
-            sources_used.append(f"AKShare:{len(ak)}")
+            gained = len(merged) - before
+            if gained:
+                sources_used.append(f"AKShare:{gained}")
         missing = [s for s in symbols if s not in merged]
 
     if missing:
@@ -1376,20 +1589,12 @@ async def _fetch_quotes(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], 
     return merged, primary if len(sources_used) == 1 else label
 
 
-async def get_quotes_for_symbols(symbols: list[str]) -> tuple[dict[str, dict[str, Any]], str]:
-    """按 symbols 拉取报价，供 ai_mainline 等复用。返回 ({sym: quote_row}, source)。"""
-    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
-    if not uniq:
-        return {}, "none"
-    return await _fetch_quotes(uniq)
-
-
 async def fetch_period_returns(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
-    """近 5/20 交易日累计涨跌（%）。快照 → Yahoo（可跳过）→ 多源日线。
+    """近 5/20 交易日累计涨跌（%）。快照 → 东财日 K ∥ Yahoo 日 K。
 
-    缺数保持 None，绝不编造；``HEATMAP_SKIP_YAHOO=1`` 时跳过 Yahoo 图表，改走 Stooq 等日线。
+    缺数保持 None，绝不编造。Finnhub 免费档无 /stock/candle，区间不用 Finnhub。
     """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     out: dict[str, dict[str, float | None]] = {
@@ -1407,63 +1612,57 @@ async def fetch_period_returns(
         for s in uniq
         if out[s].get("ret_5d") is None or out[s].get("ret_20d") is None
     ]
+    if not missing:
+        return out
+
     skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in (
         "1",
         "true",
         "yes",
     )
-    if missing and not skip_yahoo:
-        from_yahoo = await _period_returns_from_yahoo(missing)
-        for sym, vals in from_yahoo.items():
-            cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
-            if cur.get("ret_5d") is None and vals.get("ret_5d") is not None:
-                cur["ret_5d"] = vals["ret_5d"]
-            if cur.get("ret_20d") is None and vals.get("ret_20d") is not None:
-                cur["ret_20d"] = vals["ret_20d"]
-
-    still = [
-        s
-        for s in uniq
-        if out[s].get("ret_5d") is None or out[s].get("ret_20d") is None
-    ]
-    if still:
-        # 快照已覆盖大半时，不再为缺票拖垮整页（缺数保持 None）
-        covered = len(uniq) - len(still)
-        if covered >= max(8, int(len(uniq) * 0.55)):
-            logger.info(
-                "period returns: snapshot coverage %s/%s, skip slow remote fill for %s",
-                covered,
-                len(uniq),
-                len(still),
-            )
-        else:
+    tasks: set[asyncio.Task] = {
+        asyncio.create_task(_period_returns_from_daily_closes(missing))
+    }
+    if not skip_yahoo:
+        tasks.add(asyncio.create_task(_period_returns_from_yahoo(missing)))
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=28,
+            return_when=asyncio.ALL_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+        for task in done:
             try:
-                from_multi = await asyncio.wait_for(
-                    _period_returns_from_daily_closes(still),
-                    timeout=18,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "period daily closes timed out (%s symbols); keep snapshot partial",
-                    len(still),
-                )
-                from_multi = {}
-            for sym, vals in from_multi.items():
+                part = task.result()
+            except Exception as exc:
+                logger.warning("period source failed: %s", exc)
+                continue
+            for sym, vals in (part or {}).items():
                 cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
-                if cur.get("ret_5d") is None and vals.get("ret_5d") is not None:
+                # 实盘日 K 覆盖快照（快照点可能稀疏，勿把错涨跌钉死）
+                if vals.get("ret_5d") is not None:
                     cur["ret_5d"] = vals["ret_5d"]
-                if cur.get("ret_20d") is None and vals.get("ret_20d") is not None:
+                if vals.get("ret_20d") is not None:
                     cur["ret_20d"] = vals["ret_20d"]
+    except Exception as exc:
+        logger.warning("period returns parallel failed: %s", exc)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
     return out
 
 
 async def _period_returns_from_daily_closes(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
-    """快照/Yahoo 不足时，走全站多源日线再算 5d/20d（并发，宁缺勿错）。"""
-    from app.market_data import fetch_daily_closes_many
+    """快照不足时走东财日 K 算 5d/20d（不拖 AKShare 慢补，宁缺勿错）。"""
+    from app.market_data.daily_closes import fetch_eastmoney_closes_many
 
-    closes_map = await fetch_daily_closes_many(symbols, lookback_days=60, concurrency=8)
+    closes_map = await fetch_eastmoney_closes_many(
+        symbols, lookback_days=60, concurrency=3
+    )
     out: dict[str, dict[str, float | None]] = {}
     for sym, rows in closes_map.items():
         closes = [c for _, c in rows]
@@ -1524,10 +1723,16 @@ def _period_returns_from_snapshots(
             if row.price and row.price > 0:
                 by_sym.setdefault(row.symbol.upper(), []).append(float(row.price))
         for sym, closes in by_sym.items():
-            out[sym] = {
+            # 快照点过稀不算区间，避免“伪 5 日”
+            if len(closes) < 6:
+                continue
+            row: dict[str, float | None] = {
                 "ret_5d": _period_ret_from_closes(closes, 5),
-                "ret_20d": _period_ret_from_closes(closes, 20),
+                "ret_20d": None,
             }
+            if len(closes) >= 21:
+                row["ret_20d"] = _period_ret_from_closes(closes, 20)
+            out[sym] = row
     except Exception as exc:
         logger.warning("period returns from snapshots failed: %s", exc)
     return out
@@ -1536,20 +1741,27 @@ def _period_returns_from_snapshots(
 async def _period_returns_from_yahoo(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
-    import asyncio
-
     out: dict[str, dict[str, float | None]] = {}
     headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
-    sem = asyncio.Semaphore(6)
+    sem = asyncio.Semaphore(4)
+    stop = asyncio.Event()
 
     async def one(client: httpx.AsyncClient, symbol: str):
+        if stop.is_set():
+            return symbol, None
         ysym = _yahoo_symbol(symbol)
         try:
             async with sem:
+                if stop.is_set():
+                    return symbol, None
                 resp = await client.get(
                     YAHOO_CHART.format(symbol=ysym),
                     params={"interval": "1d", "range": "1mo"},
                 )
+            if resp.status_code == 429:
+                stop.set()
+                logger.warning("Yahoo period rate limited; keep partial %s", len(out))
+                return symbol, None
             if resp.status_code != 200:
                 return symbol, None
             result = ((resp.json().get("chart") or {}).get("result")) or []
@@ -1567,22 +1779,30 @@ async def _period_returns_from_yahoo(
             logger.debug("Yahoo period failed %s: %s", symbol, exc)
             return symbol, None
 
-    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
-        results = await asyncio.gather(*[one(client, s) for s in symbols])
-    for sym, vals in results:
-        if vals:
-            out[sym] = vals
+    async with httpx.AsyncClient(headers=headers, timeout=10, follow_redirects=True) as client:
+        # 分批，降低 429
+        for i in range(0, len(symbols), 8):
+            if stop.is_set():
+                break
+            chunk = symbols[i : i + 8]
+            results = await asyncio.gather(*[one(client, s) for s in chunk])
+            for sym, vals in results:
+                if vals:
+                    out[sym] = vals
+            if i + 8 < len(symbols) and not stop.is_set():
+                await asyncio.sleep(0.35)
     return out
 
 
 def _heatmap_failure(source: str, quote_count: int, total: int) -> dict[str, Any]:
-    from app.config import TICKDB_API_KEY
+    from app.config import FINNHUB_API_KEY, TICKDB_API_KEY
 
-    hint = (
-        "请在 .env 配置 TICKDB_API_KEY（https://tickdb.ai 免费注册）。"
-        if not (TICKDB_API_KEY or "").strip()
-        else "已尝试 TickDB / Yahoo / AKShare / Tushare，请稍后点击刷新。"
-    )
+    if not (FINNHUB_API_KEY or "").strip():
+        hint = "请配置 FINNHUB_API_KEY（https://finnhub.io 免费注册）。"
+    elif (TICKDB_API_KEY or "").strip():
+        hint = "已尝试 Finnhub / TickDB / Yahoo / AKShare，请稍后点击刷新。"
+    else:
+        hint = "已尝试 Finnhub / Yahoo / AKShare，请稍后点击刷新。"
     note = f"行情拉取失败（{source} 仅 {quote_count}/{total}）。{hint}"
     return {
         "success": False,

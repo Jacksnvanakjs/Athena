@@ -26,7 +26,7 @@ ET = ZoneInfo("America/New_York")
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 300  # 5 分钟：重复打开页不重打全市场
-_COMPUTE_BUDGET_SEC = 28.0  # 单次实时计算硬上限；超时回退内存/库内快照
+_COMPUTE_BUDGET_SEC = 40.0  # 东财∥Finnhub 报价 + 东财/Yahoo 日 K；超时回退库内快照
 
 
 def _today_et() -> date:
@@ -173,8 +173,13 @@ async def _compute_mainline_fresh() -> dict[str, Any]:
 
     themes_cfg = enabled_themes()
     symbols = all_symbols()
-    quotes, source = await fetch_quotes(symbols)
-    period = await fetch_period_returns(symbols)
+    import asyncio
+    quotes, source = await fetch_quotes(symbols, allow_slow_fill=False)
+    try:
+        period = await asyncio.wait_for(fetch_period_returns(symbols), timeout=32)
+    except asyncio.TimeoutError:
+        logger.warning("period returns budget 32s exceeded; use empty period")
+        period = {s: {"ret_5d": None, "ret_20d": None} for s in symbols}
 
     raw_themes = [theme_metrics(t, quotes, period) for t in themes_cfg]
     bench = compute_benchmark(themes_cfg, quotes, period)
