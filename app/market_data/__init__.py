@@ -4,8 +4,9 @@
 频繁测试时默认轮动起点，避免总打同一个源。
 
 已覆盖能力与默认链路：
-- 实时报价 ``fetch_quotes``：东财∥Finnhub → 轮动(TradingView/Finviz/AllTick/AV) → TickDB → Yahoo
-- 日线收盘 ``fetch_daily_closes``：轮动(东财/AllTick/AV/Twelve/Tiingo/Polygon/Marketstack/Yahoo/Stooq/AKShare)
+- 实时报价 ``fetch_quotes``：东财∥Finnhub → 轮动(TradingView/Finviz/AV) → TickDB → Yahoo
+- 日线收盘 ``fetch_daily_closes``：轮动(东财/AV/Twelve/Tiingo/Polygon/Marketstack/Yahoo/Stooq/AKShare)
+- AllTick：仅 ``/api/ai-mainline/verify-alltick`` 对照，不进轮动
 - 市值 ``fetch_market_cap``：Finnhub → Yahoo → 日线×股本（deal_monitor）
 - 财报日历：Finnhub → Nasdaq → Yahoo（earnings_monitor）
 - 盘后现价：报价多源 → CNBC → Yahoo AH → Finnhub（outcome）

@@ -402,12 +402,12 @@
     </div>
 
     <div class="tabs" id="mainTabs">
-      <button type="button" class="tab" data-tab="mainline" onclick="switchTab('mainline')">AI 主线</button>
+      <button type="button" class="tab active" data-tab="mainline" onclick="switchTab('mainline')">AI 主线</button>
       <button type="button" class="tab" data-tab="earnings" onclick="switchTab('earnings')">财报日历</button>
-      <button type="button" class="tab active" data-tab="deals" onclick="switchTab('deals')">合作 / 黄仁勋</button>
+      <button type="button" class="tab" data-tab="deals" onclick="switchTab('deals')">合作 / 黄仁勋</button>
     </div>
 
-    <div id="mainlinePanel" style="display:none">
+    <div id="mainlinePanel">
       <div class="ml-card" id="mlCard">
         <div class="ml-card-top">
           <div class="ml-title" id="mlTitle">加载主线…</div>
@@ -415,6 +415,10 @@
         </div>
         <div class="ml-metrics" id="mlMetrics"></div>
         <div class="ml-summary" id="mlSummary"></div>
+        <div style="margin-top:10px">
+          <button type="button" class="btn btn-dark" id="alltickVerifyBtn" onclick="verifyAlltick()">AllTick 对照检测</button>
+          <span class="muted" id="alltickVerifyNote" style="margin-left:8px;font-size:0.8rem">临时测试，不参与展示轮动</span>
+        </div>
       </div>
       <div class="panel table-panel">
         <div class="panel-title">
@@ -446,7 +450,7 @@
       </div>
     </div>
 
-    <div id="dealsPanel">
+    <div id="dealsPanel" style="display:none">
     <div class="panel filter-panel">
       <div class="panel-title">筛选条件</div>
       <div class="filters">
@@ -626,9 +630,9 @@
       </div>
     </div>
 
-    <div class="stats" id="stats"></div>
+    <div class="stats" id="stats" style="display:none"></div>
 
-    <div class="panel table-panel" id="dealsTablePanel">
+    <div class="panel table-panel" id="dealsTablePanel" style="display:none">
       <div class="table-wrap">
       <table>
         <thead>
@@ -659,7 +663,7 @@
   </div>
 
   <script>
-    let currentTab = 'deals';
+    let currentTab = 'mainline';
 
     function switchTab(tab) {
       currentTab = tab;
@@ -689,6 +693,48 @@
       if (row.breadth == null) return '—';
       if (row.n_up != null && row.n_valid) return `${row.n_up}/${row.n_valid}`;
       return `${Math.round(row.breadth * 100)}%`;
+    }
+
+    async function verifyAlltick() {
+      const btn = document.getElementById('alltickVerifyBtn');
+      const note = document.getElementById('alltickVerifyNote');
+      btn.disabled = true;
+      btn.textContent = '对照中…';
+      note.textContent = '拉取 AllTick 与系统行情比对…';
+      try {
+        const res = await fetch('/api/ai-mainline/verify-alltick');
+        const data = await res.json();
+        if (!data.success) {
+          alert(data.error || '对照失败');
+          note.textContent = data.error || '失败';
+          return;
+        }
+        const c = data.counts || {};
+        const lines = [
+          data.ok ? '结论：与 AllTick 基本一致' : '结论：发现差异，请核对',
+          `系统源：${data.system_source || '—'}`,
+          `报价对比 ${c.compared || 0} 只 · 差异 ${c.quote_mismatches || 0} · 缺系统 ${c.missing_system || 0} · 缺AllTick ${c.missing_alltick || 0}`,
+          `5D抽样差异 ${c.period_mismatches || 0} · 子线1D差异 ${c.theme_ret1d_diffs || 0}`,
+        ];
+        const qm = (data.quote_mismatches || []).slice(0, 8).map(m =>
+          `${m.symbol}: 系统$${m.sys_price}/AllTick$${m.alltick_price} (${m.price_diff_pct ?? '—'}%) · 1D ${m.sys_change_pct}/${m.alltick_change_pct}`
+        );
+        if (qm.length) lines.push('报价差异样例：\n' + qm.join('\n'));
+        const td = (data.theme_ret1d_diffs || []).slice(0, 5).map(t =>
+          `${t.theme}: 系统 ${t.sys_ret_1d}% / AllTick ${t.alltick_ret_1d}% (差 ${t.diff_pp})`
+        );
+        if (td.length) lines.push('子线1D差异：\n' + td.join('\n'));
+        alert(lines.join('\n'));
+        note.textContent = data.ok
+          ? `对照通过 · 比 ${c.compared || 0} 只`
+          : `有差异 · 报价${c.quote_mismatches || 0} / 5D ${c.period_mismatches || 0} / 子线 ${c.theme_ret1d_diffs || 0}`;
+      } catch (e) {
+        alert('AllTick 对照请求失败');
+        note.textContent = '请求失败';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'AllTick 对照检测';
+      }
     }
 
     async function loadMainline() {
@@ -1277,7 +1323,7 @@
       document.getElementById(id).addEventListener('change', loadEarnings);
     });
 
-    loadDeals();
+    switchTab('mainline');
     setInterval(() => {
       if (currentTab === 'mainline') loadMainline();
       else if (currentTab === 'earnings') loadEarnings();

@@ -497,11 +497,10 @@ def _skip_yahoo_daily() -> bool:
 def _daily_close_sources(ticker: str, lookback_days: int, *, skip_yahoo: bool):
     """美股日线多源（轮动起点由 first_success 控制）。
 
-    含文章/你点名的源：东财、AllTick、Alpha Vantage、Twelve、Tiingo、Polygon、
-    Marketstack、Yahoo、Stooq、AKShare。无 Key 的源自动跳过（返回空）。
+    含：东财、Alpha Vantage、Twelve、Tiingo、Polygon、Marketstack、Yahoo、Stooq、AKShare。
+    AllTick 不进轮动，仅作对照检测。无 Key 的源自动跳过。
     """
     from app.market_data.alt_sources import (
-        fetch_alltick_daily_closes,
         fetch_alpha_vantage_daily_closes,
         fetch_marketstack_daily_closes,
         fetch_polygon_daily_closes,
@@ -512,7 +511,6 @@ def _daily_close_sources(ticker: str, lookback_days: int, *, skip_yahoo: bool):
     t = ticker
     sources: list = [
         ("eastmoney", lambda: _from_eastmoney(t, lookback_days)),
-        ("alltick", lambda: fetch_alltick_daily_closes(t, lookback_days=lookback_days)),
         (
             "alpha_vantage",
             lambda: fetch_alpha_vantage_daily_closes(t, lookback_days=lookback_days),

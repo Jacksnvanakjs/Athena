@@ -2,11 +2,12 @@
 
 行情源（轮动补缺，宁缺勿错）：
   1. 东财 ulist 批量 ∥ Finnhub /quote
-  2. 轮动：TradingView / Finviz / AllTick / Alpha Vantage（有 Key）
+  2. 轮动：TradingView / Finviz / Alpha Vantage（有 Key）
   3. TickDB（可选）
   4. Yahoo Finance（本地可设 HEATMAP_SKIP_YAHOO=1）
   5. AKShare 其余 / Tushare
 区间 5/20 日：热力快照 → 东财日 K ∥ Yahoo → 其它日线轮动。
+AllTick 仅作对照检测（/api/ai-mainline/verify-alltick），不进轮动。
 资金流入 = 涨跌幅 × 成交额 / 10亿；排行占比为样本内比重。
 """
 

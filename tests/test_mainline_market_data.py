@@ -17,7 +17,7 @@ class TestDailyCloseSources(unittest.TestCase):
     def test_includes_rotating_vendors(self):
         names = [n for n, _ in _daily_close_sources("NVDA", 60, skip_yahoo=True)]
         self.assertIn("eastmoney", names)
-        self.assertIn("alltick", names)
+        self.assertNotIn("alltick", names)  # AllTick 仅对照，不进轮动
         self.assertIn("alpha_vantage", names)
         self.assertIn("twelve_data", names)
         self.assertNotIn("yahoo", names)

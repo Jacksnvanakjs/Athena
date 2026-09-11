@@ -1087,3 +1087,11 @@ async def ai_mainline_run(token: str = Query(default="")):
     if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="无效 token")
     return await run_ai_mainline_daily(force=True)
+
+
+@router.get("/ai-mainline/verify-alltick")
+async def ai_mainline_verify_alltick():
+    """临时对照：用 AllTick 核对系统行情（不进轮动、不改展示）。"""
+    from app.ai_mainline.verify_alltick import verify_mainline_vs_alltick
+
+    return await verify_mainline_vs_alltick()

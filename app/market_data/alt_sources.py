@@ -253,7 +253,7 @@ async def fetch_alltick_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
             return sym, _to_float(ordered[0].get("close_price"))
 
         need = [s for s in prices if s in uniq]
-        prevs = dict(await asyncio.gather(*[prev_close(s) for s in need[:25]]))
+        prevs = dict(await asyncio.gather(*[prev_close(s) for s in need]))
         for sym, px in prices.items():
             if sym not in uniq:
                 continue
@@ -540,7 +540,7 @@ async def fill_quotes_rotating(
     existing: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
     """对缺票按轮动顺序补报价；返回 (merged_additions, used_source_labels)。"""
-    from app.config import ALLTICK_TOKEN, ALPHA_VANTAGE_API_KEY
+    from app.config import ALPHA_VANTAGE_API_KEY
     from app.market_data.cascade import next_batch_order
 
     missing = [
@@ -555,8 +555,7 @@ async def fill_quotes_rotating(
         ("TradingView", lambda syms: fetch_tradingview_quotes(syms)),
         ("Finviz", lambda syms: fetch_finviz_quotes(syms, limit=min(15, len(syms)))),
     ]
-    if (ALLTICK_TOKEN or "").strip():
-        candidates.append(("AllTick", lambda syms: fetch_alltick_quotes(syms)))
+    # AllTick 仅作对照检测，不进轮动（见 /api/ai-mainline/verify-alltick）
     if (ALPHA_VANTAGE_API_KEY or "").strip():
 
         async def _av(syms: list[str]) -> dict[str, dict[str, Any]]:
