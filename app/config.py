@@ -132,7 +132,9 @@ DEAL_SCORE_MIN_T0_T0 = int(os.getenv("DEAL_SCORE_MIN_T0_T0", "70"))
 DEAL_SCORE_MIN_T0_T1 = int(os.getenv("DEAL_SCORE_MIN_T0_T1", "60"))
 DEAL_SCORE_MIN_T1_T1 = int(os.getenv("DEAL_SCORE_MIN_T1_T1", "65"))
 DEAL_DEDUP_DAYS = int(os.getenv("DEAL_DEDUP_DAYS", "7"))
-DEAL_MAX_PUSH_PER_HOUR = int(os.getenv("DEAL_MAX_PUSH_PER_HOUR", "10"))
+# 全站推送上限：0=不限流（删掉环境变量仍走默认；要关限流请显式设 0）
+DEAL_MAX_PUSH_PER_HOUR = int(os.getenv("DEAL_MAX_PUSH_PER_HOUR", "0"))
+# 同一受益方：仅限制「相同新闻内容」24h 内重复推送（URL 或正文指纹），不同新闻不拦；0=关闭
 DEAL_MAX_PUSH_PER_BENEFICIARY_24H = int(os.getenv("DEAL_MAX_PUSH_PER_BENEFICIARY_24H", "1"))
 DEAL_T0_T0_PUSH_ENABLED = os.getenv("DEAL_T0_T0_PUSH_ENABLED", "true").lower() == "true"
 DEAL_T2_T2_PUSH_BOTH = os.getenv("DEAL_T2_T2_PUSH_BOTH", "false").lower() == "true"
@@ -169,6 +171,8 @@ DEAL_LLM_MIN_SCORE = int(os.getenv("DEAL_LLM_MIN_SCORE", "70"))
 DEAL_INGEST_MAX_AGE_DAYS = int(os.getenv("DEAL_INGEST_MAX_AGE_DAYS", "3"))
 # 发稿超过 N 天：若已入库则不推送（兜底；正常应由 INGEST 先行丢弃）
 DEAL_PUSH_MAX_AGE_DAYS = int(os.getenv("DEAL_PUSH_MAX_AGE_DAYS", "3"))
+# 仅补推「刚抓取」失败/限流单条；超时不再补，禁止积压合并扎堆
+DEAL_PUSH_RETRY_FRESH_MIN = int(os.getenv("DEAL_PUSH_RETRY_FRESH_MIN", "15"))
 # 列表默认隐藏软整合/融资/空话（首日回测≥70 仍保留作对照）
 DEAL_HIDE_WEAK_QUALITY = os.getenv("DEAL_HIDE_WEAK_QUALITY", "true").lower() == "true"
 # 分数与首日回测分差≥此值视为分差大（重打分/筛选）

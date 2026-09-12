@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -143,42 +143,60 @@ def _dedup_blocked(
     return q.first() is not None
 
 
-def _push_rate_limited(db: Session, ticker: str) -> bool:
+def _push_rate_limited(db: Session, event: NvdaSignalEvent) -> bool:
+    """限流：0=关闭。受益方仅拦相同 URL/正文指纹，不同新闻可继续推。"""
+    from sqlalchemy import and_
+
+    from app.deal_monitor.story_fingerprint import is_same_story
+
+    ticker = (event.beneficiary_ticker or "").strip().upper()
     since_24h = now_beijing() - timedelta(hours=24)
     since_1h = now_beijing() - timedelta(hours=1)
-
-    def success_filter(model):
-        from sqlalchemy import and_
-
-        return and_(
-            model.push_channel.isnot(None),
-            ~model.push_channel.in_(
-                ["none", "failed", "unconfigured", "disabled", "rate_limited"]
-            ),
-        )
-
-    c24 = (
-        db.query(NvdaSignalEvent)
-        .filter(
-            NvdaSignalEvent.beneficiary_ticker == ticker.upper(),
-            NvdaSignalEvent.pushed_at.isnot(None),
-            NvdaSignalEvent.pushed_at >= since_24h,
-            success_filter(NvdaSignalEvent),
-        )
-        .count()
+    success_like = and_(
+        NvdaSignalEvent.push_channel.isnot(None),
+        ~NvdaSignalEvent.push_channel.in_(
+            ["none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip", "tier_skip"]
+        ),
     )
-    if c24 >= DEAL_MAX_PUSH_PER_BENEFICIARY_24H:
-        return True
-    c1 = (
-        db.query(NvdaSignalEvent)
-        .filter(
-            NvdaSignalEvent.pushed_at.isnot(None),
-            NvdaSignalEvent.pushed_at >= since_1h,
-            success_filter(NvdaSignalEvent),
+
+    if DEAL_MAX_PUSH_PER_BENEFICIARY_24H > 0 and ticker:
+        priors = (
+            db.query(NvdaSignalEvent)
+            .filter(
+                NvdaSignalEvent.beneficiary_ticker == ticker,
+                NvdaSignalEvent.pushed_at.isnot(None),
+                NvdaSignalEvent.pushed_at >= since_24h,
+                success_like,
+            )
+            .all()
         )
-        .count()
-    )
-    return c1 >= DEAL_MAX_PUSH_PER_HOUR
+        same = 0
+        for prior in priors:
+            if is_same_story(
+                event.headline,
+                event.summary,
+                prior.headline,
+                prior.summary,
+                url_a=event.source_url,
+                url_b=prior.source_url,
+            ):
+                same += 1
+                if same >= DEAL_MAX_PUSH_PER_BENEFICIARY_24H:
+                    return True
+
+    if DEAL_MAX_PUSH_PER_HOUR > 0:
+        c1 = (
+            db.query(NvdaSignalEvent)
+            .filter(
+                NvdaSignalEvent.pushed_at.isnot(None),
+                NvdaSignalEvent.pushed_at >= since_1h,
+                success_like,
+            )
+            .count()
+        )
+        if c1 >= DEAL_MAX_PUSH_PER_HOUR:
+            return True
+    return False
 
 
 async def _maybe_push(db: Session, event: NvdaSignalEvent) -> None:
@@ -195,7 +213,7 @@ async def _maybe_push(db: Session, event: NvdaSignalEvent) -> None:
         event.push_channel = "none"
         return
 
-    if _push_rate_limited(db, event.beneficiary_ticker):
+    if _push_rate_limited(db, event):
         event.push_channel = "rate_limited"
         return
 
@@ -389,6 +407,11 @@ async def run_pipeline() -> dict:
             db.commit()
             summary["stale_dropped"] = stale_dropped
         new_items = eligible
+        new_items.sort(
+            key=lambda it: (it.published_at.replace(tzinfo=None) if it.published_at and it.published_at.tzinfo else it.published_at)
+            or datetime.min,
+            reverse=True,
+        )
 
         for item in new_items:
             try:

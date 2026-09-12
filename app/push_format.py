@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from app.text_clean import clean_article_text
-
-_SUMMARY_MAX = 360
+from app.deal_monitor.headline_zh import build_zh_headline, needs_zh_headline
 
 
 def _party(name: str | None, ticker: str | None) -> str:
@@ -13,13 +11,14 @@ def _party(name: str | None, ticker: str | None) -> str:
     return f"{n} ({t})" if t else n
 
 
-def _excerpt(text: str | None, limit: int = _SUMMARY_MAX) -> str:
-    body = clean_article_text(text or "")
-    if not body:
-        return ""
-    if len(body) <= limit:
-        return body
-    return body[:limit].rstrip() + "…"
+def _zh_core_message(event) -> str:
+    """一句提炼过的中文核心（不用英文原文摘要）。"""
+    hl = (getattr(event, "headline", None) or "").strip()
+    ticker = (getattr(event, "beneficiary_ticker", None) or "").strip()
+    summary = getattr(event, "summary", None)
+    if hl and not needs_zh_headline(hl):
+        return hl
+    return build_zh_headline(ticker, hl, summary)
 
 
 def build_deal_push_content(event) -> tuple[str, str]:
@@ -32,11 +31,8 @@ def build_deal_push_content(event) -> tuple[str, str]:
         f"受益：{_party(event.beneficiary_name, event.beneficiary_ticker)}",
         f"锚点：{_party(event.anchor_name, anchor_ticker)}",
         "",
-        (event.headline or "").strip(),
+        _zh_core_message(event),
     ]
-    summary = _excerpt(event.summary)
-    if summary:
-        lines.extend(["", summary])
     source_url = (event.source_url or "").strip()
     if source_url:
         lines.extend(["", f"原文：{source_url}"])
@@ -74,9 +70,10 @@ def build_deal_digest_push_content(events: list) -> tuple[str, str]:
         lines.append(
             f"{i}. {(e.beneficiary_ticker or '—')} ← {anchor}"
         )
-        hl = (e.headline or "").strip()
-        if hl:
-            lines.append(f"   {hl[:120]}{'…' if len(hl) > 120 else ''}")
+        core = _zh_core_message(e)
+        if core:
+            short = core[:120] + ("…" if len(core) > 120 else "")
+            lines.append(f"   {short}")
         url = (e.source_url or "").strip()
         if url:
             lines.append(f"   {url}")
@@ -95,11 +92,8 @@ def build_nvda_push_content(event) -> tuple[str, str]:
         "",
         f"标的：{_party(event.beneficiary_name, event.beneficiary_ticker)}",
         "",
-        (event.headline or "").strip(),
+        _zh_core_message(event),
     ]
-    summary = _excerpt(event.summary)
-    if summary:
-        lines.extend(["", summary])
     if event.buy_window or event.sell_window:
         lines.append("")
         if event.buy_window:

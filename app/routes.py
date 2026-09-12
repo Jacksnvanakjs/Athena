@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import desc, or_
@@ -257,6 +257,13 @@ def _push_ok(event) -> bool:
     )
 
 
+def _deals_since_windows(days: int) -> tuple[datetime, datetime]:
+    """列表时间窗：published_at 按 UTC；fetched_at 按北京时间。"""
+    since_utc = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    since_bj = now_beijing() - timedelta(days=days)
+    return since_utc, since_bj
+
+
 def _first_day_fields(event) -> dict:
     from app.config import DEAL_SCORE_OUTCOME_GAP_DISPLAY
 
@@ -429,7 +436,7 @@ def list_deals(
         should_hide_weak_quality_event,
     )
 
-    since = now_beijing() - timedelta(days=days)
+    since_utc, since_bj = _deals_since_windows(days)
     if category not in ("all", FEED_AI, FEED_NVDA):
         raise HTTPException(status_code=400, detail="category 支持: all, ai_cooperation, nvda_signal")
     move = (first_day_move or "").strip().lower()
@@ -463,7 +470,12 @@ def list_deals(
         rows: list[dict] = []
 
         if category in ("all", FEED_AI):
-            q = db.query(DealEvent).filter(DealEvent.published_at >= since)
+            q = db.query(DealEvent).filter(
+                or_(
+                    DealEvent.published_at >= since_utc,
+                    DealEvent.fetched_at >= since_bj,
+                )
+            )
             if tier_pair:
                 q = q.filter(DealEvent.tier_pair == tier_pair)
             if min_score:
@@ -475,7 +487,8 @@ def list_deals(
                     ~DealEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
             fetch_n = min(500, max(limit * 4, limit))
-            for r in q.order_by(desc(DealEvent.published_at)).limit(fetch_n).all():
+            for r in q.order_by(desc(DealEvent.published_at), desc(DealEvent.id)).limit(fetch_n).all():
+                # 与推送门闸一致：隐藏规则命中的一律不展示（含已推送误发）
                 if is_test_source_url(r.source_url) or should_hide_deal_event(r):
                     continue
                 if do_hide_weak and should_hide_weak_quality_event(r):
@@ -486,7 +499,12 @@ def list_deals(
                 rows.append(row)
 
         if category in ("all", FEED_NVDA):
-            q = db.query(NvdaSignalEvent).filter(NvdaSignalEvent.published_at >= since)
+            q = db.query(NvdaSignalEvent).filter(
+                or_(
+                    NvdaSignalEvent.published_at >= since_utc,
+                    NvdaSignalEvent.fetched_at >= since_bj,
+                )
+            )
             if min_score:
                 q = q.filter(NvdaSignalEvent.materiality_score >= min_score)
             if pushed_only:
@@ -496,7 +514,7 @@ def list_deals(
                     ~NvdaSignalEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
             fetch_n = min(500, max(limit * 4, limit))
-            for r in q.order_by(desc(NvdaSignalEvent.published_at)).limit(fetch_n).all():
+            for r in q.order_by(desc(NvdaSignalEvent.published_at), desc(NvdaSignalEvent.id)).limit(fetch_n).all():
                 if is_test_source_url(r.source_url):
                     continue
                 row = _nvda_to_dict(r)
@@ -526,7 +544,7 @@ def deals_stats(
         should_hide_weak_quality_event,
     )
 
-    since = now_beijing() - timedelta(days=days)
+    since_utc, since_bj = _deals_since_windows(days)
     do_hide_weak = DEAL_HIDE_WEAK_QUALITY if hide_weak is None else hide_weak
     move = (first_day_move or "").strip().lower()
     if move and move not in ("up", "down"):
@@ -556,7 +574,16 @@ def deals_stats(
 
         if category in ("all", FEED_AI):
             ai_rows = []
-            for e in db.query(DealEvent).filter(DealEvent.published_at >= since).all():
+            for e in (
+                db.query(DealEvent)
+                .filter(
+                    or_(
+                        DealEvent.published_at >= since_utc,
+                        DealEvent.fetched_at >= since_bj,
+                    )
+                )
+                .all()
+            ):
                 if is_test_source_url(e.source_url) or should_hide_deal_event(e):
                     continue
                 if do_hide_weak and should_hide_weak_quality_event(e):
@@ -585,7 +612,12 @@ def deals_stats(
         if category in ("all", FEED_NVDA):
             nvda_rows = (
                 db.query(NvdaSignalEvent)
-                .filter(NvdaSignalEvent.published_at >= since)
+                .filter(
+                    or_(
+                        NvdaSignalEvent.published_at >= since_utc,
+                        NvdaSignalEvent.fetched_at >= since_bj,
+                    )
+                )
                 .all()
             )
             nvda_rows = [

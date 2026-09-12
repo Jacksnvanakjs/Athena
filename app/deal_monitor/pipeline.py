@@ -15,13 +15,16 @@ from sqlalchemy.orm import Session
 from app.database import DealEvent, DealSeenUrl, db_session
 from app.deal_monitor.config import (
     DEAL_DEDUP_DAYS,
+    DEAL_HIDE_WEAK_QUALITY,
     DEAL_INGEST_MAX_AGE_DAYS,
     DEAL_LLM_MIN_SCORE,
     DEAL_LLM_MODEL,
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
+    DEAL_POLL_INTERVAL_MIN,
     DEAL_PUSH_ENABLED,
     DEAL_PUSH_MAX_AGE_DAYS,
+    DEAL_PUSH_RETRY_FRESH_MIN,
     DEAL_USE_LLM,
 )
 from app.deal_monitor.entities import Entity, registry
@@ -34,7 +37,12 @@ from app.deal_monitor.fetchers.pr_wire import RawItem, fetch_pr_wires
 from app.deal_monitor.fetchers.sec_edgar import fetch_sec_8k
 from app.deal_monitor.fetchers.company_ir import fetch_finnhub_and_google
 from app.deal_monitor.fetchers.company_ir_rss import fetch_company_ir_feeds
-from app.deal_monitor.content_filter import deal_amount_keys
+from app.deal_monitor.content_filter import (
+    deal_amount_keys,
+    should_hide_deal_event,
+    should_hide_weak_quality_event,
+)
+from app.deal_monitor.story_fingerprint import is_same_story
 from app.deal_monitor.ingest_policy import (
     llm_allows_beneficiary_ingest,
     llm_primary_enabled,
@@ -57,7 +65,7 @@ from app.deal_monitor.materiality import (
 from app.deal_monitor.parser import infer_partnership_pair, infer_partnership_pair_text
 from app.deal_monitor.tiers import RoleAssignment, assign_roles, score_threshold
 from app.notifier import notify, successful_channels
-from app.push_format import build_deal_digest_push_content, build_deal_push_content
+from app.push_format import build_deal_push_content
 from app.source_url_guard import is_test_source_url
 from app.utils import now_beijing
 
@@ -197,38 +205,60 @@ def _push_succeeded(event: DealEvent) -> bool:
     )
 
 
-def _push_rate_limited(db: Session, beneficiary_ticker: str) -> bool:
+def _push_rate_limited(db: Session, event: DealEvent) -> bool:
+    """限流：0=关闭对应闸门。
+
+    - 小时总上限：全库成功推送条数（DEAL_MAX_PUSH_PER_HOUR）
+    - 受益方：只拦「同一新闻内容」重复推（URL 或正文指纹），不同新闻可继续推
+    """
+    ticker = (event.beneficiary_ticker or "").strip().upper()
     since_24h = now_beijing() - timedelta(hours=24)
     since_1h = now_beijing() - timedelta(hours=1)
-    # 只统计真正推成功的，避免失败占额度、页面误显示已推送
     success_like = and_(
         DealEvent.push_channel.isnot(None),
         ~DealEvent.push_channel.in_(
-            ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+            ["none", "failed", "unconfigured", "disabled", "rate_limited", "stale", "soft_skip", "tier_skip"]
         ),
     )
-    count_24h = (
-        db.query(DealEvent)
-        .filter(
-            DealEvent.beneficiary_ticker == beneficiary_ticker,
-            DealEvent.pushed_at.isnot(None),
-            DealEvent.pushed_at >= since_24h,
-            success_like,
+
+    if DEAL_MAX_PUSH_PER_BENEFICIARY_24H > 0 and ticker:
+        priors = (
+            db.query(DealEvent)
+            .filter(
+                DealEvent.beneficiary_ticker == ticker,
+                DealEvent.pushed_at.isnot(None),
+                DealEvent.pushed_at >= since_24h,
+                success_like,
+            )
+            .all()
         )
-        .count()
-    )
-    if count_24h >= DEAL_MAX_PUSH_PER_BENEFICIARY_24H:
-        return True
-    global_count = (
-        db.query(DealEvent)
-        .filter(
-            DealEvent.pushed_at.isnot(None),
-            DealEvent.pushed_at >= since_1h,
-            success_like,
+        same = 0
+        for prior in priors:
+            if is_same_story(
+                event.headline,
+                event.summary,
+                prior.headline,
+                prior.summary,
+                url_a=event.source_url,
+                url_b=prior.source_url,
+            ):
+                same += 1
+                if same >= DEAL_MAX_PUSH_PER_BENEFICIARY_24H:
+                    return True
+
+    if DEAL_MAX_PUSH_PER_HOUR > 0:
+        global_count = (
+            db.query(DealEvent)
+            .filter(
+                DealEvent.pushed_at.isnot(None),
+                DealEvent.pushed_at >= since_1h,
+                success_like,
+            )
+            .count()
         )
-        .count()
-    )
-    return global_count >= DEAL_MAX_PUSH_PER_HOUR
+        if global_count >= DEAL_MAX_PUSH_PER_HOUR:
+            return True
+    return False
 
 
 async def _apply_notify_result(event: DealEvent, results: dict) -> bool:
@@ -250,11 +280,16 @@ async def _apply_notify_result(event: DealEvent, results: dict) -> bool:
 
 
 async def _maybe_push(db: Session, event: DealEvent, roles_should_push: bool) -> None:
-    """仅在渠道真正发送成功时写入 pushed_at；失败可被后续重试。"""
+    """仅在渠道真正发送成功时写入 pushed_at；失败可被后续短窗口单条重试。"""
     if not roles_should_push or not DEAL_PUSH_ENABLED:
         event.push_channel = "disabled"
         return
-    if _push_rate_limited(db, event.beneficiary_ticker):
+    if not _passes_web_display_rules(event):
+        event.push_channel = "soft_skip"
+        event.pushed_at = None
+        logger.info("不符合网页展示规则，不推送 %s", event.beneficiary_ticker)
+        return
+    if _push_rate_limited(db, event):
         logger.info("推送频率限制，跳过 %s", event.beneficiary_ticker)
         event.push_channel = "rate_limited"
         return
@@ -266,104 +301,94 @@ async def _maybe_push(db: Session, event: DealEvent, roles_should_push: bool) ->
     await _apply_notify_result(event, results)
 
 
-async def retry_unpushed_events(db: Session, limit: int = 12) -> int:
-    """补推失败/限流事件。
+def _passes_web_display_rules(event: DealEvent) -> bool:
+    """推送与网页默认列表共用：隐藏规则命中则不推。"""
+    if is_test_source_url(getattr(event, "source_url", None)):
+        return False
+    if should_hide_deal_event(event):
+        return False
+    if DEAL_HIDE_WEAK_QUALITY and should_hide_weak_quality_event(event):
+        return False
+    return True
 
-    积压 ≥2 条时合并成一条综合推送（占 1 次额度），避免通道日限额恢复后连发。
-    仅 1 条时仍单条即时补推。
+
+def _retry_fresh_cutoff() -> datetime:
+    mins = max(DEAL_PUSH_RETRY_FRESH_MIN, DEAL_POLL_INTERVAL_MIN * 2)
+    return now_beijing() - timedelta(minutes=mins)
+
+
+async def retry_unpushed_events(db: Session, limit: int = 3) -> int:
+    """仅补推刚抓取且仍符合展示规则的失败/限流单条。
+
+    - 禁止积压合并（digest）扎堆推送
+    - 超过新鲜窗口的失败/限流标记为 stale，不再补发
     """
     if not DEAL_PUSH_ENABLED:
         return 0
+
+    fresh_since = _retry_fresh_cutoff()
+    stale_marked = 0
+    for event in (
+        db.query(DealEvent)
+        .filter(
+            DealEvent.push_channel.in_(
+                ["none", "failed", "unconfigured", "rate_limited"]
+            ),
+            or_(
+                DealEvent.fetched_at.is_(None),
+                DealEvent.fetched_at < fresh_since,
+            ),
+        )
+        .limit(80)
+        .all()
+    ):
+        # 已过新鲜窗口：放弃补推，避免稍后扎堆
+        event.push_channel = "stale"
+        event.pushed_at = None
+        db.add(event)
+        stale_marked += 1
+    if stale_marked:
+        db.commit()
+        logger.info("放弃过期补推 %s 条（超过新鲜窗口或不及时）", stale_marked)
+
     candidates = (
         db.query(DealEvent)
         .filter(
-            or_(
-                DealEvent.pushed_at.is_(None),
-                DealEvent.push_channel.is_(None),
-                DealEvent.push_channel.in_(
-                    ["none", "failed", "unconfigured", "rate_limited"]
-                ),
-            )
+            DealEvent.fetched_at >= fresh_since,
+            DealEvent.push_channel.in_(
+                ["none", "failed", "unconfigured", "rate_limited"]
+            ),
         )
         .order_by(DealEvent.fetched_at.desc(), DealEvent.id.desc())
-        .limit(40)
+        .limit(20)
         .all()
     )
 
-    eligible: list[DealEvent] = []
-    touched = False
-    seen_ticker: set[str] = set()
+    pushed = 0
     for event in candidates:
+        if pushed >= limit:
+            break
         if _published_too_stale_for_push(event.published_at):
             event.push_channel = "stale"
             event.pushed_at = None
             db.add(event)
-            touched = True
             continue
-        ticker = (event.beneficiary_ticker or "").strip().upper()
-        if ticker and ticker in seen_ticker:
+        if not _passes_web_display_rules(event):
             event.push_channel = "soft_skip"
             event.pushed_at = None
             db.add(event)
-            touched = True
             continue
-        if _push_rate_limited(db, event.beneficiary_ticker):
+        if _push_rate_limited(db, event):
+            # 仍限流则保持 rate_limited，等下一轮新鲜窗口内再试；不合并多条
             event.push_channel = "rate_limited"
             db.add(event)
-            touched = True
-            continue
-        if ticker:
-            seen_ticker.add(ticker)
-        eligible.append(event)
-        if len(eligible) >= limit:
             break
-
-    if not eligible:
-        if touched:
-            db.commit()
-        return 0
-
-    if len(eligible) == 1:
-        await _maybe_push(db, eligible[0], roles_should_push=True)
-        db.add(eligible[0])
-        db.commit()
-        return 1 if _push_succeeded(eligible[0]) else 0
-
-    title, content = build_deal_digest_push_content(eligible)
-    results = await notify(title, content)
-    if not results:
-        logger.warning("综合推送通道未配置，跳过 %s 条积压", len(eligible))
-        for event in eligible:
-            event.push_channel = "unconfigured"
-            event.pushed_at = None
-            db.add(event)
-        db.commit()
-        return 0
-
-    channels = successful_channels(results)
-    if not channels:
-        logger.warning("综合推送全部失败 results=%s", results)
-        for event in eligible:
-            event.push_channel = "failed"
-            event.pushed_at = None
-            db.add(event)
-        db.commit()
-        return 0
-
-    channel = "+".join(channels) + "+digest"
-    now = now_beijing()
-    for event in eligible:
-        event.pushed_at = now
-        event.push_channel = channel
+        await _maybe_push(db, event, roles_should_push=True)
         db.add(event)
+        if _push_succeeded(event):
+            pushed += 1
     db.commit()
-    logger.info(
-        "已综合推送 %s 条积压 via %s: %s",
-        len(eligible),
-        channel,
-        ", ".join(e.beneficiary_ticker or "?" for e in eligible),
-    )
-    return len(eligible)
+    return pushed
 
 
 def _save_event(
@@ -682,6 +707,10 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
             else:
                 event.push_channel = "soft_skip"
             event.pushed_at = None
+        elif not _passes_web_display_rules(event):
+            event.push_channel = "soft_skip"
+            event.pushed_at = None
+            logger.info("网页隐藏规则命中，入库不推送 %s", ticker)
         else:
             await _maybe_push(db, event, True)
         saved.append(event.beneficiary_ticker)
@@ -777,6 +806,16 @@ async def run_pipeline() -> dict:
             summary["content_filtered"] = content_rejected
             summary["stale_dropped"] = stale_dropped
         new_items = eligible_items
+        # 越新优先处理/推送，减少一轮抓到多条时先推旧闻
+        new_items.sort(
+            key=lambda it: (
+                it.published_at.replace(tzinfo=None)
+                if it.published_at and it.published_at.tzinfo
+                else it.published_at
+            )
+            or datetime.min,
+            reverse=True,
+        )
 
         if DEAL_USE_LLM:
             llm_decisions = await classify_items(new_items)
