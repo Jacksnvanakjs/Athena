@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>基金额度监测</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="/static/js/auto_refresh.js"></script>
   <style>
     :root {
       --bg: #f5f7fa;
@@ -169,6 +170,7 @@
       <div>
         <h1>基金额度监测</h1>
         <div class="status-bar" id="statusBar"></div>
+        <div style="color:var(--text-muted);font-size:0.8rem;margin-top:6px">自动刷新：约每 5 分钟 · 切回本页会立即补刷</div>
       </div>
       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <a href="/heatmap" class="btn" style="background:#0f172a;color:#fff;text-decoration:none">美股资金变化</a>
@@ -382,6 +384,11 @@
       await loadStatus();
       await loadFunds();
       if (funds.length) await updateChart();
+      AthenaAutoRefresh.start({
+        intervalMs: 300000,
+        staleAfterMs: 300000,
+        refresh: async () => { await refresh(); await loadStatus(); },
+      });
     }
 
     init();

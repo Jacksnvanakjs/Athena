@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>美股资金变化</title>
   <script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+  <script src="/static/js/auto_refresh.js"></script>
   <style>
     :root {
       --bg: #f5f7fa;
@@ -389,7 +390,7 @@
       if (data.success === false) {
         return `${head}行情拉取失败 · ${refresh}${src}${cov}`;
       }
-      return `${head}${refresh}${tradeDay}${session}${basis}${quote}${freshness}${src}${cov} · 每3分钟自动刷新 · 收盘后自动存快照（${snap}）`;
+      return `${head}${refresh}${tradeDay}${session}${basis}${quote}${freshness}${src}${cov} · 盘中约1分钟/休市约5分钟自动刷新 · 切回页面会补刷 · 收盘后自动存快照（${snap}）`;
     }
 
     function formatStatsMetaLine(data) {
@@ -413,7 +414,7 @@
       if (!el) return;
       if (usingLive()) {
         el.textContent =
-          '实时：当前刷新行情，每3分钟更新，盘前/盘中/盘后均可变。' +
+          '实时：盘中约每1分钟、休市约每5分钟自动刷新；切回本页会立即补刷。' +
           '收盘快照在北京次日凌晨 04:30/05:30 入库（对应美东收盘 16:30）。';
         return;
       }
@@ -1000,6 +1001,7 @@
       }
       if (!res.ok) throw new Error('行情 HTTP ' + res.status);
       liveData = await res.json();
+      lastLiveOkAt = Date.now();
       document.getElementById('metaLine').textContent = formatMetaLine(liveData, '');
       if (usingLive()) document.getElementById('note').textContent = liveData.note || '';
       updatePeriodHint();
@@ -1114,9 +1116,12 @@
     let countdownTickId = null;
     let countdownSec = 60;
     let currentRefreshMs = 180_000;
+    let lastLiveOkAt = Date.now();
+    let pageAutoRefresh = null;
 
     const LIVE_REFRESH_MS_OPEN = 60_000; // 盘前/盘中/盘后：1 分钟刷新
     const LIVE_REFRESH_MS_CLOSED = 300_000; // 休市：每 5 分钟检查一次
+    const PERIOD_REFRESH_MS = 300_000; // 非实时周期视图：5 分钟
 
     function currentIsOpenSession() {
       const s = liveData && liveData.session ? liveData.session : 'unknown';
@@ -1128,15 +1133,20 @@
       const ht = document.getElementById('heatmapTimer');
       const ft = document.getElementById('flowTimer');
       if (!usingLive()) {
-        tt.textContent = '';
-        ht.textContent = '';
-        if (ft) ft.textContent = '';
+        const label = liveReloading
+          ? '刷新中...'
+          : (countdownSec + 's 后自动刷新（周期）');
+        tt.textContent = label;
+        ht.textContent = label;
+        if (ft) ft.textContent = label;
         return;
       }
 
       let label;
       if (liveReloading) {
         label = '刷新中...';
+      } else if (document.hidden) {
+        label = '后台已暂停 · 切回后补刷';
       } else if (currentIsOpenSession()) {
         label = countdownSec + 's 后自动刷新';
       } else {
@@ -1161,9 +1171,47 @@
 
     function ensureLiveInterval() {
       if (!usingLive()) {
-        stopLiveInterval();
+        if (liveIntervalId) {
+          clearInterval(liveIntervalId);
+          liveIntervalId = null;
+        }
+        const needRestart = !pageAutoRefresh || pageAutoRefresh.intervalMs !== PERIOD_REFRESH_MS;
+        if (needRestart) {
+          if (pageAutoRefresh) pageAutoRefresh.stop();
+          currentRefreshMs = PERIOD_REFRESH_MS;
+          pageAutoRefresh = AthenaAutoRefresh.start({
+            intervalMs: PERIOD_REFRESH_MS,
+            staleAfterMs: PERIOD_REFRESH_MS,
+            refresh: async () => {
+              liveReloading = true;
+              setTimerUI();
+              try {
+                await reloadAll(false);
+                lastLiveOkAt = Date.now();
+              } finally {
+                liveReloading = false;
+                countdownSec = Math.floor(PERIOD_REFRESH_MS / 1000);
+                setTimerUI();
+              }
+            },
+          });
+        }
+        currentRefreshMs = PERIOD_REFRESH_MS;
+        countdownSec = Math.floor(PERIOD_REFRESH_MS / 1000);
+        if (!countdownTickId) {
+          countdownTickId = setInterval(() => {
+            if (usingLive() || liveReloading || document.hidden) return;
+            countdownSec = Math.max(0, countdownSec - 1);
+            setTimerUI();
+          }, 1000);
+        }
         setTimerUI();
         return;
+      }
+
+      if (pageAutoRefresh) {
+        pageAutoRefresh.stop();
+        pageAutoRefresh = null;
       }
 
       const isOpen = currentIsOpenSession();
@@ -1181,17 +1229,18 @@
       countdownSec = Math.floor(ms / 1000);
 
       countdownTickId = setInterval(() => {
-        if (!usingLive() || liveReloading) return;
+        if (!usingLive() || liveReloading || document.hidden) return;
         countdownSec = Math.max(0, countdownSec - 1);
         setTimerUI();
       }, 1000);
 
       liveIntervalId = setInterval(async () => {
-        if (!usingLive() || liveReloading) return;
+        if (!usingLive() || liveReloading || document.hidden) return;
         liveReloading = true;
         setTimerUI();
         try {
           await reloadAll(false);
+          lastLiveOkAt = Date.now();
         } finally {
           liveReloading = false;
           countdownSec = Math.floor(currentRefreshMs / 1000);
@@ -1201,6 +1250,31 @@
 
       setTimerUI();
     }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        // 仅停本页倒计时/实时轮询；周期模式的 AthenaAutoRefresh 会自行跳过 hidden
+        if (liveIntervalId) {
+          clearInterval(liveIntervalId);
+          liveIntervalId = null;
+        }
+        setTimerUI();
+        return;
+      }
+      const age = Date.now() - lastLiveOkAt;
+      const due = age >= Math.max(30_000, currentRefreshMs * 0.8);
+      if (due && !liveReloading) {
+        liveReloading = true;
+        setTimerUI();
+        reloadAll(false).finally(() => {
+          liveReloading = false;
+          lastLiveOkAt = Date.now();
+          ensureLiveInterval();
+        });
+      } else {
+        ensureLiveInterval();
+      }
+    });
 
     window.addEventListener('resize', () => { render(); renderFlow(); });
     reloadAll(false);
