@@ -64,6 +64,8 @@
     {"ticker": "CLSK", "category": "compute_hosting", "name": "cleanspark_ir", "url": "https://ir.cleanspark.com/news-events/press-releases/rss"},
     {"ticker": "CIFR", "category": "compute_hosting", "name": "cipher_ir", "url": "https://investors.ciphermining.com/news-events/press-releases/rss"},
     {"ticker": "HUT", "category": "compute_hosting", "name": "hut8_ir", "url": "https://hut8.com/investors/news-events/press-releases/rss"},
+    {"ticker": "RUM", "category": "compute_hosting", "name": "rum_group_ai_compute", "type": "google_news",
+     "query": "(RUM OR \"Rum Group\" OR Rumble OR \"Northern Data\") (Anthropic OR OpenAI OR GPU OR compute OR \"data center\" OR cloud) (deal OR agreement OR contract OR lease OR customer) when:3d"},
     {"ticker": "BITF", "category": "compute_hosting", "name": "bitfarms_ir", "url": "https://investors.bitfarms.com/news-events/press-releases/rss"},
     {"ticker": "FRVO", "category": "dc_power", "name": "fervo_gnw", "type": "google_news",
      "query": "site:globenewswire.com (Fervo OR FRVO) (Google OR PPA OR geothermal OR \"data center\") when:5d"},

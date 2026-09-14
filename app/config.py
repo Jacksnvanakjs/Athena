@@ -132,6 +132,8 @@ DEAL_SCORE_MIN_T0_T0 = int(os.getenv("DEAL_SCORE_MIN_T0_T0", "70"))
 DEAL_SCORE_MIN_T0_T1 = int(os.getenv("DEAL_SCORE_MIN_T0_T1", "60"))
 DEAL_SCORE_MIN_T1_T1 = int(os.getenv("DEAL_SCORE_MIN_T1_T1", "65"))
 DEAL_DEDUP_DAYS = int(os.getenv("DEAL_DEDUP_DAYS", "7"))
+# 同受益方「同一合作故事」去重窗（含 Finnhub/聚合滞后转载）；按 fetched_at 回溯
+DEAL_STORY_DEDUP_DAYS = int(os.getenv("DEAL_STORY_DEDUP_DAYS", "30"))
 # 全站推送上限：0=不限流（删掉环境变量仍走默认；要关限流请显式设 0）
 DEAL_MAX_PUSH_PER_HOUR = int(os.getenv("DEAL_MAX_PUSH_PER_HOUR", "0"))
 # 同一受益方：仅限制「相同新闻内容」24h 内重复推送（URL 或正文指纹），不同新闻不拦；0=关闭

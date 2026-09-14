@@ -256,6 +256,41 @@ def is_material_signed_deal(text: str) -> bool:
     return False
 
 
+def is_salvageable_ai_compute_deal(text: str) -> bool:
+    """股价标题下仍可抢救：正文点名大模型对手方 + 大额算力/GPU/云协议。
+
+    The Information 等独家常被 MarketWatch 改写成 “Shares Gain on Report of …”，
+    若整篇硬拒会漏掉 Anthropic×RUM 这类可交易受益方事件。
+    """
+    norm = _norm(text)
+    if not _NAMED_AI_COUNTERPARTY.search(norm):
+        return False
+    has_money = bool(
+        re.search(
+            r"\$[\d,.]+\s*(?:billion|million|bn)\b|[\d,.]+\s*billion|"
+            r"\d+\s*亿",
+            norm,
+        )
+    )
+    has_compute = bool(
+        re.search(
+            r"\b(?:gpu|compute|cloud|capacity|data\s*cent(?:er|re)|lease|"
+            r"megawatt|gigawatt|inference|training)\b|"
+            r"算力|云服务|数据中心",
+            norm,
+        )
+    )
+    has_deal = is_material_signed_deal(text) or bool(
+        re.search(
+            r"\b(?:signed|signs?|signing|agreement|contract|deal|lease|"
+            r"customer|reportedly|report(?:ed|s)?)\b|"
+            r"签署|协议|签约|报道",
+            norm,
+        )
+    )
+    return has_money and has_compute and has_deal
+
+
 def is_price_reaction_rehash(text: str) -> bool:
     """旧闻复述：强调股价涨跌而非新签署/新条款。"""
     norm = _norm(text)
@@ -368,8 +403,10 @@ def hard_reject_deal_item(item: RawItem) -> tuple[bool, str]:
     """人一眼会扔的垃圾：黑名单 / SEO 灌水 / 标题股价反应。
 
     LLM 主导模式下，评论、弱催化、聚合源新鲜度等交给模型判断，不在此否决。
+    例外：标题虽是股价反应，但正文已点名大模型×大额算力协议 → 不硬拒（独家转载路径）。
     """
     headline = item.headline or ""
+    blob = f"{headline}\n{item.summary or ''}"
 
     if is_blocked_news_source(item):
         return True, "低信源/SEO 站点"
@@ -378,6 +415,8 @@ def hard_reject_deal_item(item: RawItem) -> tuple[bool, str]:
         return True, "标题 SEO 灌水"
 
     if is_price_reaction_rehash(headline):
+        if is_salvageable_ai_compute_deal(blob):
+            return False, ""
         return True, "旧闻复述（股价反应稿）"
 
     return False, ""
@@ -499,7 +538,7 @@ def should_hide_weak_quality_event(event, *, keep_if_first_day_high: bool = True
 
 
 def deal_amount_keys(text: str) -> set[str]:
-    """提取金额指纹，用于同故事去重。"""
+    """提取金额/容量指纹，用于同故事去重。"""
     norm = _norm(text)
     keys: set[str] = set()
     for m in re.finditer(
@@ -514,4 +553,45 @@ def deal_amount_keys(text: str) -> set[str]:
             keys.add(f"{num}m")
     for m in re.finditer(r"\$?\s*([\d,.]+)\s*亿", text):
         keys.add(f"{m.group(1).replace(',', '')}yi")
+    # 购电/算力容量：396 MW / 1.2 GW
+    for m in re.finditer(
+        r"([\d,.]+)\s*(?:-|\s)?\s*(megawatt|gigawatt|mw|gw)\b",
+        norm,
+    ):
+        num = m.group(1).replace(",", "")
+        unit = m.group(2)
+        keys.add(f"{num}{'gw' if unit.startswith('g') else 'mw'}")
+    for m in re.finditer(r"([\d,.]+)\s*(?:兆瓦|吉瓦)", text):
+        num = m.group(1).replace(",", "")
+        keys.add(f"{num}{'gw' if '吉' in m.group(0) else 'mw'}")
     return keys
+
+
+_DEAL_STORY_CUES = (
+    "power purchase",
+    "ppa",
+    "购电",
+    "电力协议",
+    "geothermal",
+    "地热",
+    "gpu",
+    "compute",
+    "capacity agreement",
+    "cloud deal",
+    "算力",
+    "data center",
+    "data centre",
+    "colocation",
+    "lease",
+    "offtake",
+)
+
+
+def shared_deal_story_cues(text_a: str, text_b: str) -> set[str]:
+    """两边正文共同命中的合作类型线索（PPA/算力等）。"""
+    na, nb = _norm(text_a), _norm(text_b)
+    hit: set[str] = set()
+    for cue in _DEAL_STORY_CUES:
+        if cue in na and cue in nb:
+            hit.add(cue)
+    return hit

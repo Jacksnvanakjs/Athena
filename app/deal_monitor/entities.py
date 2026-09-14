@@ -152,19 +152,18 @@ class EntityRegistry:
         for alias, ticker, uid in self._aliases:
             if not self._alias_in_text(alias, norm):
                 continue
-                key = ticker or uid or alias
-                if key not in found:
-                    display = alias
-                    for orig in self._aliases:
-                        oname, ot, ou = orig
-                        if (ticker and ot == ticker) or (uid and ou == uid):
-                            if len(oname) > len(display):
-                                display = oname
-                    found[key] = Entity(
-                        name=display.title() if display.islower() else display,
-                        ticker=ticker,
-                        unlisted_id=uid,
-                    )
+            key = ticker or uid or alias
+            if key not in found:
+                display = alias
+                for oname, ot, ou in self._aliases:
+                    if (ticker and ot == ticker) or (uid and ou == uid):
+                        if len(oname) > len(display):
+                            display = oname
+                found[key] = Entity(
+                    name=display.title() if display.islower() else display,
+                    ticker=ticker,
+                    unlisted_id=uid,
+                )
         return list(found.values())
 
 

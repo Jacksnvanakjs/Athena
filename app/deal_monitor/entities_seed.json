@@ -31,6 +31,7 @@
     {"names": ["Digital Realty"], "ticker": "DLR"},
     {"names": ["IREN", "Iris Energy"], "ticker": "IREN"},
     {"names": ["Hut 8", "Hut 8 Mining"], "ticker": "HUT"},
+    {"names": ["Rum Group", "RUM Group", "Rumble", "Rumble Inc"], "ticker": "RUM"},
     {"names": ["CleanSpark"], "ticker": "CLSK"},
     {"names": ["Bitfarms"], "ticker": "BITF"},
     {"names": ["SoftBank"], "ticker": "SFTBY"},

@@ -85,6 +85,8 @@ def _party_hint(text: str) -> str | None:
         ("AWS", "AWS"),
         ("NVIDIA", "英伟达"),
         ("Nvidia", "英伟达"),
+        ("Rum Group", "Rum Group"),
+        ("Rumble", "Rumble"),
         ("Verizon", "Verizon"),
         ("Corning", "康宁"),
         ("Salesforce", "Salesforce"),

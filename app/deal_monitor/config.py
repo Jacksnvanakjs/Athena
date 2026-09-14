@@ -9,6 +9,7 @@ from app.config import (
     DEAL_LLM_PRIMARY,
     DEAL_MAX_PUSH_PER_BENEFICIARY_24H,
     DEAL_MAX_PUSH_PER_HOUR,
+    DEAL_STORY_DEDUP_DAYS,
     DEAL_LLM_MODEL,
     DEAL_POLL_INTERVAL_MIN,
     DEAL_PUSH_ENABLED,
@@ -146,6 +147,11 @@ GOOGLE_NEWS_QUERIES = [
     '("Hut 8" OR HUT) (Anthropic OR Lambda OR Nvidia OR Nueces OR "data center") when:3d',
     '(Anthropic OR OpenAI OR "AI agent" OR Agentforce OR Claudeforce) '
     "(partnership OR collaboration OR integration) when:3d",
+    # Anthropic/OpenAI 点名云算力客户（The Information 等独家常被 MW/转载改写成股价标题）
+    '(Anthropic OR OpenAI) (RUM OR Rumble OR "Rum Group" OR "Northern Data") '
+    "(compute OR GPU OR cloud OR billion OR lease OR capacity) when:3d",
+    '(Anthropic OR OpenAI) ("$13" OR "$13.7" OR billion) '
+    "(compute OR GPU OR cloud OR lease OR capacity OR customer) when:2d",
     '"strategic partnership" (Anthropic OR OpenAI OR Claude) when:3d',
     '("cloud deal" OR "compute deal" OR "capacity agreement") '
     "(Anthropic OR Lambda OR Hut 8 OR CoreWeave OR Nscale) when:7d",
@@ -165,8 +171,9 @@ FINNHUB_NEWS_TICKERS = sorted(set([
     "AMAT", "LRCX", "KLAC", "SNPS", "CDNS", "MCHP",
     # 数据中心 / 网络
     "EQIX", "DLR", "VRT", "ANET", "CSCO", "NTNX", "CIEN",
-    # 算力租赁 / 挖矿
+    # 算力租赁 / 挖矿 / AI 云
     "CRWV", "NBIS", "APLD", "CORZ", "WULF", "IREN", "RIOT", "MARA", "CLSK", "CIFR", "HUT", "BITF",
+    "RUM",
     # 光模块 / AI 光纤骨干（康宁×电信长单）
     "LITE", "COHR", "GLW", "VZ",
     # 企业 AI / 安全

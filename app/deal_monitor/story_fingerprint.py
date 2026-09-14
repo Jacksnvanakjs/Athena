@@ -63,3 +63,48 @@ def is_same_story(
         if tip and longer.startswith(tip):
             return True
     return False
+
+
+def is_related_deal_story(
+    headline_a: str | None,
+    summary_a: str | None,
+    headline_b: str | None,
+    summary_b: str | None,
+    *,
+    url_a: str | None = None,
+    url_b: str | None = None,
+    same_anchor: bool = False,
+) -> bool:
+    """同文，或（同锚点时）短转载与长通稿共享合作线索。
+
+    Finnhub 等常把旧 PPA 改写成一两句「building on partnership…」，
+    指纹对不上，但受益方+锚点+购电/算力线索仍应视为同一故事。
+    """
+    if is_same_story(
+        headline_a,
+        summary_a,
+        headline_b,
+        summary_b,
+        url_a=url_a,
+        url_b=url_b,
+    ):
+        return True
+    if not same_anchor:
+        return False
+
+    from app.deal_monitor.content_filter import deal_amount_keys, shared_deal_story_cues
+
+    blob_a = f"{headline_a or ''}\n{summary_a or ''}"
+    blob_b = f"{headline_b or ''}\n{summary_b or ''}"
+    if deal_amount_keys(blob_a) & deal_amount_keys(blob_b):
+        return True
+    cues = shared_deal_story_cues(blob_a, blob_b)
+    if not cues:
+        return False
+    # 至少一类合作线索重合，且两边都像在说「协议/合作」而非无关点评
+    dealish = re.compile(
+        r"\b(?:agreement|deal|contract|partnership|ppa|lease|customer|signed|signs)\b|"
+        r"协议|合作|签署|购电|签约",
+        re.I,
+    )
+    return bool(dealish.search(blob_a) and dealish.search(blob_b))

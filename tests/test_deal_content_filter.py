@@ -78,6 +78,26 @@ def test_equinix_shares_rise_rejected():
     assert "股价" in reason or "旧闻" in reason
 
 
+def test_rum_anthropic_price_headline_salvaged():
+    """MarketWatch 式股价标题 + Anthropic×RUM 大额算力正文：应放行。"""
+    from app.deal_monitor.content_filter import is_salvageable_ai_compute_deal
+
+    h = "Rum Group Shares Gain on Report of $13.7 Billion Computing Deal With Anthropic"
+    s = (
+        "Shares of Rum Group rose after The Information reported a computing deal "
+        "with Anthropic worth $13.7 billion. Anthropic would lease GPU compute capacity "
+        "at a Maysville, Georgia data center under a six-year agreement."
+    )
+    assert is_price_reaction_rehash(h)
+    assert is_salvageable_ai_compute_deal(f"{h}\n{s}")
+    reject, reason = hard_reject_deal_item(
+        _item(h, source="google_news:MarketWatch", summary=s)
+    )
+    assert reject is False, reason
+    reject2, _ = reject_deal_item(_item(h, source="google_news:MarketWatch", summary=s))
+    assert reject2 is False
+
+
 def test_fervo_jumps_rejected_even_with_signs_deal():
     h = "Fervo Energy Stock Jumps 24% After Google Signs Utah Geothermal Power Deal"
     reject, reason = reject_deal_item(_item(h, source="finnhub:GOOGL"))
@@ -119,6 +139,10 @@ def test_amount_keys_for_story_dedup():
     assert deal_amount_keys("Anthropic signs $35B Cloud Deal") & deal_amount_keys(
         "Nvidia Circular AI: Anthropic Signs $35B Cloud Deal Using Hut 8 Campus"
     )
+    assert "396mw" in deal_amount_keys(
+        "Fervo Energy and Google Sign 396 MW PPA for Cape Station"
+    )
+    assert "396mw" in deal_amount_keys("签署约396兆瓦购电协议")
 
 
 def test_should_hide_reddit_mshale_from_db_fields():
@@ -245,3 +269,16 @@ def test_mining_pivot_headline_hidden():
         published_at=datetime(2026, 9, 2, tzinfo=timezone.utc),
     )
     assert should_hide_deal_event(event) is True
+
+
+def test_rum_group_entity_extractable():
+    from app.deal_monitor.entities import registry
+
+    registry._loaded = False
+    registry._aliases = []
+    registry.load_seed()
+    ents = registry.extract_entities(
+        "Anthropic signed a $13.7 billion compute deal with Rum Group"
+    )
+    assert any(e.ticker == "RUM" for e in ents)
+    assert any(e.unlisted_id == "anthropic" for e in ents)

@@ -25,6 +25,7 @@ from app.deal_monitor.config import (
     DEAL_PUSH_ENABLED,
     DEAL_PUSH_MAX_AGE_DAYS,
     DEAL_PUSH_RETRY_FRESH_MIN,
+    DEAL_STORY_DEDUP_DAYS,
     DEAL_USE_LLM,
 )
 from app.deal_monitor.entities import Entity, registry
@@ -42,7 +43,7 @@ from app.deal_monitor.content_filter import (
     should_hide_deal_event,
     should_hide_weak_quality_event,
 )
-from app.deal_monitor.story_fingerprint import is_same_story
+from app.deal_monitor.story_fingerprint import is_related_deal_story, is_same_story
 from app.deal_monitor.ingest_policy import (
     llm_allows_beneficiary_ingest,
     llm_primary_enabled,
@@ -150,20 +151,36 @@ def _anchor_dedup_key(anchor_ticker: str | None, anchor_name: str | None) -> str
     return (anchor_name or "").strip().lower()
 
 
+def _anchor_matches_prior(prior: DealEvent, anchor_key: str | None) -> bool:
+    if not anchor_key:
+        return False
+    ak = anchor_key.upper()
+    if prior.anchor_ticker and prior.anchor_ticker.upper() == ak:
+        return True
+    name = (prior.anchor_name or "").strip()
+    if name and (name.lower() == anchor_key.lower() or name.upper() == ak):
+        return True
+    return False
+
+
 def _dedup_blocked(
     db: Session,
     beneficiary_ticker: str,
     is_update: bool,
     anchor_key: str | None = None,
     headline: str | None = None,
+    summary: str | None = None,
 ) -> bool:
-    """同一受益方+锚点 7 日内不重复；同受益方+同金额故事也不重复（防换锚点洗稿）。"""
+    """同一受益方+锚点 7 日内不重复；30 日内同故事（指纹/容量/合作线索）也不重复。"""
     if is_update:
         return False
-    since = now_beijing() - timedelta(days=DEAL_DEDUP_DAYS)
+    since_hard = now_beijing() - timedelta(days=DEAL_DEDUP_DAYS)
+    since_story = now_beijing() - timedelta(days=max(DEAL_STORY_DEDUP_DAYS, DEAL_DEDUP_DAYS))
+    blob = f"{headline or ''}\n{summary or ''}"
+
     q = db.query(DealEvent).filter(
         DealEvent.beneficiary_ticker == beneficiary_ticker,
-        DealEvent.fetched_at >= since,
+        DealEvent.fetched_at >= since_hard,
         DealEvent.is_update.is_(False),
     )
     if anchor_key:
@@ -178,20 +195,31 @@ def _dedup_blocked(
     if q.first() is not None:
         return True
 
-    amounts = deal_amount_keys(headline or "")
-    if not amounts:
-        return False
     priors = (
         db.query(DealEvent)
         .filter(
             DealEvent.beneficiary_ticker == beneficiary_ticker,
-            DealEvent.fetched_at >= since,
+            DealEvent.fetched_at >= since_story,
             DealEvent.is_update.is_(False),
         )
         .all()
     )
+    amounts = deal_amount_keys(blob)
     for prior in priors:
-        if amounts & deal_amount_keys(prior.headline or ""):
+        same_anchor = _anchor_matches_prior(prior, anchor_key)
+        if is_related_deal_story(
+            headline,
+            summary,
+            prior.headline,
+            prior.summary,
+            url_a=None,
+            url_b=prior.source_url,
+            same_anchor=same_anchor,
+        ):
+            return True
+        if amounts and amounts & deal_amount_keys(
+            f"{prior.headline or ''}\n{prior.summary or ''}"
+        ):
             return True
     return False
 
@@ -209,10 +237,10 @@ def _push_rate_limited(db: Session, event: DealEvent) -> bool:
     """限流：0=关闭对应闸门。
 
     - 小时总上限：全库成功推送条数（DEAL_MAX_PUSH_PER_HOUR）
-    - 受益方：只拦「同一新闻内容」重复推（URL 或正文指纹），不同新闻可继续推
+    - 受益方：STORY_DEDUP 窗内已成功推送过同/相关故事则不重复推
     """
     ticker = (event.beneficiary_ticker or "").strip().upper()
-    since_24h = now_beijing() - timedelta(hours=24)
+    since_story = now_beijing() - timedelta(days=max(DEAL_STORY_DEDUP_DAYS, DEAL_DEDUP_DAYS))
     since_1h = now_beijing() - timedelta(hours=1)
     success_like = and_(
         DealEvent.push_channel.isnot(None),
@@ -221,30 +249,32 @@ def _push_rate_limited(db: Session, event: DealEvent) -> bool:
         ),
     )
 
-    if DEAL_MAX_PUSH_PER_BENEFICIARY_24H > 0 and ticker:
+    if ticker and DEAL_STORY_DEDUP_DAYS > 0:
         priors = (
             db.query(DealEvent)
             .filter(
                 DealEvent.beneficiary_ticker == ticker,
                 DealEvent.pushed_at.isnot(None),
-                DealEvent.pushed_at >= since_24h,
+                DealEvent.pushed_at >= since_story,
                 success_like,
             )
             .all()
         )
-        same = 0
+        anchor_key = _anchor_dedup_key(
+            getattr(event, "anchor_ticker", None),
+            getattr(event, "anchor_name", None),
+        )
         for prior in priors:
-            if is_same_story(
+            if is_related_deal_story(
                 event.headline,
                 event.summary,
                 prior.headline,
                 prior.summary,
                 url_a=event.source_url,
                 url_b=prior.source_url,
+                same_anchor=_anchor_matches_prior(prior, anchor_key),
             ):
-                same += 1
-                if same >= DEAL_MAX_PUSH_PER_BENEFICIARY_24H:
-                    return True
+                return True
 
     if DEAL_MAX_PUSH_PER_HOUR > 0:
         global_count = (
@@ -681,8 +711,15 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         if _is_duplicate(db, item.source_url, h_hash, ticker):
             stats["reason"] = "URL/标题去重"
             continue
-        if _dedup_blocked(db, ticker, is_update, anchor_key=anchor_key, headline=item.headline):
-            logger.info("7 天去重跳过 %s (anchor=%s)", ticker, anchor_key)
+        if _dedup_blocked(
+            db,
+            ticker,
+            is_update,
+            anchor_key=anchor_key,
+            headline=item.headline,
+            summary=item.summary,
+        ):
+            logger.info("7/30 天故事去重跳过 %s (anchor=%s)", ticker, anchor_key)
             continue
 
         should_push = roles.should_push and not should_soft_skip_push(quality)
