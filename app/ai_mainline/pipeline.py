@@ -26,7 +26,7 @@ ET = ZoneInfo("America/New_York")
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 300  # 5 分钟：重复打开页不重打全市场
-_COMPUTE_BUDGET_SEC = 40.0  # 东财∥Finnhub 报价 + 东财/Yahoo 日 K；超时回退库内快照
+_COMPUTE_BUDGET_SEC = 75.0  # 报价 + 5D/20D 日K；超时回退库内快照（不编造）
 
 
 def _today_et() -> date:
@@ -216,12 +216,12 @@ async def _compute_mainline_fresh() -> dict[str, Any]:
 
     themes_cfg = enabled_themes()
     symbols = all_symbols()
-    import asyncio
     quotes, source = await fetch_quotes(symbols, allow_slow_fill=False)
+    # 勿用外层 wait_for 整段掐死：内部已有超时，超时后仍返回已算到的部分（缺数保持 None，不编造）
     try:
-        period = await asyncio.wait_for(fetch_period_returns(symbols), timeout=32)
-    except asyncio.TimeoutError:
-        logger.warning("period returns budget 32s exceeded; use empty period")
+        period = await fetch_period_returns(symbols)
+    except Exception as exc:
+        logger.warning("period returns failed: %s", exc)
         period = {s: {"ret_5d": None, "ret_20d": None} for s in symbols}
 
     raw_themes = [theme_metrics(t, quotes, period) for t in themes_cfg]

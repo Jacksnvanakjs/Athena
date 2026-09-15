@@ -1628,7 +1628,7 @@ async def fetch_period_returns(
     try:
         done, pending = await asyncio.wait(
             tasks,
-            timeout=28,
+            timeout=45,
             return_when=asyncio.ALL_COMPLETED,
         )
         for task in pending:

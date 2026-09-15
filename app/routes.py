@@ -169,16 +169,30 @@ def system_status():
         NVDA_SIGNAL_ENABLED,
     )
     from app.database import DealEvent, EarningsEvent, NvdaSignalEvent
-    from app.deal_monitor.content_filter import should_hide_deal_event
+    from sqlalchemy import func, or_
 
     def _counts(db: Session):
-        deals = [
-            e for e in db.query(DealEvent).all()
-            if not is_test_source_url(e.source_url) and not should_hide_deal_event(e)
-        ]
-        nvda = [e for e in db.query(NvdaSignalEvent).all() if not is_test_source_url(e.source_url)]
-        earn = db.query(EarningsEvent).filter(EarningsEvent.status.in_(["upcoming", "pushed"])).count()
-        return len(deals), len(nvda), earn
+        # 轻量计数：勿全表加载 + 逐条 should_hide（Turso 会拖垮 /api/status）
+        deal_total = (
+            db.query(func.count(DealEvent.id))
+            .filter(
+                or_(
+                    DealEvent.anchor_ticker.is_(None),
+                    DealEvent.beneficiary_ticker.is_(None),
+                    DealEvent.anchor_ticker != DealEvent.beneficiary_ticker,
+                )
+            )
+            .scalar()
+            or 0
+        )
+        nvda_total = db.query(func.count(NvdaSignalEvent.id)).scalar() or 0
+        earn = (
+            db.query(func.count(EarningsEvent.id))
+            .filter(EarningsEvent.status.in_(["upcoming", "pushed"]))
+            .scalar()
+            or 0
+        )
+        return int(deal_total), int(nvda_total), int(earn)
 
     from app.scheduler import scheduler_status
 

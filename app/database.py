@@ -610,13 +610,22 @@ def _ensure_sqlite_columns() -> None:
         for table, column, coltype in alters:
             try:
                 rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
-            except Exception:
-                # 非 sqlite 方言时跳过（新环境靠 create_all）
-                continue
-            names = {r[1] for r in rows}
+                names = {r[1] for r in rows}
+            except Exception as exc:
+                logger.warning("PRAGMA table_info(%s) 失败: %s", table, exc)
+                # 仍尝试 ALTER；列已存在时下面会吞错
+                names = set()
             if column in names:
                 continue
-            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+                logger.info("已补列 %s.%s", table, column)
+            except Exception as exc:
+                # 并发启动/已存在
+                msg = str(exc).lower()
+                if "duplicate" in msg or "exists" in msg or "already" in msg:
+                    continue
+                logger.warning("ALTER %s.%s 失败: %s", table, column, exc)
 
 
 def init_db():

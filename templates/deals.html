@@ -736,7 +736,7 @@
 
     async function loadMainline() {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 65000);
+      const timer = setTimeout(() => ctrl.abort(), 90000);
       try {
         const res = await fetch('/api/ai-mainline', { signal: ctrl.signal });
         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -1285,44 +1285,55 @@
       if (fdMove) params.set('first_day_move', fdMove);
       if (document.getElementById('pushed_only').checked) params.set('pushed_only', 'true');
 
-      const res = await fetch('/api/deals?' + params);
-      const items = await res.json();
       const tbody = document.getElementById('tbody');
       const empty = document.getElementById('empty');
-      tbody.innerHTML = '';
-      if (!items.length) {
-        empty.style.display = 'block';
-        renderDealAnomalies([]);
+      try {
+        const res = await fetch('/api/deals?' + params);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const items = await res.json();
+        if (!Array.isArray(items)) throw new Error('响应格式异常');
+        tbody.innerHTML = '';
+        if (!items.length) {
+          empty.style.display = 'block';
+          empty.innerHTML = '<strong>暂无快讯记录</strong><br>可点击右上角「立即扫描」手动拉取一轮。';
+          renderDealAnomalies([]);
+          loadStats();
+          loadStatus();
+          return;
+        }
+        empty.style.display = 'none';
+        for (const row of items) {
+          const tr = document.createElement('tr');
+          tr.className = rowClass(row) + (row.score_gap_large ? ' fd-anom' : '');
+          const gapHint = (row.category !== 'nvda_signal' && row.score_gap_large)
+            ? `<div class="strategy-hint">分差${row.score_gap > 0 ? '+' : ''}${row.score_gap}</div>`
+            : '';
+          tr.innerHTML = `
+            <td>${fmtCategory(row)}</td>
+            <td>${fmtPublished(row)}</td>
+            <td>${fmtBeneficiary(row)}</td>
+            <td>${fmtAnchor(row)}</td>
+            <td>${row.headline}</td>
+            <td>${fmtMaterialityScore(row, gapHint)}</td>
+            <td>${fmtFirstDayBand(row)}</td>
+            <td>${fmtFirstDayScoreCell(row)}</td>
+            <td>${fmtFirstDayRet(row)}</td>
+            <td>${fmtRelation(row)}</td>
+            <td class="${row.pushed ? 'pushed' : ''}">${fmtPushChannel(row)}</td>
+            <td>${fmtSource(row)}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+        renderDealAnomalies(items);
         loadStats();
         loadStatus();
-        return;
+      } catch (e) {
+        tbody.innerHTML = '';
+        empty.style.display = 'block';
+        empty.innerHTML = `<strong>合作列表加载失败</strong><br>${(e && e.message) || '请稍后重试或检查服务端日志（常见原因：库缺列未迁移）。'}`;
+        renderDealAnomalies([]);
+        loadStatus();
       }
-      empty.style.display = 'none';
-      for (const row of items) {
-        const tr = document.createElement('tr');
-        tr.className = rowClass(row) + (row.score_gap_large ? ' fd-anom' : '');
-        const gapHint = (row.category !== 'nvda_signal' && row.score_gap_large)
-          ? `<div class="strategy-hint">分差${row.score_gap > 0 ? '+' : ''}${row.score_gap}</div>`
-          : '';
-        tr.innerHTML = `
-          <td>${fmtCategory(row)}</td>
-          <td>${fmtPublished(row)}</td>
-          <td>${fmtBeneficiary(row)}</td>
-          <td>${fmtAnchor(row)}</td>
-          <td>${row.headline}</td>
-          <td>${fmtMaterialityScore(row, gapHint)}</td>
-          <td>${fmtFirstDayBand(row)}</td>
-          <td>${fmtFirstDayScoreCell(row)}</td>
-          <td>${fmtFirstDayRet(row)}</td>
-          <td>${fmtRelation(row)}</td>
-          <td class="${row.pushed ? 'pushed' : ''}">${fmtPushChannel(row)}</td>
-          <td>${fmtSource(row)}</td>
-        `;
-        tbody.appendChild(tr);
-      }
-      renderDealAnomalies(items);
-      loadStats();
-      loadStatus();
     }
 
     async function triggerScan() {
