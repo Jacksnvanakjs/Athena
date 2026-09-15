@@ -252,7 +252,7 @@ async def _resolve_live_post_price(
         if abs(cand.price / pre_close - 1.0) >= 0.002:
             return cand
 
-    # 1) TickDB/热力图（已解析 post_market_quote）
+    # 1) 热力图多源报价（已含盘后优先逻辑的源）
     try:
         from app.market_data import fetch_quotes
 
@@ -588,7 +588,7 @@ async def _pre_close_only(ticker: str, as_of: date) -> float | None:
 
 
 async def _batch_resolve_live_prices(tickers: list[str]) -> dict[str, _LivePx]:
-    """批量解析盘后价：CNBC → Yahoo AH → TickDB/热力图 → Finnhub（少打易限流源）。"""
+    """批量解析盘后价：CNBC → Yahoo AH → 热力图多源 → Finnhub（少打易限流源）。"""
     import asyncio
 
     uniq = list(dict.fromkeys(tickers))
@@ -611,7 +611,7 @@ async def _batch_resolve_live_prices(tickers: list[str]) -> dict[str, _LivePx]:
             out[t] = ah
         await asyncio.sleep(0.35)
 
-    # 3) TickDB / 热力图（易 429，放后）
+    # 3) 热力图多源报价
     still = [t for t in uniq if t not in out]
     if still:
         try:

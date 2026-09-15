@@ -3,10 +3,9 @@
 行情源（轮动补缺，宁缺勿错）：
   1. 东财 ulist 批量 ∥ Finnhub /quote
   2. 轮动：TradingView / Finviz / Alpha Vantage（有 Key）
-  3. TickDB（可选）
-  4. Yahoo Finance（本地可设 HEATMAP_SKIP_YAHOO=1）
-  5. AKShare 其余 / Tushare
-区间 5/20 日：热力快照 → 东财日 K ∥ Yahoo → 其它日线轮动。
+  3. Yahoo Finance（本地可设 HEATMAP_SKIP_YAHOO=1）
+  4. AKShare 其余 / Tushare
+区间 5/20 日：Turso 日 K → 多源轮动（Nasdaq/东财/付费/Yahoo…）。
 资金流入 = 涨跌幅 × 成交额 / 10亿；排行占比为样本内比重。
 """
 
@@ -40,10 +39,6 @@ YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_SPARK = "https://query1.finance.yahoo.com/v7/finance/spark"
 FINNHUB_QUOTE = "https://finnhub.io/api/v1/quote"
 FINNHUB_QUOTE_CONCURRENCY = 6
-TICKDB_TICKER = "https://api.tickdb.ai/v1/market/ticker"
-TICKDB_BATCH_SIZE = 25
-TICKDB_BATCH_PAUSE = 1.5  # 秒，避免免费额度 429
-
 # 成功样本过少时视为失败（避免「全 0」或「单板块 100%」）
 _MIN_QUOTE_RATIO = 0.55
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
@@ -1111,18 +1106,6 @@ def _fetch_tushare_sync(symbols: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
-def _tickdb_us_symbol(symbol: str) -> str:
-    sym = symbol.upper().strip()
-    return sym if sym.endswith(".US") else f"{sym}.US"
-
-
-def _symbol_from_tickdb(code: str) -> str:
-    text = str(code or "").upper().strip()
-    if text.endswith(".US"):
-        return text[:-3]
-    return text.split(".")[0]
-
-
 def _parse_finnhub_quote(data: dict[str, Any], symbol: str) -> dict[str, Any] | None:
     """解析 Finnhub /quote。
 
@@ -1236,156 +1219,6 @@ async def _fetch_finnhub_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]
     return out
 
 
-def _parse_tickdb_ticker(item: dict[str, Any], symbol: str) -> dict[str, Any] | None:
-    """解析 TickDB ticker；盘后/盘前优先用 extended quote（AMC 财报当晚关键）。"""
-    reg_price = _to_float(item.get("last_price") or item.get("price") or item.get("last"))
-    post = item.get("post_market_quote") or {}
-    pre = item.get("pre_market_quote") or {}
-    post_px = _to_float(post.get("last_done") or post.get("last_price") or post.get("price"))
-    pre_px = _to_float(pre.get("last_done") or pre.get("last_price") or pre.get("price"))
-    reg_ts = item.get("timestamp")
-    post_ts = post.get("timestamp")
-    pre_ts = pre.get("timestamp")
-
-    price = reg_price
-    volume = _to_float(item.get("volume_24h") or item.get("volume")) or 0.0
-    quote_ts = reg_ts
-    session_tag = "REGULAR"
-
-    # 盘后价时间戳 ≥ 常规收盘 → 用盘后（隔夜仍保留财报反应）
-    if (
-        post_px is not None
-        and post_ts is not None
-        and (reg_ts is None or int(post_ts) >= int(reg_ts))
-    ):
-        price = post_px
-        quote_ts = post_ts
-        session_tag = "POST"
-        volume = _to_float(post.get("volume")) or volume
-    elif (
-        pre_px is not None
-        and pre_ts is not None
-        and (reg_ts is None or int(pre_ts) >= int(reg_ts))
-    ):
-        price = pre_px
-        quote_ts = pre_ts
-        session_tag = "PRE"
-        volume = _to_float(pre.get("volume")) or volume
-
-    if price is None:
-        return None
-
-    change_pct = _to_float(
-        item.get("price_change_percent_24h")
-        or item.get("change_percent")
-        or item.get("change_pct")
-    )
-    prev = _to_float(item.get("prev_close") or item.get("previous_close"))
-    if session_tag in ("POST", "PRE") and prev and prev > 0:
-        change_pct = round((price - prev) / prev * 100, 2)
-    elif change_pct is None:
-        change = _to_float(item.get("price_change_24h") or item.get("change"))
-        if change is not None and price:
-            base = price - change
-            change_pct = (change / base * 100) if base else 0.0
-        elif prev and prev > 0:
-            change_pct = round((price - prev) / prev * 100, 2)
-        else:
-            change_pct = 0.0
-
-    quote_time = None
-    quote_time_et = None
-    if quote_ts:
-        try:
-            dt = datetime.fromtimestamp(int(quote_ts) / 1000, tz=_US_TZ)
-            quote_time_et = dt.strftime("%Y-%m-%d %H:%M:%S %Z")
-            quote_time = dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
-        except (TypeError, ValueError, OSError):
-            pass
-    row = _quote_row(
-        symbol,
-        name=str(item.get("name") or symbol),
-        price=price,
-        change_pct=change_pct,
-        volume=volume,
-        quote_time=quote_time,
-        quote_time_et=quote_time_et,
-    )
-    if row is not None:
-        row["session"] = session_tag
-    return row
-
-
-async def _fetch_tickdb(symbols: list[str]) -> dict[str, dict[str, Any]]:
-    from app.config import TICKDB_API_KEY
-
-    token = (TICKDB_API_KEY or "").strip()
-    if not token:
-        return {}
-    wanted = set(symbols)
-    out: dict[str, dict[str, Any]] = {}
-    headers = {"X-API-Key": token}
-    async with httpx.AsyncClient(headers=headers, timeout=30, follow_redirects=True) as client:
-        batch_count = (len(symbols) + TICKDB_BATCH_SIZE - 1) // TICKDB_BATCH_SIZE
-        for bi, i in enumerate(range(0, len(symbols), TICKDB_BATCH_SIZE)):
-            chunk = symbols[i : i + TICKDB_BATCH_SIZE]
-            tick_syms = ",".join(_tickdb_us_symbol(s) for s in chunk)
-            parsed_batch = False
-            for attempt in range(5):
-                try:
-                    resp = await client.get(
-                        TICKDB_TICKER,
-                        params={"symbols": tick_syms, "type": "stock"},
-                    )
-                    if resp.status_code == 401:
-                        logger.warning(
-                            "TickDB unauthorized/expired (401)，中止后续批次"
-                        )
-                        return out
-                    if resp.status_code == 429:
-                        wait = TICKDB_BATCH_PAUSE * (attempt + 2)
-                        logger.warning("TickDB rate limited, retry in %.1fs", wait)
-                        await asyncio.sleep(wait)
-                        continue
-                    if resp.status_code != 200:
-                        logger.warning("TickDB ticker HTTP %s", resp.status_code)
-                        break
-                    body = resp.json()
-                    code = body.get("code")
-                    if code not in (0, "0", None):
-                        logger.warning(
-                            "TickDB ticker error code=%s msg=%s",
-                            code,
-                            body.get("message") or body.get("error"),
-                        )
-                        # 过期等业务错误：勿空耗后续批次
-                        if code in (1005, "1005"):
-                            return out
-                        break
-                    data = body.get("data") or []
-                    if not isinstance(data, list):
-                        break
-                    for item in data:
-                        if not isinstance(item, dict):
-                            continue
-                        sym = _symbol_from_tickdb(str(item.get("symbol") or ""))
-                        if sym not in wanted or sym in out:
-                            continue
-                        parsed = _parse_tickdb_ticker(item, sym)
-                        if parsed:
-                            out[sym] = parsed
-                    parsed_batch = True
-                    break
-                except Exception as exc:
-                    logger.warning("TickDB ticker batch failed: %s", exc)
-                    break
-            if not parsed_batch:
-                logger.warning("TickDB batch %s/%s skipped", bi + 1, batch_count)
-            if bi + 1 < batch_count:
-                await asyncio.sleep(TICKDB_BATCH_PAUSE)
-    return out
-
-
 async def _fetch_tushare(symbols: list[str]) -> dict[str, dict[str, Any]]:
     import asyncio
 
@@ -1465,11 +1298,11 @@ async def _fetch_quotes(
     *,
     allow_slow_fill: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """东财 ulist ∥ Finnhub → TickDB → Yahoo →（可选）AKShare 慢补 → Tushare。
+    """东财 ulist ∥ Finnhub → 轮动补缺 → Yahoo →（可选）AKShare 慢补 → Tushare。
 
     东财与 Finnhub 并行：Finnhub 价/涨跌（昨收重算）优先；东财补成交量与缺票。
     """
-    from app.config import FINNHUB_API_KEY, TICKDB_API_KEY
+    from app.config import FINNHUB_API_KEY
 
     sources_used: list[str] = []
     merged: dict[str, dict[str, Any]] = {}
@@ -1522,13 +1355,6 @@ async def _fetch_quotes(
                 sources_used.extend(used)
         except Exception as exc:
             logger.warning("rotating quote fill failed: %s", exc)
-
-    missing = [s for s in symbols if s not in merged]
-    if missing and (TICKDB_API_KEY or "").strip():
-        tickdb = await _fetch_tickdb(missing)
-        if tickdb:
-            merged.update(tickdb)
-            sources_used.append(f"TickDB:{len(tickdb)}")
 
     missing = [s for s in symbols if s not in merged]
     skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in ("1", "true", "yes")
@@ -1960,12 +1786,10 @@ async def _period_returns_from_yahoo(
 
 
 def _heatmap_failure(source: str, quote_count: int, total: int) -> dict[str, Any]:
-    from app.config import FINNHUB_API_KEY, TICKDB_API_KEY
+    from app.config import FINNHUB_API_KEY
 
     if not (FINNHUB_API_KEY or "").strip():
         hint = "请配置 FINNHUB_API_KEY（https://finnhub.io 免费注册）。"
-    elif (TICKDB_API_KEY or "").strip():
-        hint = "已尝试 Finnhub / TickDB / Yahoo / AKShare，请稍后点击刷新。"
     else:
         hint = "已尝试 Finnhub / Yahoo / AKShare，请稍后点击刷新。"
     note = f"行情拉取失败（{source} 仅 {quote_count}/{total}）。{hint}"
