@@ -1592,9 +1592,12 @@ async def _fetch_quotes(
 async def fetch_period_returns(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
-    """近 5/20 交易日累计涨跌（%）。快照 → 东财日 K ∥ Yahoo 日 K。
+    """近 5/20 交易日累计涨跌（%）。
 
-    缺数保持 None，绝不编造。Finnhub 免费档无 /stock/candle，区间不用 Finnhub。
+    顺序：Turso 日 K（新鲜）→ 热力图快照（新鲜且够密）→ 磁盘缓存（新鲜）
+    → 多源轮动拉日 K（Nasdaq/东财/付费/Yahoo…）→ 过期库仅作最后兜底。
+    只使用校验通过的真实收盘，禁止编造或堆无效序列。
+    Finnhub 免费档无 candle。period 不读 HEATMAP_SKIP_YAHOO。
     """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     out: dict[str, dict[str, float | None]] = {
@@ -1607,61 +1610,181 @@ async def fetch_period_returns(
     for sym, vals in from_snap.items():
         out[sym].update(vals)
 
-    missing = [
-        s
-        for s in uniq
-        if out[s].get("ret_5d") is None or out[s].get("ret_20d") is None
-    ]
+    def _incomplete() -> list[str]:
+        return [
+            s
+            for s in uniq
+            if out[s].get("ret_5d") is None or out[s].get("ret_20d") is None
+        ]
+
+    def _apply_closes(closes_map: dict) -> int:
+        got = 0
+        for sym, rows in closes_map.items():
+            closes = [c for _, c in rows]
+            ret5 = _period_ret_from_closes(closes, 5)
+            ret20 = _period_ret_from_closes(closes, 20)
+            if ret5 is None and ret20 is None:
+                continue
+            cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
+            if ret5 is not None and cur.get("ret_5d") is None:
+                cur["ret_5d"] = ret5
+            if ret20 is not None and cur.get("ret_20d") is None:
+                cur["ret_20d"] = ret20
+            got += 1
+        return got
+
+    missing = _incomplete()
     if not missing:
         return out
 
-    skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    tasks: set[asyncio.Task] = {
-        asyncio.create_task(_period_returns_from_daily_closes(missing))
-    }
-    if not skip_yahoo:
-        tasks.add(asyncio.create_task(_period_returns_from_yahoo(missing)))
     try:
-        done, pending = await asyncio.wait(
-            tasks,
-            timeout=45,
-            return_when=asyncio.ALL_COMPLETED,
-        )
-        for task in pending:
-            task.cancel()
-        for task in done:
-            try:
-                part = task.result()
-            except Exception as exc:
-                logger.warning("period source failed: %s", exc)
-                continue
-            for sym, vals in (part or {}).items():
-                cur = out.setdefault(sym, {"ret_5d": None, "ret_20d": None})
-                # 实盘日 K 覆盖快照（快照点可能稀疏，勿把错涨跌钉死）
-                if vals.get("ret_5d") is not None:
-                    cur["ret_5d"] = vals["ret_5d"]
-                if vals.get("ret_20d") is not None:
-                    cur["ret_20d"] = vals["ret_20d"]
+        from app.market_data.daily_closes import load_daily_closes_db
+
+        db_closes = load_daily_closes_db(missing, min_rows=6, require_fresh=True)
+        n = _apply_closes(db_closes)
+        if n:
+            logger.info("period turso filled %s/%s", n, len(missing))
     except Exception as exc:
-        logger.warning("period returns parallel failed: %s", exc)
-        for task in tasks:
-            if not task.done():
-                task.cancel()
+        logger.debug("period turso load failed: %s", exc)
+
+    missing = _incomplete()
+    if not missing:
+        return out
+
+    try:
+        from app.market_data.daily_closes import load_daily_closes_cache
+
+        cached = load_daily_closes_cache(missing, min_rows=6, require_fresh=True)
+        n = _apply_closes(cached)
+        if n:
+            logger.info("period disk cache filled %s/%s", n, len(missing))
+    except Exception as exc:
+        logger.debug("period cache load failed: %s", exc)
+
+    missing = _incomplete()
+    if not missing:
+        return out
+
+    # 外网：多源轮动（Nasdaq→东财→付费→Yahoo…），禁止只钉死东财/Yahoo
+    try:
+        from app.market_data.daily_closes import (
+            fetch_daily_closes_many,
+            persist_daily_closes,
+            validate_daily_closes,
+        )
+
+        closes_map = await fetch_daily_closes_many(
+            missing,
+            lookback_days=60,
+            concurrency=3,
+            skip_yahoo=False,
+            skip_akshare=True,
+        )
+        clean = {
+            s: validate_daily_closes(rows, min_rows=6)
+            for s, rows in closes_map.items()
+        }
+        clean = {s: r for s, r in clean.items() if r}
+        got = _apply_closes(clean)
+        if clean:
+            persist_daily_closes(clean, source="rotated")
+        logger.info("period rotated sources filled %s/%s", got, len(missing))
+    except Exception as exc:
+        logger.warning("period rotated fetch failed: %s", exc)
+
+    still = _incomplete()
+    if still:
+        # 外网失败时才用过期 Turso/磁盘，标明落后但不编造
+        try:
+            from app.market_data.daily_closes import (
+                load_daily_closes_cache,
+                load_daily_closes_db,
+            )
+
+            stale = load_daily_closes_db(still, min_rows=6, require_fresh=False)
+            n = _apply_closes(stale)
+            leftover = _incomplete()
+            if leftover:
+                n += _apply_closes(
+                    load_daily_closes_cache(leftover, min_rows=6, require_fresh=False)
+                )
+            if n:
+                logger.warning(
+                    "period used stale stored closes for %s symbols", n
+                )
+        except Exception as exc:
+            logger.debug("period stale fallback failed: %s", exc)
+
+    filled5 = sum(1 for s in uniq if out[s].get("ret_5d") is not None)
+    filled20 = sum(1 for s in uniq if out[s].get("ret_20d") is not None)
+    logger.info(
+        "period returns filled 5d=%s/%s 20d=%s/%s",
+        filled5,
+        len(uniq),
+        filled20,
+        len(uniq),
+    )
     return out
+
+
+async def refresh_period_daily_closes(
+    symbols: list[str] | None = None,
+) -> dict[str, Any]:
+    """收盘后把主线标的日 K 写入 Turso。多源轮动，不钉死单一源。"""
+    from app.market_data.daily_closes import (
+        fetch_daily_closes_many,
+        load_daily_closes_db,
+        persist_daily_closes,
+        validate_daily_closes,
+    )
+
+    if symbols is None:
+        from app.ai_mainline.baskets import all_symbols
+
+        symbols = all_symbols()
+    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    fresh = load_daily_closes_db(uniq, min_rows=21, require_fresh=True)
+    missing = [s for s in uniq if s not in fresh]
+    fetched = 0
+    if missing:
+        closes_map = await fetch_daily_closes_many(
+            missing,
+            lookback_days=60,
+            concurrency=3,
+            skip_yahoo=False,
+            skip_akshare=True,
+        )
+        clean = {
+            s: validate_daily_closes(rows, min_rows=21)
+            for s, rows in closes_map.items()
+        }
+        clean = {s: r for s, r in clean.items() if r}
+        if clean:
+            persist_daily_closes(clean, source="rotated")
+            fetched = len(clean)
+    stored = load_daily_closes_db(uniq, min_rows=21, require_fresh=True)
+    logger.info(
+        "period daily closes refresh fresh=%s/%s fetched=%s",
+        len(stored),
+        len(uniq),
+        fetched,
+    )
+    return {
+        "success": True,
+        "symbols": len(uniq),
+        "fresh": len(stored),
+        "fetched": fetched,
+    }
 
 
 async def _period_returns_from_daily_closes(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
-    """快照不足时走东财日 K 算 5d/20d（不拖 AKShare 慢补，宁缺勿错）。"""
-    from app.market_data.daily_closes import fetch_eastmoney_closes_many
+    """兼容旧调用：走多源日 K 批量。"""
+    from app.market_data.daily_closes import fetch_daily_closes_many
 
-    closes_map = await fetch_eastmoney_closes_many(
-        symbols, lookback_days=60, concurrency=3
+    closes_map = await fetch_daily_closes_many(
+        symbols, lookback_days=60, concurrency=6
     )
     out: dict[str, dict[str, float | None]] = {}
     for sym, rows in closes_map.items():
@@ -1718,13 +1841,18 @@ def _period_returns_from_snapshots(
                 .order_by(HeatmapSnapshot.trade_date)
                 .all()
             )
-        by_sym: dict[str, list[float]] = {}
+        by_sym: dict[str, list[tuple]] = {}
         for row in rows:
-            if row.price and row.price > 0:
-                by_sym.setdefault(row.symbol.upper(), []).append(float(row.price))
-        for sym, closes in by_sym.items():
-            # 快照点过稀不算区间，避免“伪 5 日”
-            if len(closes) < 6:
+            if row.price and row.price > 0 and row.trade_date:
+                by_sym.setdefault(row.symbol.upper(), []).append(
+                    (row.trade_date, float(row.price))
+                )
+        from app.market_data.daily_closes import closes_are_fresh
+
+        for sym, pairs in by_sym.items():
+            pairs = sorted({d: c for d, c in pairs}.items(), key=lambda x: x[0])
+            closes = [c for _, c in pairs]
+            if len(closes) < 6 or not closes_are_fresh(pairs):
                 continue
             row: dict[str, float | None] = {
                 "ret_5d": _period_ret_from_closes(closes, 5),
@@ -1741,56 +1869,93 @@ def _period_returns_from_snapshots(
 async def _period_returns_from_yahoo(
     symbols: list[str],
 ) -> dict[str, dict[str, float | None]]:
+    """串行拉 Yahoo 日 K 算 5d/20d。并发极易整批 429；遇限流拉长退避再继续。"""
     out: dict[str, dict[str, float | None]] = {}
+    closes_to_cache: dict[str, list[tuple]] = {}
     headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
-    sem = asyncio.Semaphore(4)
-    stop = asyncio.Event()
+    urls = (
+        "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
+        "https://query2.finance.yahoo.com/v8/finance/chart/{symbol}",
+    )
+    loop = asyncio.get_running_loop()
+    cool_until = 0.0
+    consecutive_429 = 0
 
     async def one(client: httpx.AsyncClient, symbol: str):
-        if stop.is_set():
-            return symbol, None
+        nonlocal cool_until, consecutive_429
         ysym = _yahoo_symbol(symbol)
         try:
-            async with sem:
-                if stop.is_set():
-                    return symbol, None
+            now = loop.time()
+            if cool_until > now:
+                await asyncio.sleep(cool_until - now)
+            for url_tmpl in urls:
                 resp = await client.get(
-                    YAHOO_CHART.format(symbol=ysym),
-                    params={"interval": "1d", "range": "1mo"},
+                    url_tmpl.format(symbol=ysym),
+                    params={"interval": "1d", "range": "3mo"},
                 )
-            if resp.status_code == 429:
-                stop.set()
-                logger.warning("Yahoo period rate limited; keep partial %s", len(out))
-                return symbol, None
-            if resp.status_code != 200:
-                return symbol, None
-            result = ((resp.json().get("chart") or {}).get("result")) or []
-            if not result:
-                return symbol, None
-            quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
-            closes = [float(c) for c in (quote.get("close") or []) if c is not None]
-            if len(closes) < 2:
-                return symbol, None
-            return symbol, {
-                "ret_5d": _period_ret_from_closes(closes, 5),
-                "ret_20d": _period_ret_from_closes(closes, 20),
-            }
+                if resp.status_code == 429:
+                    consecutive_429 += 1
+                    wait = min(12.0, 2.5 * consecutive_429)
+                    cool_until = loop.time() + wait
+                    logger.warning(
+                        "Yahoo period 429 on %s; cool %.1fs then continue",
+                        symbol,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                    return symbol, None
+                if resp.status_code != 200:
+                    continue
+                # 同意页/拦截页常 200 HTML
+                ctype = (resp.headers.get("content-type") or "").lower()
+                if "json" not in ctype and not (resp.text or "").lstrip().startswith("{"):
+                    continue
+                consecutive_429 = 0
+                result = ((resp.json().get("chart") or {}).get("result")) or []
+                if not result:
+                    continue
+                ts = result[0].get("timestamp") or []
+                quote = ((result[0].get("indicators") or {}).get("quote") or [{}])[0]
+                raw_closes = quote.get("close") or []
+                closes: list[float] = []
+                dated: list[tuple] = []
+                from datetime import datetime, timezone
+
+                for i, t in enumerate(ts):
+                    c = raw_closes[i] if i < len(raw_closes) else None
+                    if c is None:
+                        continue
+                    d = datetime.fromtimestamp(int(t), tz=timezone.utc).date()
+                    closes.append(float(c))
+                    dated.append((d, float(c)))
+                if len(closes) < 2:
+                    continue
+                if dated:
+                    closes_to_cache[symbol] = dated
+                return symbol, {
+                    "ret_5d": _period_ret_from_closes(closes, 5),
+                    "ret_20d": _period_ret_from_closes(closes, 20),
+                }
+            return symbol, None
         except Exception as exc:
             logger.debug("Yahoo period failed %s: %s", symbol, exc)
             return symbol, None
 
-    async with httpx.AsyncClient(headers=headers, timeout=10, follow_redirects=True) as client:
-        # 分批，降低 429
-        for i in range(0, len(symbols), 8):
-            if stop.is_set():
-                break
-            chunk = symbols[i : i + 8]
-            results = await asyncio.gather(*[one(client, s) for s in chunk])
-            for sym, vals in results:
-                if vals:
-                    out[sym] = vals
-            if i + 8 < len(symbols) and not stop.is_set():
-                await asyncio.sleep(0.35)
+    async with httpx.AsyncClient(headers=headers, timeout=12, follow_redirects=True) as client:
+        for i, sym in enumerate(symbols):
+            _s, vals = await one(client, sym)
+            if vals:
+                out[sym] = vals
+            if i + 1 < len(symbols):
+                await asyncio.sleep(0.65)
+
+    if closes_to_cache:
+        try:
+            from app.market_data.daily_closes import persist_daily_closes
+
+            persist_daily_closes(closes_to_cache, source="yahoo")
+        except Exception as exc:
+            logger.debug("yahoo period persist failed: %s", exc)
     return out
 
 
@@ -2027,6 +2192,27 @@ def _upsert_snapshot_rows(db, trade_date, rows: list[dict[str, Any]]) -> int:
     return len(rows)
 
 
+def _persist_heatmap_closes(trade_date, rows: list[dict[str, Any]]) -> None:
+    """热力图收盘价同步进 Turso 日 K，主线 5D/20D 可逐日变长。"""
+    closes_map: dict[str, list[tuple]] = {}
+    for row in rows:
+        if row.get("kind") != "company":
+            continue
+        sym = str(row.get("symbol") or "").upper().strip()
+        px = row.get("price")
+        if not sym or not px or float(px) <= 0:
+            continue
+        closes_map.setdefault(sym, []).append((trade_date, float(px)))
+    if not closes_map:
+        return
+    try:
+        from app.market_data.daily_closes import persist_daily_closes
+
+        persist_daily_closes(closes_map, source="heatmap_snapshot")
+    except Exception as exc:
+        logger.debug("persist heatmap closes failed: %s", exc)
+
+
 async def save_daily_snapshot(trade_date=None, force: bool = False) -> dict[str, Any]:
     """拉取行情并写入收盘快照（按美东交易日一条）。
 
@@ -2095,6 +2281,8 @@ async def save_daily_snapshot(trade_date=None, force: bool = False) -> dict[str,
             raise
     finally:
         db.close()
+
+    _persist_heatmap_closes(trade_date, rows)
 
     return {
         "success": True,

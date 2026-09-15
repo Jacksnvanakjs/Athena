@@ -66,6 +66,20 @@ async def scheduled_ai_mainline_daily():
     logger.info("AI 主线日快照完成: %s", result)
 
 
+async def scheduled_period_daily_closes():
+    """美东 16:32：把主线日 K 写入 Turso，供 5D/20D 次日使用。"""
+    if not AI_MAINLINE_ENABLED:
+        return
+    if not is_us_trading_day():
+        logger.info("非美股交易日，跳过主线日 K 刷新")
+        return
+    from app.heatmap import refresh_period_daily_closes
+
+    logger.info("开始刷新主线日 K（16:32）...")
+    result = await refresh_period_daily_closes()
+    logger.info("主线日 K 刷新完成: %s", result)
+
+
 async def scheduled_deal_poll():
     """AI 合作快讯 RSS 轮询。"""
     from app.deal_monitor.pipeline import run_pipeline as run_deal_pipeline
@@ -200,6 +214,12 @@ def start_scheduler():
             scheduled_ai_mainline_daily,
             CronTrigger(hour=16, minute=35, timezone="America/New_York"),
             id="ai_mainline_daily_et_1635",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            scheduled_period_daily_closes,
+            CronTrigger(hour=16, minute=32, timezone="America/New_York"),
+            id="period_daily_closes_et_1632",
             replace_existing=True,
         )
     scheduler.add_job(

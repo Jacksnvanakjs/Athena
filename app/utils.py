@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -30,6 +30,23 @@ def today_beijing() -> date:
 
 def today_us() -> date:
     return datetime.now(_US_TZ).date()
+
+
+def last_completed_us_session(as_of: datetime | None = None) -> date:
+    """最近一个已收盘的美东交易日。16:00 ET 前仍算上一交易日。"""
+    now = as_of or datetime.now(_US_TZ)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=_US_TZ)
+    else:
+        now = now.astimezone(_US_TZ)
+    d = now.date()
+    if now.hour < 16:
+        d -= timedelta(days=1)
+    guard = 0
+    while not is_us_trading_day(d) and guard < 14:
+        d -= timedelta(days=1)
+        guard += 1
+    return d
 
 
 def is_us_trading_day(check_date: date | None = None) -> bool:

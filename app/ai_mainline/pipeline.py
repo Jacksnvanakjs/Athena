@@ -26,7 +26,7 @@ ET = ZoneInfo("America/New_York")
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 300  # 5 分钟：重复打开页不重打全市场
-_COMPUTE_BUDGET_SEC = 75.0  # 报价 + 5D/20D 日K；超时回退库内快照（不编造）
+_COMPUTE_BUDGET_SEC = 95.0  # 报价 + 串行 Yahoo 日K（约 55×0.6s）；超时回退库内快照（不编造）
 
 
 def _today_et() -> date:

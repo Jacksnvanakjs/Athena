@@ -222,6 +222,22 @@ class HeatmapSnapshot(Base):
     created_at = Column(DateTime, nullable=False, default=now_beijing)
 
 
+class DailyCloseBar(Base):
+    """主线/区间涨跌用的日收盘价，写入 Turso，云端共享、可逐日追加。"""
+
+    __tablename__ = "daily_close_bars"
+    __table_args__ = (
+        UniqueConstraint("ticker", "trade_date", name="uq_daily_close_ticker_date"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ticker = Column(String(20), nullable=False, index=True)
+    trade_date = Column(Date, nullable=False, index=True)
+    close = Column(Float, nullable=False)
+    source = Column(String(30), nullable=False, default="")
+    updated_at = Column(DateTime, nullable=False, default=now_beijing)
+
+
 class EarningsEvent(Base):
     """小公司财报日历：每家公司 × 一次财报。"""
 
