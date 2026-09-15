@@ -128,8 +128,30 @@ _COMMENTARY_HEADLINE = re.compile(
     r"\bopinion\b|\banalysis:\b|\bthe deep dive\b|"
     r"\brewrites? (?:its|their) own forecast\b|"
     r"\bpower surge could\b|"
+    # 分析师「谁在赢/地位巩固」叙事，非新签通稿
+    r"\bis winning\b|\bkeeps winning\b|\bwinning custom\b|"
+    r"\brecord month confirms\b|\bconfirms .{0,40}ai\b|"
     # 中文解读标题常见二手标记
         r"同上周报|同主题|周报|行业复盘|本周回顾|解读稿|偏事后"
+    r")",
+    re.I,
+)
+
+# 既有供应链/客户关系复述：无新签署条款
+_STATUS_QUO_RELATIONSHIP = re.compile(
+    r"(?:"
+    r"\boccupies a (?:particularly )?(?:powerful|unique|key|central) position\b|"
+    r"\bcurrently the sole (?:wafer |foundry )?supplier\b|"
+    r"\bis (?:currently )?(?:the )?sole (?:wafer |foundry )?supplier\b|"
+    r"\bexisting (?:supply|customer|foundry) relationship\b|"
+    r"\blong[- ]standing (?:supplier|customer|partner)\b|"
+    r"\bmakes the relationship (?:unusually )?direct\b|"
+    r"\bbetting heavily on\b|"
+    r"\btold wall street\b|"
+    r"\bkeeps getting bigger rather than\b|"
+    r"\bai growth story keeps\b|"
+    r"\bin that strategy\b.{0,80}\bsupplier\b|"
+    r"\bpowerful position in that strategy\b"
     r")",
     re.I,
 )
@@ -312,6 +334,33 @@ def is_market_commentary(text: str) -> bool:
     return bool(_COMMENTARY_HEADLINE.search(_norm(text)))
 
 
+def is_status_quo_relationship_piece(text: str) -> bool:
+    """既有供应商/客户关系或「谁在赢」分析叙事：无新签条款则拒。
+
+    例：Marvell Is Winning… TSM occupies… currently the sole wafer supplier —
+    复述已发生的代工关系，对股价无新催化。
+    """
+    if is_material_signed_deal(text) or is_fresh_deal_announcement(text):
+        return False
+    norm = _norm(text)
+    if _STATUS_QUO_RELATIONSHIP.search(norm):
+        return True
+    # 仅收窄到「谁在赢/月度确认」类标题，不把全部评论标题升格为硬拒
+    if re.search(
+        r"\bis winning\b|\bkeeps winning\b|\bwinning custom\b|"
+        r"\brecord month confirms\b",
+        norm,
+    ):
+        if not re.search(
+            r"\b(?:signed|signs?|signing|announced (?:a |an )?(?:deal|agreement|partnership)|"
+            r"entered into|enters into|definitive agreement)\b|"
+            r"签署|正式协议",
+            norm,
+        ):
+            return True
+    return False
+
+
 def is_weak_price_catalyst(text: str) -> bool:
     """运营琐事/弱叙事：对推动股价帮助很小。"""
     norm = _norm(text)
@@ -400,9 +449,9 @@ def _is_primary_wire_source(source: str) -> bool:
 
 
 def hard_reject_deal_item(item: RawItem) -> tuple[bool, str]:
-    """人一眼会扔的垃圾：黑名单 / SEO 灌水 / 标题股价反应。
+    """人一眼会扔的垃圾：黑名单 / SEO 灌水 / 标题股价反应 / 无新签的地位解读。
 
-    LLM 主导模式下，评论、弱催化、聚合源新鲜度等交给模型判断，不在此否决。
+    LLM 主导模式下，弱催化等交给模型；下列仍硬拒（含分析师「谁在赢」稿）。
     例外：标题虽是股价反应，但正文已点名大模型×大额算力协议 → 不硬拒（独家转载路径）。
     """
     headline = item.headline or ""
@@ -418,6 +467,9 @@ def hard_reject_deal_item(item: RawItem) -> tuple[bool, str]:
         if is_salvageable_ai_compute_deal(blob):
             return False, ""
         return True, "旧闻复述（股价反应稿）"
+
+    if is_status_quo_relationship_piece(blob):
+        return True, "既有关系/分析师解读，无新签催化"
 
     return False, ""
 
@@ -509,6 +561,16 @@ def should_hide_deal_content(
 def should_hide_deal_event(event) -> bool:
     """展示：硬否决与评论/弱催化标题不展示（不因首日涨跌豁免）。"""
     from datetime import datetime, timezone
+
+    # 锚点与受益方同公司：角色解析错误，不进列表/异常区
+    at = (getattr(event, "anchor_ticker", None) or "").strip().upper()
+    bt = (getattr(event, "beneficiary_ticker", None) or "").strip().upper()
+    if at and bt and at == bt:
+        return True
+    an = (getattr(event, "anchor_name", None) or "").strip().lower()
+    bn = (getattr(event, "beneficiary_name", None) or "").strip().lower()
+    if an and bn and an == bn and not at:
+        return True
 
     return should_hide_deal_content(
         event.headline or "",

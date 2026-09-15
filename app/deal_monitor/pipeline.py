@@ -558,8 +558,17 @@ async def process_item(
         for benef in beneficiaries:
             if is_channel_partner_entity(benef, text):
                 continue
+            if _same_company(anchor, benef):
+                logger.info(
+                    "跳过同公司角色: anchor=%s beneficiary=%s",
+                    anchor.ticker or anchor.name,
+                    benef.ticker or benef.name,
+                )
+                continue
             roles = assign_roles(anchor, benef)
             if not roles:
+                continue
+            if _same_company(roles.anchor, roles.beneficiary):
                 continue
             hard_ok = (
                 classify_deal_quality(text) == QUALITY_HARD and bool(benef.ticker)
@@ -570,7 +579,7 @@ async def process_item(
             if roles.should_push or hard_ok or llm_ok:
                 role_pairs.append((roles, benef))
         if not role_pairs:
-            stats["reason"] = "LLM 受益方规则不推送"
+            stats["reason"] = "LLM 受益方规则不推送（或锚点=受益方）"
             return stats
     else:
         entity_a: Entity | None = None

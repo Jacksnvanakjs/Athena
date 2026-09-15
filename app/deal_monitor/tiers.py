@@ -79,6 +79,16 @@ def _pick_by_tier(a: Entity, b: Entity, beneficiary_tier: str) -> tuple[Entity, 
 
 def assign_roles(entity_a: Entity, entity_b: Entity) -> RoleAssignment | None:
     """按 §2.2 判定锚点、受益方与是否推送。"""
+    # 同公司不能既当锚点又当受益方
+    if entity_a.ticker and entity_b.ticker and entity_a.ticker.upper() == entity_b.ticker.upper():
+        return None
+    if entity_a.unlisted_id and entity_b.unlisted_id and entity_a.unlisted_id == entity_b.unlisted_id:
+        return None
+    na = (entity_a.name or "").strip().lower()
+    nb = (entity_b.name or "").strip().lower()
+    if na and nb and na == nb:
+        return None
+
     tier_a = entity_a.tier
     tier_b = entity_b.tier
     tier_pair = format_tier_pair(tier_a, tier_b)

@@ -282,3 +282,59 @@ def test_rum_group_entity_extractable():
     )
     assert any(e.ticker == "RUM" for e in ents)
     assert any(e.unlisted_id == "anthropic" for e in ents)
+
+
+def test_marvell_tsm_status_quo_commentary_rejected():
+    """既有代工关系解读：无新签，应硬拒（含 LLM 主导模式）。"""
+    from app.deal_monitor.content_filter import is_status_quo_relationship_piece
+
+    h = "Marvell Is Winning Custom AI Business. T"
+    s = (
+        "Marvell Technology is betting heavily on custom AI accelerators. "
+        "Taiwan Semiconductor occupies a particularly powerful position in that strategy. "
+        "Marvell's latest regulatory filing says TSM is currently the sole wafer supplier "
+        "for its advanced-node products, including its 3nm products."
+    )
+    assert is_status_quo_relationship_piece(f"{h}\n{s}")
+    reject, reason = hard_reject_deal_item(
+        _item(h, source="finnhub:MRVL", summary=s)
+    )
+    assert reject is True
+    assert "既有" in reason or "解读" in reason
+
+
+def test_same_ticker_anchor_beneficiary_hidden():
+    event = SimpleNamespace(
+        headline="TSM：Marvell Is Winning Custom AI Business. T",
+        summary="TSM occupies a powerful position as sole supplier.",
+        source="finnhub:MRVL",
+        source_url="https://finnhub.io/api/news?id=x",
+        published_at=datetime(2026, 9, 11, tzinfo=timezone.utc),
+        anchor_ticker="TSM",
+        beneficiary_ticker="TSM",
+        anchor_name="TSMC",
+        beneficiary_name="TSMC",
+    )
+    assert should_hide_deal_event(event) is True
+
+
+def test_assign_roles_rejects_same_company():
+    from app.deal_monitor.entities import Entity
+    from app.deal_monitor.tiers import assign_roles
+
+    a = Entity(name="TSMC", ticker="TSM", tier="T0")
+    b = Entity(name="Taiwan Semiconductor", ticker="TSM", tier="T0")
+    assert assign_roles(a, b) is None
+
+
+def test_real_ppa_not_status_quo():
+    from app.deal_monitor.content_filter import is_status_quo_relationship_piece
+
+    text = (
+        "Fervo Energy today announced a 396-megawatt power purchase agreement with Google "
+        "for Cape Station geothermal."
+    )
+    assert is_status_quo_relationship_piece(text) is False
+    assert hard_reject_deal_item(
+        _item("Fervo and Google Sign 396 MW PPA", source="globenewswire", summary=text)
+    )[0] is False
