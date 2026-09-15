@@ -26,7 +26,8 @@ ET = ZoneInfo("America/New_York")
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 300  # 5 分钟：重复打开页不重打全市场
-_COMPUTE_BUDGET_SEC = 95.0  # 报价 + 串行 Yahoo 日K（约 55×0.6s）；超时回退库内快照（不编造）
+_COMPUTE_BUDGET_SEC = 110.0  # 报价 + 日K 软截止；超时回退库内快照（不编造）
+_PERIOD_BUDGET_SEC = 75.0
 
 
 def _today_et() -> date:
@@ -217,9 +218,9 @@ async def _compute_mainline_fresh() -> dict[str, Any]:
     themes_cfg = enabled_themes()
     symbols = all_symbols()
     quotes, source = await fetch_quotes(symbols, allow_slow_fill=False)
-    # 勿用外层 wait_for 整段掐死：内部已有超时，超时后仍返回已算到的部分（缺数保持 None，不编造）
+    # 勿用外层 wait_for 整段掐死：period 自带软截止，超时后仍返回已算到的部分（缺数保持 None，不编造）
     try:
-        period = await fetch_period_returns(symbols)
+        period = await fetch_period_returns(symbols, budget_sec=_PERIOD_BUDGET_SEC)
     except Exception as exc:
         logger.warning("period returns failed: %s", exc)
         period = {s: {"ret_5d": None, "ret_20d": None} for s in symbols}

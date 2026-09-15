@@ -16,7 +16,10 @@ def theme_metrics(
     quotes: dict[str, dict[str, Any]],
     period: dict[str, dict[str, float | None]],
 ) -> dict[str, Any]:
-    """计算单子线等权指标。缺行情成分剔除。"""
+    """计算单子线等权指标。缺行情成分剔除。
+
+    5D/20D 与 1D 解耦：即使某票暂无即时报价，只要有日 K 区间收益仍计入主题均值。
+    """
     ret_1d_list: list[float] = []
     ret_5d_list: list[float] = []
     ret_20d_list: list[float] = []
@@ -29,6 +32,12 @@ def theme_metrics(
         if not sym:
             continue
         name = (t.get("name") or "").strip()
+        p = period.get(sym) or {}
+        if p.get("ret_5d") is not None:
+            ret_5d_list.append(float(p["ret_5d"]))
+        if p.get("ret_20d") is not None:
+            ret_20d_list.append(float(p["ret_20d"]))
+
         q = quotes.get(sym)
         if q and q.get("change_pct") is not None:
             chg = float(q["change_pct"])
@@ -37,11 +46,6 @@ def theme_metrics(
                 up += 1
             quoted.append((sym, chg))
             members.append({"symbol": sym, "name": name, "ret_1d": round(chg, 2)})
-            p = period.get(sym) or {}
-            if p.get("ret_5d") is not None:
-                ret_5d_list.append(float(p["ret_5d"]))
-            if p.get("ret_20d") is not None:
-                ret_20d_list.append(float(p["ret_20d"]))
         else:
             members.append({"symbol": sym, "name": name, "ret_1d": None})
 

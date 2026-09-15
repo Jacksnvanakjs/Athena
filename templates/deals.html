@@ -185,10 +185,19 @@
       background: rgba(192, 57, 43, 0.08);
     }
     .ticker { font-weight: 600; color: var(--accent); }
+    .stale-hint {
+      margin: 0.35rem 0 0;
+      font-size: 0.78rem;
+      color: #9a3412;
+      background: #fff7ed;
+      border: 1px solid #fed7aa;
+      border-radius: 6px;
+      padding: 0.35rem 0.55rem;
+    }
     .score-cell {
       line-height: 1.35;
-      min-width: 4.8rem;
-      white-space: nowrap;
+      min-width: 6.5rem;
+      max-width: 8.5rem;
     }
     .score-cell .score { font-variant-numeric: tabular-nums; font-weight: 600; }
     .score-cell .time-sub {
@@ -197,6 +206,17 @@
       color: var(--text-muted);
       letter-spacing: 0;
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .score-cell .time-et {
+      margin-top: 1px;
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      opacity: 0.92;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .score-cell .time-meta {
       font-size: 0.68rem;
@@ -684,9 +704,9 @@
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
-            <th>分数 <span class="help" title="【两套独立刻度，勿直接横比】材料性分：条款越硬分越高。&#10;· AI合作：并购约≤65；硬催化常见 70–85（小票弹性大）&#10;· 黄仁勋：强并购约 78–82；硬催化可到 85（按 NVDA 产业动作单独打分，与 AI 合作封顶不同）&#10;分数下方：LLM/规则打分时刻（北京时间，悬停可看美东）。">?</span></th>
+            <th>分数 <span class="help" title="【两套独立刻度，勿直接横比】材料性分：条款越硬分越高。&#10;· AI合作：并购约≤65；硬催化常见 70–85（小票弹性大）&#10;· 黄仁勋：强并购约 78–82；硬催化可到 85（按 NVDA 产业动作单独打分，与 AI 合作封顶不同）&#10;分数下方时间：北京（主）+ 美东（附）；悬停看完整时刻。">?</span></th>
             <th>档 <span class="help" title="首日涨跌档（由「首日%」换算）。&#10;· AI合作（常规）：高≥+3% · 中高≥+1%&#10;· 黄仁勋 NVDA/T0（大票）：高≥+1.5% · 中高≥+0.7%（同涨幅对大票含金量更高）">?</span></th>
-            <th>回测 <span class="help" title="把「首日涨跌%」映射成分数，用来对照材料性分是否虚高/虚低。&#10;映射：高→85 · 中高→70 · 中→55 · 低→35（进档门槛见「档」列说明）。&#10;下方时间=系统实际写出回测分的时刻（北京）。悬停可看美东交易日与口径。&#10;口径：发稿后首个可交易日收盘 ÷ 前一交易日收盘 − 1。入库后即试算；若当日未收盘则待收盘后自动补。">?</span></th>
+            <th>回测 <span class="help" title="把「首日涨跌%」映射成分数，用来对照材料性分是否虚高/虚低。&#10;映射：高→85 · 中高→70 · 中→55 · 低→35（进档门槛见「档」列说明）。&#10;下方时间=写出回测分的时刻：北京（主）+ 美东（附）；悬停看交易日与口径。&#10;口径：发稿后首个可交易日收盘 ÷ 前一交易日收盘 − 1。入库后即试算；若当日未收盘则待收盘后自动补。">?</span></th>
             <th>首日 <span class="help" title="受益股发稿后首个可交易日：收盘相对前收的涨跌幅（%）。「档」「回测」都由它换算而来。">?</span></th>
             <th>关系/质量</th>
             <th>已推送</th>
@@ -706,8 +726,58 @@
 
   <script>
     let currentTab = 'mainline';
+    let tabLoadSeq = 0;
+    const tabAbort = { mainline: null, deals: null, earnings: null };
+    let mainlineHasData = false;
+    let dealsHasData = false;
+    let earningsHasData = false;
+    // 上次成功渲染对应的查询指纹；仅「同条件刷新失败」才保留上一屏，避免筛选项已变却仍显示旧结果
+    let dealsOkQuery = '';
+    let earningsOkQuery = '';
+
+    function abortTab(tab) {
+      const ctrl = tabAbort[tab];
+      if (ctrl) {
+        try { ctrl.abort(); } catch (_) {}
+        tabAbort[tab] = null;
+      }
+    }
+
+    function beginTabLoad(tab) {
+      abortTab(tab);
+      const ctrl = new AbortController();
+      tabAbort[tab] = ctrl;
+      const seq = ++tabLoadSeq;
+      return { ctrl, seq, stillActive: () => seq === tabLoadSeq && currentTab === tab };
+    }
+
+    function setStaleHint(elId, msg) {
+      const host = document.getElementById(elId);
+      if (!host) return;
+      let tip = host.querySelector('.stale-hint');
+      if (!msg) {
+        if (tip) tip.remove();
+        return;
+      }
+      if (!tip) {
+        tip = document.createElement('div');
+        tip.className = 'stale-hint';
+        host.prepend(tip);
+      }
+      tip.textContent = msg;
+    }
+
+    function clearStaleHints() {
+      setStaleHint('mlMetrics', '');
+      setStaleHint('stats', '');
+      setStaleHint('erStats', '');
+    }
 
     function switchTab(tab) {
+      if (tab !== currentTab) {
+        // 离开页时取消未完成请求，避免旧失败覆盖新页
+        abortTab(currentTab);
+      }
       currentTab = tab;
       document.querySelectorAll('#mainTabs .tab').forEach(el => {
         el.classList.toggle('active', el.dataset.tab === tab);
@@ -740,34 +810,58 @@
       return `${Math.round(row.breadth * 100)}%`;
     }
 
-    let mainlineHasData = false;
-
     function showMainlineHardError(msg, note) {
       document.getElementById('mlTitle').textContent = msg || '主线加载失败（行情较慢或超时）';
       document.getElementById('mlEmpty').style.display = 'block';
       document.getElementById('mlTbody').innerHTML = '';
+      setStaleHint('mlMetrics', '');
       if (note != null) document.getElementById('mlSummary').textContent = note;
+      mainlineHasData = false;
     }
 
     async function loadMainline() {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 90000);
+      const { ctrl, stillActive } = beginTabLoad('mainline');
+      const timer = setTimeout(() => ctrl.abort(), 110000);
       try {
-        const res = await fetch('/api/ai-mainline', { signal: ctrl.signal });
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        if (data.success === false && !(data.themes || []).length) {
-          // 自动刷新失败时保留上一屏，避免挂久后表格被清空成「只有残缺提示」
-          if (!mainlineHasData) {
-            showMainlineHardError(data.summary || '主线加载失败（行情较慢或超时）', data.note || '');
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const res = await fetch('/api/ai-mainline', { signal: ctrl.signal });
+            if (!stillActive()) return;
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const data = await res.json();
+            if (!stillActive()) return;
+            if (data.success === false && !(data.themes || []).length) {
+              if (!mainlineHasData && attempt === 0) {
+                await new Promise(r => setTimeout(r, 600));
+                continue;
+              }
+              if (mainlineHasData) {
+                // 同页刷新失败：保留上一版真数据，并标明未刷新成功
+                setStaleHint('mlMetrics', '刷新未成功，仍显示上一版可靠结果（非估算）');
+              } else {
+                showMainlineHardError(data.summary || '主线加载失败（行情较慢或超时）', data.note || '');
+              }
+              return;
+            }
+            renderMainline(data);
+            setStaleHint('mlMetrics', '');
+            mainlineHasData = true;
+            loadStatus();
+            return;
+          } catch (e) {
+            if (!stillActive()) return;
+            if (e && e.name === 'AbortError') return;
+            if (attempt === 0) {
+              await new Promise(r => setTimeout(r, 600));
+              continue;
+            }
+            if (mainlineHasData) {
+              setStaleHint('mlMetrics', '刷新未成功，仍显示上一版可靠结果（非估算）');
+            } else {
+              showMainlineHardError('主线加载失败（行情较慢或超时）');
+            }
           }
-          return;
         }
-        renderMainline(data);
-        mainlineHasData = true;
-        loadStatus();
-      } catch (e) {
-        if (!mainlineHasData) showMainlineHardError('主线加载失败（行情较慢或超时）');
       } finally {
         clearTimeout(timer);
       }
@@ -1113,6 +1207,7 @@
     }
 
     async function loadEarnings() {
+      const { ctrl, stillActive } = beginTabLoad('earnings');
       const days = document.getElementById('er_days').value;
       const params = new URLSearchParams();
       params.set('days', days);
@@ -1122,59 +1217,98 @@
       const sec = document.getElementById('er_sector').value;
       if (sec) params.set('sector', sec);
       if (document.getElementById('er_push_eligible').checked) params.set('push_eligible', 'true');
+      const queryKey = params.toString();
+      const sameQuery = earningsHasData && queryKey === earningsOkQuery;
 
-      const [listRes, statsRes, anomRes] = await Promise.all([
-        fetch('/api/earnings?' + params),
-        fetch('/api/earnings/stats?days=' + days + '&history_days=' + days),
-        fetch('/api/earnings/anomalies?days=' + Math.min(Number(days) || 14, 90)),
-      ]);
-      const payload = await listRes.json();
-      const upcoming = Array.isArray(payload) ? payload : (payload.upcoming || []);
-      const history = Array.isArray(payload) ? [] : (payload.history || []);
-      const stats = await statsRes.json();
-      const anomPayload = await anomRes.json().catch(() => ({ items: [] }));
-      renderErAnomalies(anomPayload.items || []);
-      document.getElementById('erStats').innerHTML =
-        `待发财报 <strong>${stats.upcoming}</strong> 家` +
-        `<span class="help" title="筛选范围内、尚未过期的财报日程条数">?</span>` +
-        ` · 还有2天将推送 <strong>${stats.t2_due}</strong>` +
-        `<span class="help" title="距财报正好 2 天、得分≥75、今日会发手机提醒的家数。更早的只在网页展示，不推手机。">?</span>` +
-        ` · 近30日已推送 <strong>${stats.batches_30d}</strong>` +
-        `<span class="help" title="近30天内成功发出的手机推送次数。同一天多家公司合并为 1 次。">?</span>` +
-        ` · 评分异常 <strong>${stats.anomalies || 0}</strong>` +
-        `<span class="help" title="财报后涨跌与评分方向明显对不上的条数（高分大跌 / 低分大涨）。对照优先取 D2 收盘÷财报前收（无 D2 用 D1）。财报盘后发布：前收=财报日收盘、开盘=次一交易日；财报盘前发布：前收=前一交易日收盘、开盘=财报日。下方异常区可看明细。">?</span>`;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const [listRes, statsRes, anomRes] = await Promise.all([
+            fetch('/api/earnings?' + params, { signal: ctrl.signal }),
+            fetch('/api/earnings/stats?days=' + days + '&history_days=' + days, { signal: ctrl.signal }),
+            fetch('/api/earnings/anomalies?days=' + Math.min(Number(days) || 14, 90), { signal: ctrl.signal }),
+          ]);
+          if (!stillActive()) return;
+          if (!listRes.ok) throw new Error('HTTP ' + listRes.status);
+          const payload = await listRes.json();
+          const upcoming = Array.isArray(payload) ? payload : (payload.upcoming || []);
+          const history = Array.isArray(payload) ? [] : (payload.history || []);
+          const stats = await statsRes.json().catch(() => ({}));
+          const anomPayload = await anomRes.json().catch(() => ({ items: [] }));
+          if (!stillActive()) return;
 
-      const tbody = document.getElementById('erTbody');
-      const empty = document.getElementById('erEmpty');
-      tbody.innerHTML = '';
-      if (!upcoming.length && !history.length) {
-        empty.style.display = 'block';
-        loadStatus();
-        return;
-      }
-      empty.style.display = 'none';
+          renderErAnomalies(anomPayload.items || []);
+          document.getElementById('erStats').innerHTML =
+            `待发财报 <strong>${stats.upcoming ?? '—'}</strong> 家` +
+            `<span class="help" title="筛选范围内、尚未过期的财报日程条数">?</span>` +
+            ` · 还有2天将推送 <strong>${stats.t2_due ?? '—'}</strong>` +
+            `<span class="help" title="距财报正好 2 天、得分≥75、今日会发手机提醒的家数。更早的只在网页展示，不推手机。">?</span>` +
+            ` · 近30日已推送 <strong>${stats.batches_30d ?? '—'}</strong>` +
+            `<span class="help" title="近30天内成功发出的手机推送次数。同一天多家公司合并为 1 次。">?</span>` +
+            ` · 评分异常 <strong>${stats.anomalies || 0}</strong>` +
+            `<span class="help" title="财报后涨跌与评分方向明显对不上的条数（高分大跌 / 低分大涨）。对照优先取 D2 收盘÷财报前收（无 D2 用 D1）。财报盘后发布：前收=财报日收盘、开盘=次一交易日；财报盘前发布：前收=前一交易日收盘、开盘=财报日。下方异常区可看明细。">?</span>`;
 
-      if (history.length) {
-        const toggle = document.createElement('tr');
-        toggle.className = 'er-history-toggle';
-        toggle.innerHTML = `
-          <td colspan="14">
-            <button type="button" class="er-hist-btn" onclick="toggleErHistory()" aria-expanded="false">
-              <span class="er-hist-chevron" id="erHistChevron">▶</span>
-              <span id="erHistLabel" data-count="${history.length}">展开历史日历（${history.length}）</span>
-            </button>
-          </td>`;
-        tbody.appendChild(toggle);
-        for (const row of history) {
-          tbody.appendChild(buildErRow(row, true));
+          const tbody = document.getElementById('erTbody');
+          const empty = document.getElementById('erEmpty');
+          tbody.innerHTML = '';
+          if (!upcoming.length && !history.length) {
+            empty.style.display = 'block';
+            earningsHasData = true;
+            earningsOkQuery = queryKey;
+            setStaleHint('erStats', '');
+            loadStatus();
+            return;
+          }
+          empty.style.display = 'none';
+
+          if (history.length) {
+            const toggle = document.createElement('tr');
+            toggle.className = 'er-history-toggle';
+            toggle.innerHTML = `
+              <td colspan="14">
+                <button type="button" class="er-hist-btn" onclick="toggleErHistory()" aria-expanded="false">
+                  <span class="er-hist-chevron" id="erHistChevron">▶</span>
+                  <span id="erHistLabel" data-count="${history.length}">展开历史日历（${history.length}）</span>
+                </button>
+              </td>`;
+            tbody.appendChild(toggle);
+            for (const row of history) {
+              tbody.appendChild(buildErRow(row, true));
+            }
+          }
+
+          for (const row of upcoming) {
+            tbody.appendChild(buildErRow(row, false));
+          }
+          setErHistoryVisible(erHistoryExpanded && history.length > 0);
+          earningsHasData = true;
+          earningsOkQuery = queryKey;
+          setStaleHint('erStats', '');
+          loadStatus();
+          return;
+        } catch (e) {
+          if (!stillActive()) return;
+          if (e && e.name === 'AbortError') return;
+          if (attempt === 0) {
+            await new Promise(r => setTimeout(r, 400));
+            continue;
+          }
+          if (sameQuery) {
+            // 筛选条件未变：保留上一屏，并提示仍是上一版
+            setStaleHint('erStats', '刷新未成功，仍显示上一版（筛选未变）');
+          } else {
+            // 筛选已变：绝不能继续展示旧筛选结果
+            document.getElementById('erTbody').innerHTML = '';
+            document.getElementById('erEmpty').style.display = 'block';
+            document.getElementById('erEmpty').innerHTML =
+              `<strong>财报列表加载失败</strong><br>${(e && e.message) || '请稍后重试'}`;
+            renderErAnomalies([]);
+            earningsHasData = false;
+            earningsOkQuery = '';
+            setStaleHint('erStats', '');
+          }
+          loadStatus();
         }
       }
-
-      for (const row of upcoming) {
-        tbody.appendChild(buildErRow(row, false));
-      }
-      setErHistoryVisible(erHistoryExpanded && history.length > 0);
-      loadStatus();
     }
 
     function compactBjClock(bj) {
@@ -1182,6 +1316,13 @@
       const m = String(bj).match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/);
       if (m) return `${m[2]}-${m[3]} ${m[4]}`;
       return String(bj);
+    }
+
+    function compactEtClock(et) {
+      if (!et || et === '—') return '';
+      const m = String(et).match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/);
+      if (m) return `${m[2]}-${m[3]} ${m[4]}`;
+      return String(et);
     }
 
     function dualTimeTitle(bj, et) {
@@ -1192,11 +1333,16 @@
     }
 
     function fmtScoreWithTime(scoreHtml, bj, et) {
-      const short = compactBjClock(bj);
+      const bjShort = compactBjClock(bj);
+      const etShort = compactEtClock(et);
       const tip = dualTimeTitle(bj, et);
-      const time = short
-        ? `<div class="time-sub" title="${tip}">${short}</div>`
-        : '';
+      let time = '';
+      if (bjShort) {
+        time = `<div class="time-sub" title="${tip}">北京 ${bjShort}</div>`;
+        if (etShort) {
+          time += `<div class="time-et" title="${tip}">美东 ${etShort}</div>`;
+        }
+      }
       return `<div class="score-cell"><div class="score">${scoreHtml}</div>${time}</div>`;
     }
 
@@ -1211,19 +1357,22 @@
 
     function fmtFirstDayScoreCell(row) {
       const scoreHtml = fmtFirstDayScore(row);
-      // 显示实际写出回测分的时刻；交易日/口径放悬停，避免和材料性打分时间混淆
       const bj = row.first_day_checked_at_bj;
       const et = row.first_day_checked_at_et;
-      const short = compactBjClock(bj);
       const tipParts = [];
       if (row.first_day_session_date) tipParts.push(`交易日 ${row.first_day_session_date}`);
       if (row.first_day_note) tipParts.push(row.first_day_note);
       const dual = dualTimeTitle(bj, et);
       if (dual) tipParts.push(dual);
       const tip = tipParts.join(' · ');
+      const bjShort = compactBjClock(bj);
+      const etShort = compactEtClock(et);
       let time = '';
-      if (short) {
-        time = `<div class="time-sub" title="${tip}">${short}</div>`;
+      if (bjShort) {
+        time = `<div class="time-sub" title="${tip}">北京 ${bjShort}</div>`;
+        if (etShort) {
+          time += `<div class="time-et" title="${tip}">美东 ${etShort}</div>`;
+        }
       } else if (row.first_day_score == null && (row.first_day_note || '').includes('待')) {
         time = `<div class="time-sub time-meta" title="${tip}">待收盘</div>`;
       }
@@ -1316,6 +1465,7 @@
     }
 
     async function loadDeals() {
+      const { ctrl, stillActive } = beginTabLoad('deals');
       updateFilterVisibility();
       const params = new URLSearchParams();
       params.set('days', document.getElementById('days').value);
@@ -1328,55 +1478,81 @@
       const fdMove = document.getElementById('first_day_move').value;
       if (fdMove) params.set('first_day_move', fdMove);
       if (document.getElementById('pushed_only').checked) params.set('pushed_only', 'true');
+      const queryKey = params.toString();
+      const sameQuery = dealsHasData && queryKey === dealsOkQuery;
 
       const tbody = document.getElementById('tbody');
       const empty = document.getElementById('empty');
-      try {
-        const res = await fetch('/api/deals?' + params);
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const items = await res.json();
-        if (!Array.isArray(items)) throw new Error('响应格式异常');
-        tbody.innerHTML = '';
-        if (!items.length) {
-          empty.style.display = 'block';
-          empty.innerHTML = '<strong>暂无快讯记录</strong><br>可点击右上角「立即扫描」手动拉取一轮。';
-          renderDealAnomalies([]);
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch('/api/deals?' + params, { signal: ctrl.signal });
+          if (!stillActive()) return;
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const items = await res.json();
+          if (!stillActive()) return;
+          if (!Array.isArray(items)) throw new Error('响应格式异常');
+          tbody.innerHTML = '';
+          if (!items.length) {
+            empty.style.display = 'block';
+            empty.innerHTML = '<strong>暂无快讯记录</strong><br>可点击右上角「立即扫描」手动拉取一轮。';
+            renderDealAnomalies([]);
+            dealsHasData = true;
+            dealsOkQuery = queryKey;
+            setStaleHint('stats', '');
+            loadStats();
+            loadStatus();
+            return;
+          }
+          empty.style.display = 'none';
+          for (const row of items) {
+            const tr = document.createElement('tr');
+            tr.className = rowClass(row) + (row.score_gap_large ? ' fd-anom' : '');
+            const gapHint = (row.category !== 'nvda_signal' && row.score_gap_large)
+              ? `<div class="strategy-hint">分差${row.score_gap > 0 ? '+' : ''}${row.score_gap}</div>`
+              : '';
+            tr.innerHTML = `
+              <td>${fmtCategory(row)}</td>
+              <td>${fmtPublished(row)}</td>
+              <td>${fmtBeneficiary(row)}</td>
+              <td>${fmtAnchor(row)}</td>
+              <td>${row.headline}</td>
+              <td>${fmtMaterialityScore(row, gapHint)}</td>
+              <td>${fmtFirstDayBand(row)}</td>
+              <td>${fmtFirstDayScoreCell(row)}</td>
+              <td>${fmtFirstDayRet(row)}</td>
+              <td>${fmtRelation(row)}</td>
+              <td class="${row.pushed ? 'pushed' : ''}">${fmtPushChannel(row)}</td>
+              <td>${fmtSource(row)}</td>
+            `;
+            tbody.appendChild(tr);
+          }
+          renderDealAnomalies(items);
+          dealsHasData = true;
+          dealsOkQuery = queryKey;
+          setStaleHint('stats', '');
           loadStats();
           loadStatus();
           return;
+        } catch (e) {
+          if (!stillActive()) return;
+          if (e && e.name === 'AbortError') return;
+          if (attempt === 0) {
+            await new Promise(r => setTimeout(r, 400));
+            continue;
+          }
+          if (sameQuery) {
+            setStaleHint('stats', '刷新未成功，仍显示上一版（筛选未变）');
+          } else {
+            tbody.innerHTML = '';
+            empty.style.display = 'block';
+            empty.innerHTML = `<strong>合作列表加载失败</strong><br>${(e && e.message) || '请稍后重试或检查服务端日志（常见原因：库缺列未迁移）。'}`;
+            renderDealAnomalies([]);
+            dealsHasData = false;
+            dealsOkQuery = '';
+            setStaleHint('stats', '');
+          }
+          loadStatus();
         }
-        empty.style.display = 'none';
-        for (const row of items) {
-          const tr = document.createElement('tr');
-          tr.className = rowClass(row) + (row.score_gap_large ? ' fd-anom' : '');
-          const gapHint = (row.category !== 'nvda_signal' && row.score_gap_large)
-            ? `<div class="strategy-hint">分差${row.score_gap > 0 ? '+' : ''}${row.score_gap}</div>`
-            : '';
-          tr.innerHTML = `
-            <td>${fmtCategory(row)}</td>
-            <td>${fmtPublished(row)}</td>
-            <td>${fmtBeneficiary(row)}</td>
-            <td>${fmtAnchor(row)}</td>
-            <td>${row.headline}</td>
-            <td>${fmtMaterialityScore(row, gapHint)}</td>
-            <td>${fmtFirstDayBand(row)}</td>
-            <td>${fmtFirstDayScoreCell(row)}</td>
-            <td>${fmtFirstDayRet(row)}</td>
-            <td>${fmtRelation(row)}</td>
-            <td class="${row.pushed ? 'pushed' : ''}">${fmtPushChannel(row)}</td>
-            <td>${fmtSource(row)}</td>
-          `;
-          tbody.appendChild(tr);
-        }
-        renderDealAnomalies(items);
-        loadStats();
-        loadStatus();
-      } catch (e) {
-        tbody.innerHTML = '';
-        empty.style.display = 'block';
-        empty.innerHTML = `<strong>合作列表加载失败</strong><br>${(e && e.message) || '请稍后重试或检查服务端日志（常见原因：库缺列未迁移）。'}`;
-        renderDealAnomalies([]);
-        loadStatus();
       }
     }
 

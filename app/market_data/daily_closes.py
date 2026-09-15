@@ -979,11 +979,15 @@ async def fetch_daily_closes_many(
     concurrency: int = 4,
     skip_yahoo: bool | None = None,
     skip_akshare: bool = True,
+    budget_sec: float | None = None,
 ) -> dict[str, list[tuple[date, float]]]:
     """多标的日线：优先 Nasdaq 串行补齐，再多源轮动；不先狂打东财。
 
     缺数据的标的不写入（宁缺勿错）。默认跳过 AKShare。
+    budget_sec：软截止，超时返回已拉到的部分，避免被外层 wait_for 整段取消。
     """
+    import time as _time
+
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     if not uniq:
         return {}
@@ -991,12 +995,20 @@ async def fetch_daily_closes_many(
         skip_yahoo = _skip_yahoo_daily()
 
     out: dict[str, list[tuple[date, float]]] = {}
+    deadline = (_time.monotonic() + budget_sec) if budget_sec and budget_sec > 0 else None
+
+    def _time_left() -> bool:
+        return deadline is None or _time.monotonic() < deadline
 
     # 1) Nasdaq 免 Key，低并发，避免触发东财/Yahoo 限流
     sem_nq = asyncio.Semaphore(2)
 
     async def one_nasdaq(sym: str) -> None:
+        if not _time_left():
+            return
         async with sem_nq:
+            if not _time_left():
+                return
             try:
                 rows = await _from_nasdaq(sym, lookback_days)
             except Exception as exc:
@@ -1009,23 +1021,49 @@ async def fetch_daily_closes_many(
 
     await asyncio.gather(*[one_nasdaq(s) for s in uniq])
     missing = [s for s in uniq if s not in out]
-    if not missing:
+    if not missing or not _time_left():
+        if missing and not _time_left():
+            logger.warning(
+                "daily closes budget hit after nasdaq; partial %s/%s",
+                len(out),
+                len(uniq),
+            )
         return out
 
-    # 2) 东财慢速补缺口（并发≤2）
+    # 2) 东财慢速补缺口（并发≤2）；受软截止约束，超时跳过进入多源轮动
     try:
-        em = await fetch_eastmoney_closes_many(
-            missing, lookback_days=lookback_days, concurrency=1
+        em_timeout = None
+        if deadline is not None:
+            em_timeout = max(3.0, deadline - _time.monotonic())
+        if em_timeout is None or em_timeout > 3.0:
+            coro = fetch_eastmoney_closes_many(
+                missing, lookback_days=lookback_days, concurrency=1
+            )
+            if em_timeout is not None:
+                em = await asyncio.wait_for(coro, timeout=em_timeout)
+            else:
+                em = await coro
+            for sym, rows in em.items():
+                ok = validate_daily_closes(rows, min_rows=6)
+                if ok:
+                    out[sym] = ok
+    except asyncio.TimeoutError:
+        logger.warning(
+            "eastmoney batch skipped by budget; partial %s/%s",
+            len(out),
+            len(uniq),
         )
-        for sym, rows in em.items():
-            ok = validate_daily_closes(rows, min_rows=6)
-            if ok:
-                out[sym] = ok
     except Exception as exc:
         logger.warning("eastmoney batch daily closes failed: %s", exc)
 
     missing = [s for s in uniq if s not in out]
-    if not missing:
+    if not missing or not _time_left():
+        if missing and not _time_left():
+            logger.warning(
+                "daily closes budget hit after eastmoney; partial %s/%s",
+                len(out),
+                len(uniq),
+            )
         return out
 
     # 3) 其余：多源轮动（含付费源/Yahoo/Stooq），低并发
@@ -1033,7 +1071,11 @@ async def fetch_daily_closes_many(
     sem = asyncio.Semaphore(gap_conc)
 
     async def one(sym: str) -> None:
+        if not _time_left():
+            return
         async with sem:
+            if not _time_left():
+                return
             try:
                 rows = await fetch_daily_closes(
                     sym,
@@ -1051,6 +1093,13 @@ async def fetch_daily_closes_many(
             await asyncio.sleep(0.35)
 
     await asyncio.gather(*[one(s) for s in missing])
+    if len(out) < len(uniq):
+        logger.info(
+            "daily closes many filled %s/%s (budget_sec=%s)",
+            len(out),
+            len(uniq),
+            budget_sec,
+        )
     return out
 
 

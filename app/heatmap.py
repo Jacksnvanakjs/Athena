@@ -1417,6 +1417,8 @@ async def _fetch_quotes(
 
 async def fetch_period_returns(
     symbols: list[str],
+    *,
+    budget_sec: float | None = 70.0,
 ) -> dict[str, dict[str, float | None]]:
     """近 5/20 交易日累计涨跌（%）。
 
@@ -1424,6 +1426,8 @@ async def fetch_period_returns(
     → 多源轮动拉日 K（Nasdaq/东财/付费/Yahoo…）→ 过期库仅作最后兜底。
     只使用校验通过的真实收盘，禁止编造或堆无效序列。
     Finnhub 免费档无 candle。period 不读 HEATMAP_SKIP_YAHOO。
+
+    budget_sec：外网拉取软截止，超时返回已算到的部分（缺数保持 None）。
     """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     out: dict[str, dict[str, float | None]] = {
@@ -1491,6 +1495,9 @@ async def fetch_period_returns(
     if not missing:
         return out
 
+    # 按主题轮询排序，避免总是前面主题先吃满预算、第 6 板开始缺 5D/20D
+    missing = _fair_order_period_symbols(missing)
+
     # 外网：多源轮动（Nasdaq→东财→付费→Yahoo…），禁止只钉死东财/Yahoo
     try:
         from app.market_data.daily_closes import (
@@ -1505,6 +1512,7 @@ async def fetch_period_returns(
             concurrency=3,
             skip_yahoo=False,
             skip_akshare=True,
+            budget_sec=budget_sec,
         )
         clean = {
             s: validate_daily_closes(rows, min_rows=6)
@@ -1553,6 +1561,46 @@ async def fetch_period_returns(
     return out
 
 
+def _fair_order_period_symbols(symbols: list[str]) -> list[str]:
+    """按主题 round-robin 排列，让各板块公平分到外网预算。"""
+    if len(symbols) <= 1:
+        return list(symbols)
+    try:
+        from app.ai_mainline.baskets import enabled_themes
+
+        themes = enabled_themes()
+    except Exception:
+        return list(symbols)
+
+    want = {s.upper().strip() for s in symbols if s}
+    seen: set[str] = set()
+    buckets: list[list[str]] = []
+    for theme in themes:
+        bucket: list[str] = []
+        for t in theme.get("tickers") or []:
+            sym = (t.get("symbol") or "").upper().strip()
+            if sym and sym in want and sym not in seen:
+                seen.add(sym)
+                bucket.append(sym)
+        if bucket:
+            buckets.append(bucket)
+    leftover = [s for s in symbols if s.upper().strip() not in seen]
+    if leftover:
+        buckets.append([s.upper().strip() for s in leftover])
+
+    out: list[str] = []
+    while any(buckets):
+        nxt: list[list[str]] = []
+        for b in buckets:
+            if not b:
+                continue
+            out.append(b.pop(0))
+            if b:
+                nxt.append(b)
+        buckets = nxt
+    return out
+
+
 async def refresh_period_daily_closes(
     symbols: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -1573,12 +1621,14 @@ async def refresh_period_daily_closes(
     missing = [s for s in uniq if s not in fresh]
     fetched = 0
     if missing:
+        missing = _fair_order_period_symbols(missing)
         closes_map = await fetch_daily_closes_many(
             missing,
             lookback_days=60,
             concurrency=3,
             skip_yahoo=False,
             skip_akshare=True,
+            budget_sec=None,
         )
         clean = {
             s: validate_daily_closes(rows, min_rows=21)
