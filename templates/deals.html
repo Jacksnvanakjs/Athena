@@ -630,6 +630,33 @@
 
     <div class="stats" id="stats" style="display:none"></div>
 
+    <div class="er-anomaly-panel hidden" id="dealAnomalyPanel" style="display:none">
+      <div class="er-anomaly-head">
+        分差异常区 <span id="dealAnomalyCount"></span>
+        <span class="hint">「分数」与「回测」相差≥20；粉红行与下表同源，供人工复核材料性是否偏高/偏低</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>异常类型</th>
+              <th>分类</th>
+              <th>发稿</th>
+              <th>受益方</th>
+              <th>锚点</th>
+              <th>标题</th>
+              <th>分数</th>
+              <th>回测</th>
+              <th>分差</th>
+              <th>档</th>
+              <th>首日</th>
+            </tr>
+          </thead>
+          <tbody id="dealAnomalyTbody"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="panel table-panel" id="dealsTablePanel" style="display:none">
       <div class="table-wrap">
       <table>
@@ -672,6 +699,9 @@
       document.getElementById('dealsPanel').style.display = tab === 'deals' ? 'block' : 'none';
       document.getElementById('dealsTablePanel').style.display = tab === 'deals' ? 'block' : 'none';
       document.getElementById('stats').style.display = tab === 'deals' ? 'block' : 'none';
+      const dealAnom = document.getElementById('dealAnomalyPanel');
+      // 非合作页强制隐藏；合作页交给 .hidden（无异常时）控制
+      dealAnom.style.display = tab === 'deals' ? '' : 'none';
       document.getElementById('earningsPanel').style.display = tab === 'earnings' ? 'block' : 'none';
       if (tab === 'mainline') loadMainline();
       else if (tab === 'earnings') loadEarnings();
@@ -1175,12 +1205,44 @@
       if (cat === 'all') {
         extra = ` · AI合作 ${data.ai_cooperation_total || 0} · 黄仁勋 ${data.nvda_signal_total || 0}`;
       }
-      const anom = data.score_gap_large || 0;
       document.getElementById('stats').innerHTML =
         `筛选范围内：共 ${data.total} 条 · 已推送 ${data.pushed} 条${extra}` +
-        (pairs ? ' · ' + pairs : '') +
-        ` · 分差异常 <strong>${anom}</strong>` +
-        `<span class="help" title="「分数」与「回测」相差≥20 的条数（粉红行）。分差小即使首日涨跌为中/低也不标红。">?</span>`;
+        (pairs ? ' · ' + pairs : '');
+    }
+
+    function renderDealAnomalies(items) {
+      const panel = document.getElementById('dealAnomalyPanel');
+      const tbody = document.getElementById('dealAnomalyTbody');
+      const countEl = document.getElementById('dealAnomalyCount');
+      tbody.innerHTML = '';
+      const anomRows = (items || []).filter(r => r.score_gap_large);
+      if (!anomRows.length) {
+        panel.classList.add('hidden');
+        return;
+      }
+      panel.classList.remove('hidden');
+      countEl.textContent = `（${anomRows.length}）`;
+      for (const row of anomRows) {
+        const tr = document.createElement('tr');
+        const gap = row.score_gap;
+        const kind = gap > 0 ? 'er-anom-fp' : 'er-anom-fn';
+        const label = gap > 0 ? '高分低回测' : '低分高回测';
+        const gapTxt = gap == null ? '—' : `${gap > 0 ? '+' : ''}${gap}`;
+        tr.innerHTML = `
+          <td class="${kind}">${label}</td>
+          <td>${fmtCategory(row)}</td>
+          <td>${fmtPublished(row)}</td>
+          <td>${fmtBeneficiary(row)}</td>
+          <td>${fmtAnchor(row)}</td>
+          <td>${row.headline || '—'}</td>
+          <td class="score">${row.materiality_score ?? '—'}</td>
+          <td class="score">${fmtFirstDayScore(row)}</td>
+          <td class="${kind}">${gapTxt}</td>
+          <td>${fmtFirstDayBand(row)}</td>
+          <td>${fmtFirstDayRet(row)}</td>
+        `;
+        tbody.appendChild(tr);
+      }
     }
 
     async function loadDeals() {
@@ -1204,6 +1266,7 @@
       tbody.innerHTML = '';
       if (!items.length) {
         empty.style.display = 'block';
+        renderDealAnomalies([]);
         loadStats();
         loadStatus();
         return;
@@ -1231,6 +1294,7 @@
         `;
         tbody.appendChild(tr);
       }
+      renderDealAnomalies(items);
       loadStats();
       loadStatus();
     }
