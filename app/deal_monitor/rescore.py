@@ -17,6 +17,7 @@ from app.deal_monitor.materiality import (
     score_outcome_gap,
 )
 from app.source_url_guard import is_test_source_url
+from app.utils import now_beijing
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ def rescore_deal_events(
         if info["changed"]:
             if not dry_run:
                 event.materiality_score = info["new_score"]
+                event.scored_at = now_beijing()
             updated.append(info)
         else:
             # 未变也记入 samples 便于核对「已对齐」
@@ -162,6 +164,7 @@ def rescore_deal_events(
                 if not ev:
                     continue
                 ev.materiality_score = info["new_score"]
+                ev.scored_at = now_beijing()
                 try:
                     db.commit()
                     ok += 1

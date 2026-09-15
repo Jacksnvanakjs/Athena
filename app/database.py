@@ -96,6 +96,7 @@ class DealEvent(Base):
     beneficiary_market_cap_usd = Column(Float, nullable=True)
     tier_pair = Column(String(20), nullable=False)
     materiality_score = Column(Integer, nullable=False)
+    scored_at = Column(DateTime, nullable=True)
     matched_keywords = Column(String(500), nullable=True)
     event_type = Column(String(30), nullable=False, default="compute_deal")
     is_update = Column(Boolean, nullable=False, default=False)
@@ -130,6 +131,7 @@ class NvdaSignalEvent(Base):
     signal_tier = Column(String(20), nullable=False, index=True)
     action_type = Column(String(40), nullable=False)
     materiality_score = Column(Integer, nullable=False)
+    scored_at = Column(DateTime, nullable=True)
     confidence = Column(Integer, nullable=False, default=0)
     status = Column(String(20), nullable=False, default="confirmed")
     strategy = Column(String(40), nullable=False)
@@ -594,6 +596,7 @@ def _ensure_sqlite_columns() -> None:
         ("deal_events", "first_day_anomaly", "BOOLEAN DEFAULT 0"),
         ("deal_events", "first_day_note", "VARCHAR(200)"),
         ("deal_events", "first_day_checked_at", "DATETIME"),
+        ("deal_events", "scored_at", "DATETIME"),
         ("nvda_signal_events", "first_day_return", "FLOAT"),
         ("nvda_signal_events", "first_day_band", "VARCHAR(10)"),
         ("nvda_signal_events", "first_day_score", "INTEGER"),
@@ -601,6 +604,7 @@ def _ensure_sqlite_columns() -> None:
         ("nvda_signal_events", "first_day_anomaly", "BOOLEAN DEFAULT 0"),
         ("nvda_signal_events", "first_day_note", "VARCHAR(200)"),
         ("nvda_signal_events", "first_day_checked_at", "DATETIME"),
+        ("nvda_signal_events", "scored_at", "DATETIME"),
     )
     with engine.begin() as conn:
         for table, column, coltype in alters:

@@ -185,7 +185,9 @@
       background: rgba(192, 57, 43, 0.08);
     }
     .ticker { font-weight: 600; color: var(--accent); }
-    .score { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .score-cell { line-height: 1.35; }
+    .score-cell .score { font-variant-numeric: tabular-nums; font-weight: 600; }
+    .score-cell .time-sub { margin-top: 4px; }
     .fd-band {
       display: inline-block;
       min-width: 2.2em;
@@ -667,9 +669,9 @@
             <th>受益方</th>
             <th>锚点</th>
             <th>标题</th>
-            <th>分数 <span class="help" title="【两套独立刻度，勿直接横比】材料性分：条款越硬分越高。&#10;· AI合作：并购约≤65；硬催化常见 70–85（小票弹性大）&#10;· 黄仁勋：强并购约 78–82；硬催化可到 85（按 NVDA 产业动作单独打分，与 AI 合作封顶不同）">?</span></th>
+            <th>分数 <span class="help" title="【两套独立刻度，勿直接横比】材料性分：条款越硬分越高。&#10;· AI合作：并购约≤65；硬催化常见 70–85（小票弹性大）&#10;· 黄仁勋：强并购约 78–82；硬催化可到 85（按 NVDA 产业动作单独打分，与 AI 合作封顶不同）&#10;分数下方为打分时间（北京为主，美东附下）。">?</span></th>
             <th>档 <span class="help" title="首日涨跌档（由「首日%」换算）。&#10;· AI合作（常规）：高≥+3% · 中高≥+1%&#10;· 黄仁勋 NVDA/T0（大票）：高≥+1.5% · 中高≥+0.7%（同涨幅对大票含金量更高）">?</span></th>
-            <th>回测 <span class="help" title="【两边不完全一样】高85 / 中高70 / 中55 / 低35（分值映射相同），但进档门槛不同，同涨幅可能得到不同回测分：&#10;· AI合作：≥+3% 才「高→85」；≥+1%「中高→70」&#10;· 黄仁勋 NVDA/T0：≥+1.5% 即「高→85」；≥+0.7%「中高→70」&#10;勿把两边回测分直接横比。">?</span></th>
+            <th>回测 <span class="help" title="【两边不完全一样】高85 / 中高70 / 中55 / 低35（分值映射相同），但进档门槛不同，同涨幅可能得到不同回测分：&#10;· AI合作：≥+3% 才「高→85」；≥+1%「中高→70」&#10;· 黄仁勋 NVDA/T0：≥+1.5% 即「高→85」；≥+0.7%「中高→70」&#10;勿把两边回测分直接横比。&#10;回测下方为打分时间（北京为主，美东附下）。">?</span></th>
             <th>首日 <span class="help" title="受益股发稿后首个交易日：收盘相对前收的涨跌幅（%）。「档」「回测」都由它换算而来。">?</span></th>
             <th>关系/质量</th>
             <th>已推送</th>
@@ -1160,6 +1162,30 @@
       loadStatus();
     }
 
+    function fmtScoreWithTime(scoreHtml, bj, et) {
+      const time = (bj && bj !== '—')
+        ? `<div class="time-sub">${bj}</div>${et ? `<div class="time-et">${et} 美东</div>` : ''}`
+        : '';
+      return `<div class="score-cell"><div class="score">${scoreHtml}</div>${time}</div>`;
+    }
+
+    function fmtMaterialityScore(row, gapHint) {
+      const score = row.materiality_score == null ? '—' : String(row.materiality_score);
+      return fmtScoreWithTime(
+        `${score}${gapHint || ''}`,
+        row.scored_at_bj || row.fetched_at_bj,
+        row.scored_at_et || row.fetched_at_et,
+      );
+    }
+
+    function fmtFirstDayScoreCell(row) {
+      return fmtScoreWithTime(
+        fmtFirstDayScore(row),
+        row.first_day_checked_at_bj,
+        row.first_day_checked_at_et,
+      );
+    }
+
     function fmtFirstDayBand(row) {
       const b = row.first_day_band;
       if (!b) return '<span class="fd-band fd-none">—</span>';
@@ -1235,8 +1261,8 @@
           <td>${fmtBeneficiary(row)}</td>
           <td>${fmtAnchor(row)}</td>
           <td>${row.headline || '—'}</td>
-          <td class="score">${row.materiality_score ?? '—'}</td>
-          <td class="score">${fmtFirstDayScore(row)}</td>
+          <td>${fmtMaterialityScore(row, '')}</td>
+          <td>${fmtFirstDayScoreCell(row)}</td>
           <td class="${kind}">${gapTxt}</td>
           <td>${fmtFirstDayBand(row)}</td>
           <td>${fmtFirstDayRet(row)}</td>
@@ -1284,9 +1310,9 @@
           <td>${fmtBeneficiary(row)}</td>
           <td>${fmtAnchor(row)}</td>
           <td>${row.headline}</td>
-          <td class="score">${row.materiality_score}${gapHint}</td>
+          <td>${fmtMaterialityScore(row, gapHint)}</td>
           <td>${fmtFirstDayBand(row)}</td>
-          <td class="score">${fmtFirstDayScore(row)}</td>
+          <td>${fmtFirstDayScoreCell(row)}</td>
           <td>${fmtFirstDayRet(row)}</td>
           <td>${fmtRelation(row)}</td>
           <td class="${row.pushed ? 'pushed' : ''}">${fmtPushChannel(row)}</td>

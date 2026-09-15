@@ -454,14 +454,43 @@ async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None
 
 
 async def classify_items(items: list[RawItem]) -> dict[str, LlmDecision]:
-    """按批分类；失败的批次不写入结果，便于下一轮重试。成功后做规则兜底。"""
+    """按批分类；失败的批次不写入结果，便于下一轮重试。成功后做规则兜底。
+
+    多批之间并行，避免一条慢请求拖住整轮；单批内仍合并以省配额。
+    """
     if not (GEMINI_API_KEYS or GEMINI_API_KEY) or not items:
         return {}
 
+    chunks = [
+        items[start : start + LLM_BATCH_SIZE]
+        for start in range(0, len(items), LLM_BATCH_SIZE)
+    ]
+    # 控制并发，减轻 429；又不让多源稿件互相排队
+    sem = asyncio.Semaphore(min(4, max(1, len(chunks))))
+
+    async def _one(chunk: list[RawItem]) -> dict[str, LlmDecision]:
+        async with sem:
+            part = await _classify_batch(chunk)
+            if not part:
+                return {}
+            return apply_heuristic_rescue(chunk, part)
+
+    parts = await asyncio.gather(*[_one(c) for c in chunks], return_exceptions=True)
     merged: dict[str, LlmDecision] = {}
-    for start in range(0, len(items), LLM_BATCH_SIZE):
-        chunk = items[start : start + LLM_BATCH_SIZE]
-        part = await _classify_batch(chunk)
-        if part:
-            merged.update(apply_heuristic_rescue(chunk, part))
+    for part in parts:
+        if isinstance(part, Exception):
+            logger.warning("LLM 分批失败: %s", part)
+            continue
+        merged.update(part)
     return merged
+
+
+async def classify_one(item: RawItem) -> LlmDecision | None:
+    """单条即时分类（供流水线并行ingest，不等待同轮其他稿）。"""
+    if not (GEMINI_API_KEYS or GEMINI_API_KEY):
+        return None
+    part = await _classify_batch([item])
+    if not part:
+        return None
+    rescued = apply_heuristic_rescue([item], part)
+    return rescued.get(item.source_url) or part.get(item.source_url)

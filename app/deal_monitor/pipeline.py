@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -51,7 +52,7 @@ from app.deal_monitor.ingest_policy import (
     should_skip_vague_despite_llm,
 )
 from app.deal_monitor.keywords import is_product_only_integration, is_update_headline, passes_keyword_filter
-from app.deal_monitor.llm_classifier import LlmDecision, classify_items
+from app.deal_monitor.llm_classifier import LlmDecision, classify_items, classify_one
 from app.deal_monitor.market_cap import enrich_entity_tiers
 from app.market_data.tradability import is_us_tradable
 from app.deal_monitor.materiality import (
@@ -430,6 +431,8 @@ def _save_event(
     is_update: bool,
     beneficiary: Entity,
     event_type: str = EVENT_TYPE,
+    *,
+    fetched_at: datetime | None = None,
 ) -> DealEvent:
     from app.deal_monitor.headline_zh import build_zh_headline
 
@@ -439,9 +442,10 @@ def _save_event(
         item.headline,
         item.summary,
     )
+    now = now_beijing()
     event = DealEvent(
         published_at=item.published_at.replace(tzinfo=None),
-        fetched_at=now_beijing(),
+        fetched_at=fetched_at or now,
         headline=display_headline[:500],
         summary=item.summary,
         source=item.source,
@@ -456,6 +460,7 @@ def _save_event(
         beneficiary_market_cap_usd=beneficiary.market_cap_usd,
         tier_pair=roles.tier_pair,
         materiality_score=score,
+        scored_at=now,
         matched_keywords=json.dumps(matched_keywords, ensure_ascii=False),
         event_type=event_type or EVENT_TYPE,
         is_update=is_update,
@@ -499,7 +504,13 @@ async def _resolve_llm_anchor_and_beneficiaries(
     return anchor, beneficiaries, None
 
 
-async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | None = None) -> dict:
+async def process_item(
+    db: Session,
+    item: RawItem,
+    llm_decision: LlmDecision | None = None,
+    *,
+    fetched_at: datetime | None = None,
+) -> dict:
     stats = {"skipped": True, "reason": ""}
     if is_test_source_url(item.source_url):
         stats["reason"] = "测试/占位链接，不入库"
@@ -725,7 +736,15 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
         should_push = roles.should_push and not should_soft_skip_push(quality)
 
         event = _save_event(
-            db, item, roles, score, matched, is_update, beneficiary, event_type=event_type
+            db,
+            item,
+            roles,
+            score,
+            matched,
+            is_update,
+            beneficiary,
+            event_type=event_type,
+            fetched_at=fetched_at,
         )
         if _published_too_stale_for_push(event.published_at):
             event.push_channel = "stale"
@@ -766,129 +785,237 @@ async def process_item(db: Session, item: RawItem, llm_decision: LlmDecision | N
     return stats
 
 
-async def run_pipeline() -> dict:
-    """执行一轮 RSS / Finnhub / Google News / SEC 抓取与处理。"""
-    registry.load_seed()
-    pr_items, ir_items, agg_items, sec_items = await asyncio.gather(
-        fetch_pr_wires(),
-        fetch_company_ir_feeds(),
-        fetch_finnhub_and_google(),
-        fetch_sec_8k(),
+# 同轮多条新闻并行处理上限（LLM+入库+推送互不等待）
+_PROCESS_CONCURRENCY = max(1, int(os.getenv("DEAL_PROCESS_CONCURRENCY", "6")))
+
+
+async def _claim_and_filter_items(
+    items: list[RawItem],
+    *,
+    claimed: set[str],
+    claim_lock: asyncio.Lock,
+) -> tuple[list[tuple[RawItem, datetime]], int, int]:
+    """去重+硬过滤；返回 (item, discovered_at)、内容拒数、过旧数。"""
+    discovered: list[tuple[RawItem, datetime]] = []
+    content_rejected = 0
+    stale_dropped = 0
+    now = now_beijing()
+
+    async with claim_lock:
+        with db_session() as db:
+            seen_urls = {
+                row.source_url for row in db.query(DealSeenUrl.source_url).all()
+            }
+            for item in items:
+                url = (item.source_url or "").strip()
+                if not url or url in claimed or url in seen_urls:
+                    continue
+                claimed.add(url)
+                if _published_too_stale_for_ingest(item.published_at):
+                    stale_dropped += 1
+                    db.merge(
+                        DealSeenUrl(
+                            source_url=url,
+                            headline_hash=headline_hash(item.headline),
+                            seen_at=now,
+                            llm_relevant=False,
+                        )
+                    )
+                    continue
+                reject, reason = pre_llm_reject(item)
+                if reject:
+                    content_rejected += 1
+                    logger.info("内容过滤跳过: %s — %s", item.headline[:80], reason)
+                    db.merge(
+                        DealSeenUrl(
+                            source_url=url,
+                            headline_hash=headline_hash(item.headline),
+                            seen_at=now,
+                            llm_relevant=False,
+                        )
+                    )
+                    continue
+                # discovered_at：源侧刚拿到的时间，不被 LLM/兄弟稿拖后
+                discovered.append((item, now_beijing()))
+            if content_rejected or stale_dropped:
+                db.commit()
+    return discovered, content_rejected, stale_dropped
+
+
+async def _ingest_one(
+    item: RawItem,
+    discovered_at: datetime,
+    *,
+    sem: asyncio.Semaphore,
+) -> dict:
+    """单条：独立 LLM → 入库 → 推送，不阻塞同轮其他稿。"""
+    async with sem:
+        decision: LlmDecision | None = None
+        if DEAL_USE_LLM:
+            decision = await classify_one(item)
+            if decision is None:
+                # API 失败不写 seen，下一轮重试
+                return {"skipped": True, "reason": "llm_failed", "retry": True}
+
+        with db_session() as db:
+            try:
+                result = await process_item(
+                    db, item, decision, fetched_at=discovered_at
+                )
+                db.merge(
+                    DealSeenUrl(
+                        source_url=item.source_url,
+                        headline_hash=headline_hash(item.headline),
+                        seen_at=now_beijing(),
+                        llm_relevant=bool(decision and decision.is_relevant),
+                    )
+                )
+                db.commit()
+                return result
+            except Exception as exc:
+                logger.exception("处理条目失败: %s", item.headline[:80])
+                db.rollback()
+                return {"skipped": True, "reason": str(exc)[:200], "error": True}
+
+
+async def _handle_source_batch(
+    fetch_coro,
+    *,
+    claimed: set[str],
+    claim_lock: asyncio.Lock,
+    sem: asyncio.Semaphore,
+) -> dict:
+    """某一抓取源完成后立刻过滤并并行 ingest，不等其他源。"""
+    stats = {
+        "fetched": 0,
+        "fetched_new": 0,
+        "content_filtered": 0,
+        "stale_dropped": 0,
+        "processed": 0,
+        "saved": 0,
+        "errors": [],
+        "llm_hits": 0,
+    }
+    try:
+        items: list[RawItem] = await fetch_coro
+    except Exception as exc:
+        logger.exception("抓取源失败")
+        stats["errors"].append(str(exc)[:200])
+        return stats
+
+    # 源内 URL 去重
+    uniq: list[RawItem] = []
+    seen_local: set[str] = set()
+    for item in items:
+        url = (item.source_url or "").strip()
+        if not url or url in seen_local:
+            continue
+        seen_local.add(url)
+        uniq.append(item)
+    stats["fetched"] = len(uniq)
+
+    discovered, rejected, stale = await _claim_and_filter_items(
+        uniq, claimed=claimed, claim_lock=claim_lock
     )
-    # URL 去重：同一通稿可能同时出现在 PRN / BW / IR / Finnhub / Google
-    items: list[RawItem] = []
-    seen_fetch: set[str] = set()
-    for batch in (pr_items, ir_items, agg_items, sec_items):
-        for item in batch:
-            url = (item.source_url or "").strip()
-            if not url or url in seen_fetch:
-                continue
-            seen_fetch.add(url)
-            items.append(item)
-    summary = {
-        "fetched": len(items),
-        "fetched_pr": len(pr_items),
-        "fetched_ir": len(ir_items),
-        "fetched_agg": len(agg_items),
-        "fetched_sec_8k": len(sec_items),
+    stats["content_filtered"] = rejected
+    stats["stale_dropped"] = stale
+    stats["fetched_new"] = len(discovered)
+
+    if not discovered:
+        return stats
+
+    # 新稿优先，但仍并行，不串行等旧稿
+    discovered.sort(
+        key=lambda pair: (
+            pair[0].published_at.replace(tzinfo=None)
+            if pair[0].published_at and pair[0].published_at.tzinfo
+            else pair[0].published_at
+        )
+        or datetime.min,
+        reverse=True,
+    )
+
+    results = await asyncio.gather(
+        *[_ingest_one(item, discovered_at, sem=sem) for item, discovered_at in discovered],
+        return_exceptions=True,
+    )
+    for res in results:
+        if isinstance(res, Exception):
+            stats["errors"].append(str(res)[:200])
+            continue
+        if res.get("error"):
+            stats["errors"].append(res.get("reason") or "error")
+            continue
+        if res.get("retry"):
+            continue
+        if not res.get("skipped"):
+            stats["processed"] += 1
+            stats["saved"] += len(res.get("saved") or [])
+            stats["llm_hits"] += 1
+    return stats
+
+
+async def run_pipeline() -> dict:
+    """多源并行抓取；每源一到就立刻并行分类/入库/推送，稿件互不等待。"""
+    registry.load_seed()
+    claimed: set[str] = set()
+    claim_lock = asyncio.Lock()
+    sem = asyncio.Semaphore(_PROCESS_CONCURRENCY)
+
+    with db_session() as db:
+        registry.sync_to_db(db)
+
+    parts = await asyncio.gather(
+        _handle_source_batch(
+            fetch_pr_wires(), claimed=claimed, claim_lock=claim_lock, sem=sem
+        ),
+        _handle_source_batch(
+            fetch_company_ir_feeds(), claimed=claimed, claim_lock=claim_lock, sem=sem
+        ),
+        _handle_source_batch(
+            fetch_finnhub_and_google(), claimed=claimed, claim_lock=claim_lock, sem=sem
+        ),
+        _handle_source_batch(
+            fetch_sec_8k(), claimed=claimed, claim_lock=claim_lock, sem=sem
+        ),
+        return_exceptions=True,
+    )
+
+    summary: dict = {
+        "fetched": 0,
+        "fetched_pr": 0,
+        "fetched_ir": 0,
+        "fetched_agg": 0,
+        "fetched_sec_8k": 0,
         "fetched_new": 0,
         "stale_dropped": 0,
+        "content_filtered": 0,
         "processed": 0,
         "saved": 0,
         "pushed": 0,
         "errors": [],
+        "llm_enabled": DEAL_USE_LLM,
+        "llm_model": DEAL_LLM_MODEL if DEAL_USE_LLM else None,
+        "llm_hits": 0,
+        "parallel": True,
+        "process_concurrency": _PROCESS_CONCURRENCY,
     }
-    llm_decisions: dict[str, LlmDecision] = {}
+    labels = ("fetched_pr", "fetched_ir", "fetched_agg", "fetched_sec_8k")
+    for label, part in zip(labels, parts):
+        if isinstance(part, Exception):
+            summary["errors"].append(str(part)[:200])
+            continue
+        summary[label] = part.get("fetched", 0)
+        summary["fetched"] += part.get("fetched", 0)
+        summary["fetched_new"] += part.get("fetched_new", 0)
+        summary["stale_dropped"] += part.get("stale_dropped", 0)
+        summary["content_filtered"] += part.get("content_filtered", 0)
+        summary["processed"] += part.get("processed", 0)
+        summary["saved"] += part.get("saved", 0)
+        summary["llm_hits"] += part.get("llm_hits", 0)
+        summary["errors"].extend(part.get("errors") or [])
 
     with db_session() as db:
-        registry.sync_to_db(db)
-        seen_urls = {
-            row.source_url
-            for row in db.query(DealSeenUrl.source_url).all()
-        }
-        new_items = [item for item in items if item.source_url not in seen_urls]
-        summary["fetched_new"] = len(new_items)
-
-        content_rejected = 0
-        stale_dropped = 0
-        eligible_items: list[RawItem] = []
-        for item in new_items:
-            if _published_too_stale_for_ingest(item.published_at):
-                stale_dropped += 1
-                db.merge(
-                    DealSeenUrl(
-                        source_url=item.source_url,
-                        headline_hash=headline_hash(item.headline),
-                        seen_at=now_beijing(),
-                        llm_relevant=False,
-                    )
-                )
-                continue
-            reject, reason = pre_llm_reject(item)
-            if reject:
-                content_rejected += 1
-                logger.info("内容过滤跳过: %s — %s", item.headline[:80], reason)
-                db.merge(
-                    DealSeenUrl(
-                        source_url=item.source_url,
-                        headline_hash=headline_hash(item.headline),
-                        seen_at=now_beijing(),
-                        llm_relevant=False,
-                    )
-                )
-                continue
-            eligible_items.append(item)
-        if content_rejected or stale_dropped:
-            db.commit()
-            summary["content_filtered"] = content_rejected
-            summary["stale_dropped"] = stale_dropped
-        new_items = eligible_items
-        # 越新优先处理/推送，减少一轮抓到多条时先推旧闻
-        new_items.sort(
-            key=lambda it: (
-                it.published_at.replace(tzinfo=None)
-                if it.published_at and it.published_at.tzinfo
-                else it.published_at
-            )
-            or datetime.min,
-            reverse=True,
-        )
-
-        if DEAL_USE_LLM:
-            llm_decisions = await classify_items(new_items)
-            summary["llm_enabled"] = True
-            summary["llm_model"] = DEAL_LLM_MODEL
-            summary["llm_hits"] = sum(1 for d in llm_decisions.values() if d.is_relevant)
-            summary["llm_items_sent"] = len(new_items)
-        else:
-            summary["llm_enabled"] = False
-
-        for item in new_items:
-            try:
-                result = await process_item(db, item, llm_decisions.get(item.source_url))
-                if DEAL_USE_LLM and item.source_url not in llm_decisions:
-                    # API 失败时不记 seen，下一轮重试，避免漏稿
-                    continue
-                db.merge(
-                    DealSeenUrl(
-                        source_url=item.source_url,
-                        headline_hash=headline_hash(item.headline),
-                        seen_at=now_beijing(),
-                        llm_relevant=bool(
-                            llm_decisions.get(item.source_url)
-                            and llm_decisions[item.source_url].is_relevant
-                        ),
-                    )
-                )
-                db.commit()
-                if not result.get("skipped"):
-                    summary["processed"] += 1
-                    summary["saved"] += len(result.get("saved", []))
-            except Exception as exc:
-                logger.exception("处理条目失败: %s", item.headline[:80])
-                summary["errors"].append(str(exc)[:200])
-                db.rollback()
-
         summary["push_retried"] = await retry_unpushed_events(db)
         summary["pushed"] = (
             db.query(DealEvent)

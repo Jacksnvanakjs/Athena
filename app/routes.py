@@ -292,6 +292,12 @@ def _first_day_fields(event) -> dict:
         ),
         "score_gap": gap,
         "score_gap_large": gap is not None and abs(gap) >= DEAL_SCORE_OUTCOME_GAP_DISPLAY,
+        "first_day_checked_at_bj": format_beijing_at_bj(
+            getattr(event, "first_day_checked_at", None)
+        ),
+        "first_day_checked_at_et": format_beijing_at_et(
+            getattr(event, "first_day_checked_at", None)
+        ),
     }
 
 
@@ -331,6 +337,9 @@ def _deal_to_dict(event) -> dict:
         "beneficiary_market_cap_usd": event.beneficiary_market_cap_usd,
         "tier_pair": event.tier_pair,
         "materiality_score": event.materiality_score,
+        "scored_at": event.scored_at.isoformat() if getattr(event, "scored_at", None) else None,
+        "scored_at_bj": format_beijing_at_bj(getattr(event, "scored_at", None) or event.fetched_at),
+        "scored_at_et": format_beijing_at_et(getattr(event, "scored_at", None) or event.fetched_at),
         "matched_keywords": event.matched_keywords,
         "event_type": event.event_type,
         "is_update": event.is_update,
@@ -385,6 +394,9 @@ def _nvda_to_dict(event) -> dict:
         "beneficiary_market_cap_usd": event.beneficiary_market_cap_usd,
         "tier_pair": tier_pair,
         "materiality_score": event.materiality_score,
+        "scored_at": event.scored_at.isoformat() if getattr(event, "scored_at", None) else None,
+        "scored_at_bj": format_beijing_at_bj(getattr(event, "scored_at", None) or event.fetched_at),
+        "scored_at_et": format_beijing_at_et(getattr(event, "scored_at", None) or event.fetched_at),
         "matched_keywords": event.action_type,
         "event_type": event.action_type,
         "is_update": False,

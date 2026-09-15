@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 
@@ -233,7 +235,12 @@ async def _maybe_push(db: Session, event: NvdaSignalEvent) -> None:
         event.pushed_at = None
 
 
-async def process_item(db: Session, item: RawItem) -> dict:
+async def process_item(
+    db: Session,
+    item: RawItem,
+    *,
+    fetched_at: datetime | None = None,
+) -> dict:
     stats = {"skipped": True, "reason": ""}
     if is_test_source_url(item.source_url):
         stats["reason"] = "测试/占位链接，不入库"
@@ -328,7 +335,7 @@ async def process_item(db: Session, item: RawItem) -> dict:
 
         event = NvdaSignalEvent(
             published_at=item.published_at.replace(tzinfo=None),
-            fetched_at=now_beijing(),
+            fetched_at=fetched_at or now_beijing(),
             headline=build_zh_headline(
                 entity.ticker or "",
                 item.headline,
@@ -346,6 +353,7 @@ async def process_item(db: Session, item: RawItem) -> dict:
             signal_tier=classification.signal_tier,
             action_type=classification.action_type,
             materiality_score=materiality,
+            scored_at=now_beijing(),
             confidence=confidence,
             status=classification.status,
             strategy=plan.strategy,
@@ -368,6 +376,35 @@ async def process_item(db: Session, item: RawItem) -> dict:
     return stats
 
 
+_NVDA_PROCESS_CONCURRENCY = max(1, int(os.getenv("DEAL_PROCESS_CONCURRENCY", "6")))
+
+
+async def _nvda_ingest_one(
+    item: RawItem,
+    discovered_at: datetime,
+    *,
+    sem: asyncio.Semaphore,
+) -> dict:
+    async with sem:
+        with db_session() as db:
+            try:
+                result = await process_item(db, item, fetched_at=discovered_at)
+                db.merge(
+                    NvdaSignalSeenUrl(
+                        source_url=item.source_url,
+                        headline_hash=headline_hash(item.headline),
+                        seen_at=now_beijing(),
+                        relevant=not result.get("skipped"),
+                    )
+                )
+                db.commit()
+                return result
+            except Exception as exc:
+                logger.exception("NVDA 信号处理失败: %s", item.headline[:80])
+                db.rollback()
+                return {"skipped": True, "reason": str(exc)[:200], "error": True}
+
+
 async def run_pipeline() -> dict:
     if not NVDA_SIGNAL_ENABLED:
         return {"enabled": False, "fetched": 0, "saved": 0}
@@ -381,6 +418,7 @@ async def run_pipeline() -> dict:
         "saved": 0,
         "pushed": 0,
         "errors": [],
+        "parallel": True,
     }
 
     with db_session() as db:
@@ -389,7 +427,7 @@ async def run_pipeline() -> dict:
         summary["fetched_new"] = len(new_items)
 
         stale_dropped = 0
-        eligible: list[RawItem] = []
+        eligible: list[tuple[RawItem, datetime]] = []
         for item in new_items:
             if _published_too_stale_for_ingest(item.published_at):
                 stale_dropped += 1
@@ -402,36 +440,37 @@ async def run_pipeline() -> dict:
                     )
                 )
                 continue
-            eligible.append(item)
+            eligible.append((item, now_beijing()))
         if stale_dropped:
             db.commit()
             summary["stale_dropped"] = stale_dropped
-        new_items = eligible
-        new_items.sort(
-            key=lambda it: (it.published_at.replace(tzinfo=None) if it.published_at and it.published_at.tzinfo else it.published_at)
-            or datetime.min,
-            reverse=True,
+
+    eligible.sort(
+        key=lambda pair: (
+            pair[0].published_at.replace(tzinfo=None)
+            if pair[0].published_at and pair[0].published_at.tzinfo
+            else pair[0].published_at
         )
+        or datetime.min,
+        reverse=True,
+    )
 
-        for item in new_items:
-            try:
-                result = await process_item(db, item)
-                db.merge(
-                    NvdaSignalSeenUrl(
-                        source_url=item.source_url,
-                        headline_hash=headline_hash(item.headline),
-                        seen_at=now_beijing(),
-                        relevant=not result.get("skipped"),
-                    )
-                )
-                db.commit()
-                if not result.get("skipped"):
-                    summary["saved"] += len(result.get("saved", []))
-            except Exception as exc:
-                logger.exception("NVDA 信号处理失败: %s", item.headline[:80])
-                summary["errors"].append(str(exc)[:200])
-                db.rollback()
+    sem = asyncio.Semaphore(_NVDA_PROCESS_CONCURRENCY)
+    results = await asyncio.gather(
+        *[_nvda_ingest_one(item, discovered, sem=sem) for item, discovered in eligible],
+        return_exceptions=True,
+    )
+    for res in results:
+        if isinstance(res, Exception):
+            summary["errors"].append(str(res)[:200])
+            continue
+        if res.get("error"):
+            summary["errors"].append(res.get("reason") or "error")
+            continue
+        if not res.get("skipped"):
+            summary["saved"] += len(res.get("saved") or [])
 
+    with db_session() as db:
         summary["pushed"] = (
             db.query(NvdaSignalEvent)
             .filter(
