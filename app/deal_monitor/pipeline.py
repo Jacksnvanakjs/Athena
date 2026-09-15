@@ -44,6 +44,7 @@ from app.deal_monitor.content_filter import (
     should_hide_deal_event,
     should_hide_weak_quality_event,
 )
+from app.deal_monitor.first_day import try_fill_first_day_now
 from app.deal_monitor.story_fingerprint import is_related_deal_story, is_same_story
 from app.deal_monitor.ingest_policy import (
     llm_allows_beneficiary_ingest,
@@ -778,6 +779,7 @@ async def process_item(
             logger.info("网页隐藏规则命中，入库不推送 %s", ticker)
         else:
             await _maybe_push(db, event, True)
+        await try_fill_first_day_now(event)
         saved.append(event.beneficiary_ticker)
         last_score = score
         last_tier_pair = roles.tier_pair

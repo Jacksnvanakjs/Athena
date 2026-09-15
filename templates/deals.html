@@ -686,7 +686,7 @@
             <th>标题</th>
             <th>分数 <span class="help" title="【两套独立刻度，勿直接横比】材料性分：条款越硬分越高。&#10;· AI合作：并购约≤65；硬催化常见 70–85（小票弹性大）&#10;· 黄仁勋：强并购约 78–82；硬催化可到 85（按 NVDA 产业动作单独打分，与 AI 合作封顶不同）&#10;分数下方：LLM/规则打分时刻（北京时间，悬停可看美东）。">?</span></th>
             <th>档 <span class="help" title="首日涨跌档（由「首日%」换算）。&#10;· AI合作（常规）：高≥+3% · 中高≥+1%&#10;· 黄仁勋 NVDA/T0（大票）：高≥+1.5% · 中高≥+0.7%（同涨幅对大票含金量更高）">?</span></th>
-            <th>回测 <span class="help" title="把「首日涨跌%」映射成分数，用来对照材料性分是否虚高/虚低。&#10;映射：高→85 · 中高→70 · 中→55 · 低→35（进档门槛见「档」列说明）。&#10;回测下方：参与计算的那个美东交易日（不是定时任务跑完的时间）。&#10;口径：发稿后首个可交易日收盘 ÷ 前一交易日收盘 − 1。">?</span></th>
+            <th>回测 <span class="help" title="把「首日涨跌%」映射成分数，用来对照材料性分是否虚高/虚低。&#10;映射：高→85 · 中高→70 · 中→55 · 低→35（进档门槛见「档」列说明）。&#10;下方时间=系统实际写出回测分的时刻（北京）。悬停可看美东交易日与口径。&#10;口径：发稿后首个可交易日收盘 ÷ 前一交易日收盘 − 1。入库后即试算；若当日未收盘则待收盘后自动补。">?</span></th>
             <th>首日 <span class="help" title="受益股发稿后首个可交易日：收盘相对前收的涨跌幅（%）。「档」「回测」都由它换算而来。">?</span></th>
             <th>关系/质量</th>
             <th>已推送</th>
@@ -1211,22 +1211,22 @@
 
     function fmtFirstDayScoreCell(row) {
       const scoreHtml = fmtFirstDayScore(row);
-      // 回测下方展示「首个交易日」，不是定时任务跑完时刻（避免与分数时间差 1 小时造成误解）
-      let session = row.first_day_session_date || '';
-      if (session && /^\d{4}-\d{2}-\d{2}/.test(session)) {
-        session = session.slice(5, 10); // MM-DD
-      }
+      // 显示实际写出回测分的时刻；交易日/口径放悬停，避免和材料性打分时间混淆
+      const bj = row.first_day_checked_at_bj;
+      const et = row.first_day_checked_at_et;
+      const short = compactBjClock(bj);
       const tipParts = [];
+      if (row.first_day_session_date) tipParts.push(`交易日 ${row.first_day_session_date}`);
       if (row.first_day_note) tipParts.push(row.first_day_note);
-      if (row.first_day_checked_at_bj && row.first_day_checked_at_bj !== '—') {
-        tipParts.push(`系统回填 ${row.first_day_checked_at_bj} 北京`);
-      }
+      const dual = dualTimeTitle(bj, et);
+      if (dual) tipParts.push(dual);
       const tip = tipParts.join(' · ');
-      const time = session
-        ? `<div class="time-sub" title="${tip}">交易日 ${session}</div>`
-        : (row.first_day_score == null
-          ? ''
-          : `<div class="time-sub time-meta" title="${tip}">待收盘</div>`);
+      let time = '';
+      if (short) {
+        time = `<div class="time-sub" title="${tip}">${short}</div>`;
+      } else if (row.first_day_score == null && (row.first_day_note || '').includes('待')) {
+        time = `<div class="time-sub time-meta" title="${tip}">待收盘</div>`;
+      }
       return `<div class="score-cell"><div class="score">${scoreHtml}</div>${time}</div>`;
     }
 

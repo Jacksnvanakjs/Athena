@@ -199,6 +199,22 @@ async def refresh_event_first_day(event) -> FirstDayOutcome:
     return outcome
 
 
+async def try_fill_first_day_now(event) -> FirstDayOutcome | None:
+    """入库后立刻试算首日回测（已收盘则马上有分；未收盘则记「待收盘」供定时重试）。"""
+    ticker = (getattr(event, "beneficiary_ticker", None) or "").strip()
+    if not ticker or not getattr(event, "published_at", None):
+        return None
+    try:
+        return await refresh_event_first_day(event)
+    except Exception as exc:
+        logger.debug(
+            "即时首日回测跳过 %s: %s",
+            ticker,
+            exc,
+        )
+        return None
+
+
 async def run_first_day_check(*, lookback_days: int = 90, force: bool = False) -> dict:
     """回填 deal + nvda 受益方首日涨跌与档位。"""
     from app.database import DealEvent, NvdaSignalEvent, db_session

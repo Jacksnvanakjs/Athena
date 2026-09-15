@@ -28,6 +28,7 @@ from app.database import NvdaSignalEvent, NvdaSignalSeenUrl, db_session
 from app.deal_monitor.entities import Entity, registry
 from app.deal_monitor.entity_resolver import is_channel_partner_entity, resolve_entity
 from app.deal_monitor.fetchers.pr_wire import RawItem
+from app.deal_monitor.first_day import try_fill_first_day_now
 from app.deal_monitor.market_cap import enrich_entity_tiers
 from app.deal_monitor.pipeline import normalize_headline, _published_too_stale_for_ingest
 from app.nvda_signal.classifier import classify_signal
@@ -368,6 +369,7 @@ async def process_item(
         )
         db.add(event)
         await _maybe_push(db, event)
+        await try_fill_first_day_now(event)
         saved.append(entity.ticker.upper())
 
     if saved:

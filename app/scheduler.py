@@ -107,6 +107,15 @@ async def scheduled_deal_first_day():
     logger.info("deal 首日回测完成: %s", result)
 
 
+async def scheduled_deal_first_day_pending():
+    """盘中/盘后补漏：待收盘或未回测的条目尽快补分（不必等 10:15/16:45）。"""
+    from app.deal_monitor.first_day import run_first_day_check
+
+    logger.info("开始 deal 首日回测补漏...")
+    result = await run_first_day_check(lookback_days=14, force=False)
+    logger.info("deal 首日回测补漏完成: %s", result)
+
+
 async def scheduled_deal_market_cap_refresh():
     """每日刷新市值分档缓存。"""
     from app.database import db_session
@@ -259,6 +268,15 @@ def start_scheduler():
         CronTrigger(hour=10, minute=15, timezone="America/New_York"),
         id="deal_first_day_et_1015",
         replace_existing=True,
+    )
+    # 未收盘条目入库后会先标「待收盘」；每 30 分钟重试，收盘后尽快出分
+    scheduler.add_job(
+        scheduled_deal_first_day_pending,
+        IntervalTrigger(minutes=30),
+        id="deal_first_day_pending_30m",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
     if EARNINGS_MONITOR_ENABLED:
         scheduler.add_job(
