@@ -706,9 +706,14 @@
             <th>锚点</th>
             <th>标题</th>
             <th>分数 <span class="help" title="【两套独立刻度，勿直接横比】材料性分：条款越硬分越高。&#10;· AI合作：并购约≤65；硬催化常见 70–85（小票弹性大）&#10;· 黄仁勋：强并购约 78–82；硬催化可到 85（按 NVDA 产业动作单独打分，与 AI 合作封顶不同）&#10;分数下方时间：北京（主）+ 美东（附）；悬停看完整时刻。">?</span></th>
-            <th>档 <span class="help" title="首日涨跌档（由「首日%」换算）。&#10;· AI合作（常规）：高≥+3% · 中高≥+1%&#10;· 黄仁勋 NVDA/T0（大票）：高≥+1.5% · 中高≥+0.7%（同涨幅对大票含金量更高）">?</span></th>
-            <th>回测 <span class="help" title="把「首日涨跌%」映射成分数，用来对照材料性分是否虚高/虚低。&#10;映射：高→85 · 中高→70 · 中→55 · 低→35（进档门槛见「档」列说明）。&#10;下方时间=写出回测分的时刻：北京（主）+ 美东（附）；悬停看交易日与口径。&#10;口径：发稿后首个可交易日收盘 ÷ 前一交易日收盘 − 1。入库后即试算；若当日未收盘则待收盘后自动补。">?</span></th>
-            <th>首日 <span class="help" title="受益股发稿后首个可交易日：收盘相对前收的涨跌幅（%）。「档」「回测」都由它换算而来。">?</span></th>
+            <th>档 <span class="help" title="由「发稿日K%」换算的档位（材料性校准用，不是推送可执行收益）。&#10;· AI合作：高≥+3% · 中高≥+1%&#10;· 黄仁勋 NVDA/T0：高≥+1.5% · 中高≥+0.7%">?</span></th>
+            <th>回测 <span class="help" title="把「发稿日K%」映射成分数，对照材料性分。&#10;映射：高→85 · 中高→70 · 中→55 · 低→35。&#10;口径：发稿后首个交易日收盘÷前收−1（≠推送买入）。">?</span></th>
+            <th>发稿日K <span class="help" title="【市场反应·旧口径】发稿后首个可交易日收盘相对前收。&#10;不是你的推送买入成本，仅作对照/打档。">?</span></th>
+            <th>买+1h <span class="help" title="【推送可执行·买入】Bark 推送成功时刻 + 1 小时的成交价（含盘前盘后）。&#10;盘中/非盘中统一用推送后1h价当成本。&#10;无推送或尚未到采样点显示 —。">?</span></th>
+            <th>T0开 <span class="help" title="【卖出1】相对买+1h 的收益 = T0开盘价÷买价−1。&#10;T0=买入意图后的第1个美股交易日。&#10;· 盘中推送：开盘已过 → N/A（不可能先买再开盘卖）&#10;· 盘前/盘后/周末推送：T0开盘可用（隔夜挂单后的极短持有）。">?</span></th>
+            <th>T0收 <span class="help" title="【卖出2】T0收盘价÷买+1h−1。&#10;对应「推送后约1h买入、当日（T0）收盘卖」。&#10;若买入已在收盘后，则 T0 顺延下一交易日。">?</span></th>
+            <th>T1开 <span class="help" title="【卖出3】T1（T0的下一交易日）开盘÷买+1h−1。&#10;看隔夜后开盘是否继续发酵/回吐。">?</span></th>
+            <th>T1收 <span class="help" title="【卖出4】T1收盘÷买+1h−1。&#10;持有到第二个交易日收盘的可执行收益。">?</span></th>
             <th>关系/质量</th>
             <th>已推送</th>
             <th>来源</th>
@@ -1483,6 +1488,57 @@
       return `<span class="fd-ret ${cls}" title="${tip}">${sign}${Number(p).toFixed(1)}%</span>`;
     }
 
+    function fmtPushBtBuy(row) {
+      const px = row.push_bt_buy_price;
+      if (px == null) {
+        const why = !row.pushed_at ? '未推送' : (row.push_bt_note || '待采样');
+        return `<span class="fd-ret" title="${why}">—</span>`;
+      }
+      const tip = [
+        row.push_bt_session_label || '',
+        row.push_bt_buy_at_et ? `美东 ${row.push_bt_buy_at_et}` : '',
+        '推送+1h价',
+      ].filter(Boolean).join(' · ');
+      return `<span title="${tip}">$${Number(px).toFixed(2)}</span>`;
+    }
+
+    function fmtPushBtPct(row, key, pxKey) {
+      const p = row[key];
+      const note = row.push_bt_note || '';
+      if (p == null) {
+        let why = 'N/A';
+        if (!row.pushed_at) why = '未推送';
+        else if (!row.push_bt_buy_price) why = '待买价';
+        const tag = {
+          push_bt_ret_t0_open_pct: 'T0开:',
+          push_bt_ret_t0_close_pct: 'T0收:',
+          push_bt_ret_t1_open_pct: 'T1开:',
+          push_bt_ret_t1_close_pct: 'T1收:',
+        }[key];
+        if (tag && note.includes(tag)) {
+          const part = note.split('｜')[1] || note;
+          const hit = part.split('；').find(s => s.startsWith(tag));
+          if (hit) why = hit.slice(tag.length);
+        } else if (note.includes('待')) {
+          why = '待补齐';
+        }
+        const sess = row.push_bt_session_label || row.push_bt_session || '';
+        return `<span class="fd-ret" title="${sess} · ${why}">—</span>`;
+      }
+      const n = Number(p);
+      const cls = n > 0 ? 'up' : (n < 0 ? 'down' : '');
+      const sign = n > 0 ? '+' : '';
+      const buy = row.push_bt_buy_price;
+      const sell = row[pxKey];
+      const tip = [
+        row.push_bt_session_label || '',
+        buy != null ? `买$${Number(buy).toFixed(2)}` : '',
+        sell != null ? `卖$${Number(sell).toFixed(2)}` : '',
+        key.includes('t0') ? `T0 ${row.push_bt_t0_date || ''}` : `T1 ${row.push_bt_t1_date || ''}`,
+      ].filter(Boolean).join(' · ');
+      return `<span class="fd-ret ${cls}" title="${tip}">${sign}${n.toFixed(1)}%</span>`;
+    }
+
     async function loadStats() {
       const cat = document.getElementById('category').value;
       const params = new URLSearchParams({
@@ -1565,6 +1621,11 @@
             <td>${fmtFirstDayBand(row)}</td>
             <td>${fmtFirstDayScoreCell(row)}</td>
             <td>${fmtFirstDayRet(row)}</td>
+            <td>${fmtPushBtBuy(row)}</td>
+            <td>${fmtPushBtPct(row, 'push_bt_ret_t0_open_pct', 'push_bt_px_t0_open')}</td>
+            <td>${fmtPushBtPct(row, 'push_bt_ret_t0_close_pct', 'push_bt_px_t0_close')}</td>
+            <td>${fmtPushBtPct(row, 'push_bt_ret_t1_open_pct', 'push_bt_px_t1_open')}</td>
+            <td>${fmtPushBtPct(row, 'push_bt_ret_t1_close_pct', 'push_bt_px_t1_close')}</td>
             <td>${fmtRelation(row)}</td>
             <td class="${row.pushed ? 'pushed' : ''}">${fmtPushChannel(row)}</td>
             <td>${fmtSource(row)}</td>

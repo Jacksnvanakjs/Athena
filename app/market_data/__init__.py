@@ -19,6 +19,7 @@ from app.market_data.daily_closes import (
     fetch_daily_closes,
     fetch_daily_closes_many,
 )
+from app.market_data.intraday import fetch_price_at
 from app.market_data.quotes import fetch_quotes
 from app.market_data.tradability import is_us_tradable
 
@@ -28,6 +29,7 @@ __all__ = [
     "fetch_daily_closes",
     "fetch_daily_closes_many",
     "fetch_daily_bars",
+    "fetch_price_at",
     "fetch_quotes",
     "is_us_tradable",
 ]

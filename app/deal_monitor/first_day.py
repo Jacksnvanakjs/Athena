@@ -216,8 +216,12 @@ async def try_fill_first_day_now(event) -> FirstDayOutcome | None:
 
 
 async def run_first_day_check(*, lookback_days: int = 90, force: bool = False) -> dict:
-    """回填 deal + nvda 受益方首日涨跌与档位。"""
+    """回填 deal + nvda：发稿日K首日 + 推送可执行四段回测。"""
     from app.database import DealEvent, NvdaSignalEvent, db_session
+    from app.deal_monitor.push_backtest import (
+        push_backtest_needs_refresh,
+        refresh_event_push_backtest,
+    )
     from app.source_url_guard import is_test_source_url
 
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=max(1, lookback_days))
@@ -226,6 +230,7 @@ async def run_first_day_check(*, lookback_days: int = 90, force: bool = False) -
         "updated": 0,
         "anomalies": 0,
         "pending": 0,
+        "push_bt_updated": 0,
         "errors": [],
     }
 
@@ -258,6 +263,13 @@ async def run_first_day_check(*, lookback_days: int = 90, force: bool = False) -
                     if outcome.band == BAND_NONE:
                         summary["pending"] += 1
                     db.commit()
+                if push_backtest_needs_refresh(event, force=force):
+                    pb = await refresh_event_push_backtest(event)
+                    if pb is not None:
+                        summary["push_bt_updated"] += 1
+                        if pb.pending:
+                            summary["pending"] += 1
+                        db.commit()
                 summary["checked"] += 1
                 if event.first_day_anomaly:
                     summary["anomalies"] += 1

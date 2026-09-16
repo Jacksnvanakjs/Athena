@@ -287,6 +287,13 @@ def _first_day_fields(event) -> dict:
     gap = None
     if mat is not None and fd_score is not None:
         gap = int(mat) - int(fd_score)
+
+    def _pct(v):
+        return None if v is None else round(float(v) * 100.0, 2)
+
+    from app.deal_monitor.push_backtest import SESSION_LABEL_ZH
+
+    sess = getattr(event, "push_bt_session", None) or ""
     return {
         "first_day_return": ret,
         "first_day_return_pct": None if ret is None else round(ret * 100.0, 2),
@@ -311,6 +318,37 @@ def _first_day_fields(event) -> dict:
         ),
         "first_day_checked_at_et": format_beijing_at_et(
             getattr(event, "first_day_checked_at", None)
+        ),
+        # 推送可执行回测
+        "push_bt_session": sess or None,
+        "push_bt_session_label": SESSION_LABEL_ZH.get(sess) if sess else None,
+        "push_bt_buy_price": getattr(event, "push_bt_buy_price", None),
+        "push_bt_buy_at_bj": format_beijing_at_bj(getattr(event, "push_bt_buy_at", None)),
+        "push_bt_buy_at_et": format_beijing_at_et(getattr(event, "push_bt_buy_at", None)),
+        "push_bt_t0_date": (
+            event.push_bt_t0_date.isoformat()
+            if getattr(event, "push_bt_t0_date", None)
+            else None
+        ),
+        "push_bt_t1_date": (
+            event.push_bt_t1_date.isoformat()
+            if getattr(event, "push_bt_t1_date", None)
+            else None
+        ),
+        "push_bt_ret_t0_open_pct": _pct(getattr(event, "push_bt_ret_t0_open", None)),
+        "push_bt_ret_t0_close_pct": _pct(getattr(event, "push_bt_ret_t0_close", None)),
+        "push_bt_ret_t1_open_pct": _pct(getattr(event, "push_bt_ret_t1_open", None)),
+        "push_bt_ret_t1_close_pct": _pct(getattr(event, "push_bt_ret_t1_close", None)),
+        "push_bt_px_t0_open": getattr(event, "push_bt_px_t0_open", None),
+        "push_bt_px_t0_close": getattr(event, "push_bt_px_t0_close", None),
+        "push_bt_px_t1_open": getattr(event, "push_bt_px_t1_open", None),
+        "push_bt_px_t1_close": getattr(event, "push_bt_px_t1_close", None),
+        "push_bt_note": getattr(event, "push_bt_note", None),
+        "push_bt_checked_at_bj": format_beijing_at_bj(
+            getattr(event, "push_bt_checked_at", None)
+        ),
+        "push_bt_checked_at_et": format_beijing_at_et(
+            getattr(event, "push_bt_checked_at", None)
         ),
     }
 

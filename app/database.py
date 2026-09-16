@@ -110,6 +110,22 @@ class DealEvent(Base):
     first_day_anomaly = Column(Boolean, nullable=False, default=False)
     first_day_note = Column(String(200), nullable=True)
     first_day_checked_at = Column(DateTime, nullable=True)
+    # 推送可执行回测：买入=推送+1h；卖出=T0/T1 开收盘
+    push_bt_session = Column(String(20), nullable=True)
+    push_bt_buy_price = Column(Float, nullable=True)
+    push_bt_buy_at = Column(DateTime, nullable=True)
+    push_bt_t0_date = Column(Date, nullable=True)
+    push_bt_t1_date = Column(Date, nullable=True)
+    push_bt_ret_t0_open = Column(Float, nullable=True)
+    push_bt_ret_t0_close = Column(Float, nullable=True)
+    push_bt_ret_t1_open = Column(Float, nullable=True)
+    push_bt_ret_t1_close = Column(Float, nullable=True)
+    push_bt_px_t0_open = Column(Float, nullable=True)
+    push_bt_px_t0_close = Column(Float, nullable=True)
+    push_bt_px_t1_open = Column(Float, nullable=True)
+    push_bt_px_t1_close = Column(Float, nullable=True)
+    push_bt_note = Column(String(500), nullable=True)
+    push_bt_checked_at = Column(DateTime, nullable=True)
 
 
 class NvdaSignalEvent(Base):
@@ -152,6 +168,21 @@ class NvdaSignalEvent(Base):
     first_day_anomaly = Column(Boolean, nullable=False, default=False)
     first_day_note = Column(String(200), nullable=True)
     first_day_checked_at = Column(DateTime, nullable=True)
+    push_bt_session = Column(String(20), nullable=True)
+    push_bt_buy_price = Column(Float, nullable=True)
+    push_bt_buy_at = Column(DateTime, nullable=True)
+    push_bt_t0_date = Column(Date, nullable=True)
+    push_bt_t1_date = Column(Date, nullable=True)
+    push_bt_ret_t0_open = Column(Float, nullable=True)
+    push_bt_ret_t0_close = Column(Float, nullable=True)
+    push_bt_ret_t1_open = Column(Float, nullable=True)
+    push_bt_ret_t1_close = Column(Float, nullable=True)
+    push_bt_px_t0_open = Column(Float, nullable=True)
+    push_bt_px_t0_close = Column(Float, nullable=True)
+    push_bt_px_t1_open = Column(Float, nullable=True)
+    push_bt_px_t1_close = Column(Float, nullable=True)
+    push_bt_note = Column(String(500), nullable=True)
+    push_bt_checked_at = Column(DateTime, nullable=True)
 
 
 class NvdaSignalSeenUrl(Base):
@@ -621,6 +652,36 @@ def _ensure_sqlite_columns() -> None:
         ("nvda_signal_events", "first_day_note", "VARCHAR(200)"),
         ("nvda_signal_events", "first_day_checked_at", "DATETIME"),
         ("nvda_signal_events", "scored_at", "DATETIME"),
+        ("deal_events", "push_bt_session", "VARCHAR(20)"),
+        ("deal_events", "push_bt_buy_price", "FLOAT"),
+        ("deal_events", "push_bt_buy_at", "DATETIME"),
+        ("deal_events", "push_bt_t0_date", "DATE"),
+        ("deal_events", "push_bt_t1_date", "DATE"),
+        ("deal_events", "push_bt_ret_t0_open", "FLOAT"),
+        ("deal_events", "push_bt_ret_t0_close", "FLOAT"),
+        ("deal_events", "push_bt_ret_t1_open", "FLOAT"),
+        ("deal_events", "push_bt_ret_t1_close", "FLOAT"),
+        ("deal_events", "push_bt_px_t0_open", "FLOAT"),
+        ("deal_events", "push_bt_px_t0_close", "FLOAT"),
+        ("deal_events", "push_bt_px_t1_open", "FLOAT"),
+        ("deal_events", "push_bt_px_t1_close", "FLOAT"),
+        ("deal_events", "push_bt_note", "VARCHAR(500)"),
+        ("deal_events", "push_bt_checked_at", "DATETIME"),
+        ("nvda_signal_events", "push_bt_session", "VARCHAR(20)"),
+        ("nvda_signal_events", "push_bt_buy_price", "FLOAT"),
+        ("nvda_signal_events", "push_bt_buy_at", "DATETIME"),
+        ("nvda_signal_events", "push_bt_t0_date", "DATE"),
+        ("nvda_signal_events", "push_bt_t1_date", "DATE"),
+        ("nvda_signal_events", "push_bt_ret_t0_open", "FLOAT"),
+        ("nvda_signal_events", "push_bt_ret_t0_close", "FLOAT"),
+        ("nvda_signal_events", "push_bt_ret_t1_open", "FLOAT"),
+        ("nvda_signal_events", "push_bt_ret_t1_close", "FLOAT"),
+        ("nvda_signal_events", "push_bt_px_t0_open", "FLOAT"),
+        ("nvda_signal_events", "push_bt_px_t0_close", "FLOAT"),
+        ("nvda_signal_events", "push_bt_px_t1_open", "FLOAT"),
+        ("nvda_signal_events", "push_bt_px_t1_close", "FLOAT"),
+        ("nvda_signal_events", "push_bt_note", "VARCHAR(500)"),
+        ("nvda_signal_events", "push_bt_checked_at", "DATETIME"),
     )
     with engine.begin() as conn:
         for table, column, coltype in alters:
