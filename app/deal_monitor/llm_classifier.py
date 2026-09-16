@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 
 import httpx
@@ -14,6 +15,22 @@ from app.deal_monitor.config import DEAL_LLM_MODEL, GEMINI_API_KEY, GEMINI_API_K
 from app.deal_monitor.fetchers.pr_wire import RawItem
 
 logger = logging.getLogger(__name__)
+
+# 全进程共用：429 时全局冷却，避免多模型/多 key 连打把接口拖垮
+_GEMINI_COOL_UNTIL = 0.0
+_GEMINI_GATE = asyncio.Semaphore(1)
+_GEMINI_COOL_SEC = 90.0
+
+
+def _gemini_cooling() -> bool:
+    return time.monotonic() < _GEMINI_COOL_UNTIL
+
+
+def _trip_gemini_cool(sec: float | None = None) -> None:
+    global _GEMINI_COOL_UNTIL
+    wait = sec if sec is not None else _GEMINI_COOL_SEC
+    _GEMINI_COOL_UNTIL = time.monotonic() + wait
+    logger.warning("Gemini 触发冷却 %.0fs（遇 429/配额），暂停分类请求", wait)
 
 
 @dataclass
@@ -391,6 +408,8 @@ def apply_heuristic_rescue(
 
 
 async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None:
+    if _gemini_cooling():
+        return None
     # 2.0-flash 已下线；2.5 易 429，保留 flash-latest / 3.6 作回退
     models = [
         DEAL_LLM_MODEL,
@@ -412,14 +431,20 @@ async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None
     if not keys:
         return None
 
-    async with httpx.AsyncClient(timeout=90) as client:
-        for model in dict.fromkeys(models):
-            for api_key in keys:
-                url = (
-                    f"https://generativelanguage.googleapis.com/v1beta/models/"
-                    f"{model}:generateContent?key={api_key}"
-                )
-                for attempt in range(2):
+    async with _GEMINI_GATE:
+        if _gemini_cooling():
+            return None
+        async with httpx.AsyncClient(timeout=90) as client:
+            for model in dict.fromkeys(models):
+                if _gemini_cooling():
+                    break
+                for api_key in keys:
+                    if _gemini_cooling():
+                        break
+                    url = (
+                        f"https://generativelanguage.googleapis.com/v1beta/models/"
+                        f"{model}:generateContent?key={api_key}"
+                    )
                     try:
                         resp = await client.post(url, json=body)
                         if resp.status_code in (429, 503):
@@ -428,23 +453,29 @@ async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None
                                 request=resp.request,
                                 response=resp,
                             )
-                            if attempt == 0:
-                                await asyncio.sleep(1.5)
-                                continue
-                            break  # 换下一把 key / 下一个 model
+                            # 配额/限流：立刻全局冷却，勿继续狂打其它 model/key
+                            retry_after = resp.headers.get("retry-after")
+                            cool = _GEMINI_COOL_SEC
+                            if retry_after:
+                                try:
+                                    cool = max(15.0, min(300.0, float(retry_after)))
+                                except ValueError:
+                                    pass
+                            _trip_gemini_cool(cool)
+                            data = None
+                            break
                         resp.raise_for_status()
                         data = resp.json()
                         break
                     except Exception as exc:
                         last_exc = exc
                         break
-                if data is not None:
+                if data is not None or _gemini_cooling():
                     break
-            if data is not None:
-                break
 
     if data is None:
-        logger.warning("Gemini 分类失败: %s", last_exc)
+        if last_exc and not _gemini_cooling():
+            logger.warning("Gemini 分类失败: %s", last_exc)
         return None
 
     try:
@@ -463,32 +494,26 @@ async def _classify_batch(items: list[RawItem]) -> dict[str, LlmDecision] | None
 async def classify_items(items: list[RawItem]) -> dict[str, LlmDecision]:
     """按批分类；失败的批次不写入结果，便于下一轮重试。成功后做规则兜底。
 
-    多批之间并行，避免一条慢请求拖住整轮；单批内仍合并以省配额。
+    批间串行+全局闸门，避免 429 雪崩拖垮网页 API。
     """
     if not (GEMINI_API_KEYS or GEMINI_API_KEY) or not items:
+        return {}
+    if _gemini_cooling():
+        logger.info("Gemini 冷却中，本轮跳过 classify_items（%s 条）", len(items))
         return {}
 
     chunks = [
         items[start : start + LLM_BATCH_SIZE]
         for start in range(0, len(items), LLM_BATCH_SIZE)
     ]
-    # 控制并发，减轻 429；又不让多源稿件互相排队
-    sem = asyncio.Semaphore(min(4, max(1, len(chunks))))
-
-    async def _one(chunk: list[RawItem]) -> dict[str, LlmDecision]:
-        async with sem:
-            part = await _classify_batch(chunk)
-            if not part:
-                return {}
-            return apply_heuristic_rescue(chunk, part)
-
-    parts = await asyncio.gather(*[_one(c) for c in chunks], return_exceptions=True)
     merged: dict[str, LlmDecision] = {}
-    for part in parts:
-        if isinstance(part, Exception):
-            logger.warning("LLM 分批失败: %s", part)
+    for chunk in chunks:
+        if _gemini_cooling():
+            break
+        part = await _classify_batch(chunk)
+        if not part:
             continue
-        merged.update(part)
+        merged.update(apply_heuristic_rescue(chunk, part))
     return merged
 
 
@@ -496,8 +521,10 @@ async def classify_one(item: RawItem) -> LlmDecision | None:
     """单条即时分类（供流水线并行ingest，不等待同轮其他稿）。"""
     if not (GEMINI_API_KEYS or GEMINI_API_KEY):
         return None
+    if _gemini_cooling():
+        return None
     part = await _classify_batch([item])
     if not part:
         return None
     rescued = apply_heuristic_rescue([item], part)
-    return rescued.get(item.source_url) or part.get(item.source_url)
+    return rescued.get(item.source_url) or next(iter(rescued.values()), None) or part.get(item.source_url)

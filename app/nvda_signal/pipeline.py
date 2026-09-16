@@ -378,7 +378,7 @@ async def process_item(
     return stats
 
 
-_NVDA_PROCESS_CONCURRENCY = max(1, int(os.getenv("DEAL_PROCESS_CONCURRENCY", "6")))
+_NVDA_PROCESS_CONCURRENCY = max(1, int(os.getenv("DEAL_PROCESS_CONCURRENCY", "2")))
 
 
 async def _nvda_ingest_one(

@@ -24,10 +24,12 @@ from app.utils import now_beijing
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
-_CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
-_CACHE_TTL = 300  # 5 分钟：重复打开页不重打全市场
+_CACHE: dict[str, Any] = {"ts": 0.0, "quote_ts": 0.0, "data": None}
 _COMPUTE_BUDGET_SEC = 110.0  # 报价 + 日K 软截止；超时回退库内快照（不编造）
 _PERIOD_BUDGET_SEC = 75.0
+_PERIOD_BUDGET_SETTLE_SEC = 180.0  # 收盘结算窗给足时间写全日 K
+_QUOTE_OVERLAY_SEC = 180.0  # 盘中 1D 报价叠加最短间隔
+_COV_OK = 6  # 5D×2+20D 覆盖评分门槛
 
 
 def _today_et() -> date:
@@ -42,6 +44,173 @@ def _stale_payload(base: dict[str, Any], note: str) -> dict[str, Any]:
     out = dict(base)
     out["stale"] = True
     out["note"] = note
+    out["success"] = True
+    return out
+
+
+def _market_phase(now: datetime | None = None) -> str:
+    """美东时段：pre_open / rth / settle / overnight / closed。
+
+    settle=收盘后约 2 小时，日 K 与主线快照必须赶上，不可长期吃旧缓存。
+    """
+    from app.utils import is_us_trading_day
+
+    now = now or datetime.now(ET)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=ET)
+    else:
+        now = now.astimezone(ET)
+    if not is_us_trading_day(now.date()):
+        return "closed"
+    mins = now.hour * 60 + now.minute
+    if mins < 9 * 60 + 30:
+        return "pre_open"
+    if mins < 16 * 60:
+        return "rth"
+    if mins < 18 * 60:
+        return "settle"
+    return "overnight"
+
+
+def _payload_trade_date(payload: dict[str, Any] | None) -> date | None:
+    if not payload:
+        return None
+    raw = payload.get("trade_date")
+    if not raw:
+        return None
+    if isinstance(raw, date) and not isinstance(raw, datetime):
+        return raw
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+
+
+def _period_coverage(payload: dict[str, Any] | None) -> int:
+    """有 5D 的主题数×2 + 有 20D 的主题数，用于判断快照是否残缺。"""
+    if not payload:
+        return 0
+    n5 = n20 = 0
+    for t in payload.get("themes") or []:
+        if t.get("ret_5d") is not None:
+            n5 += 1
+        if t.get("ret_20d") is not None:
+            n20 += 1
+    return n5 * 2 + n20
+
+
+def _needs_full_refresh(base: dict[str, Any] | None) -> bool:
+    """主线以日线相对强弱为主；仅在缺数或落后于「已收盘交易日」时全量重算。"""
+    from app.utils import last_completed_us_session
+
+    if not base or _period_coverage(base) < _COV_OK:
+        return True
+    snap_d = _payload_trade_date(base)
+    if snap_d is None:
+        return True
+    completed = last_completed_us_session()
+    if snap_d < completed:
+        return True
+    phase = _market_phase()
+    # 结算窗内若仍是「昨收快照」，必须拉今日日 K / 重算
+    if phase == "settle" and snap_d < _today_et():
+        return True
+    return False
+
+
+def _cache_ttl_sec(phase: str, payload: dict[str, Any] | None) -> float:
+    """按时段决定缓存寿命：结算未追上今日时短 TTL，避免错过更新。"""
+    cov = _period_coverage(payload)
+    snap_d = _payload_trade_date(payload)
+    today = _today_et()
+    if phase == "settle":
+        if cov < _COV_OK or not snap_d or snap_d < today:
+            return 90.0
+        return 300.0
+    if phase == "rth":
+        return 900.0  # 盘中 5D/20D 几乎不变，15 分钟内不重打日 K
+    if phase == "pre_open":
+        return 1200.0
+    return 1800.0  # overnight / closed
+
+
+def _pick_best_base(
+    cached: dict[str, Any] | None, db_payload: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    c_cov = _period_coverage(cached)
+    d_cov = _period_coverage(db_payload)
+    if c_cov >= _COV_OK and c_cov >= d_cov:
+        return cached
+    if d_cov >= _COV_OK:
+        return db_payload
+    if c_cov > 0 and c_cov >= d_cov:
+        return cached
+    return db_payload if d_cov > 0 else cached
+
+
+async def _overlay_live_1d(payload: dict[str, Any]) -> dict[str, Any]:
+    """盘中只叠加即时报价 1D，不重拉日 K、不改主线排名（仍按 5D）。"""
+    import asyncio
+
+    from app.market_data import fetch_quotes
+
+    symbols = all_symbols()
+    try:
+        quotes, src = await asyncio.wait_for(
+            fetch_quotes(symbols, allow_slow_fill=False),
+            timeout=15.0,
+        )
+    except Exception as exc:
+        logger.info("mainline 1d overlay skipped: %s", exc)
+        return payload
+    if not quotes:
+        return payload
+
+    out = dict(payload)
+    themes_out: list[dict[str, Any]] = []
+    for theme in payload.get("themes") or []:
+        row = dict(theme)
+        members = []
+        ret_1d_list: list[float] = []
+        up = 0
+        for m in theme.get("members") or []:
+            mem = dict(m)
+            sym = (mem.get("symbol") or "").upper()
+            q = quotes.get(sym)
+            if q and q.get("change_pct") is not None:
+                chg = round(float(q["change_pct"]), 2)
+                mem["ret_1d"] = chg
+                ret_1d_list.append(chg)
+                if chg > 0:
+                    up += 1
+            members.append(mem)
+        row["members"] = members
+        if ret_1d_list:
+            row["ret_1d"] = round(sum(ret_1d_list) / len(ret_1d_list), 2)
+            row["n_up"] = up
+            row["n_valid"] = len(ret_1d_list)
+            row["breadth"] = round(up / len(ret_1d_list), 4)
+        themes_out.append(row)
+    out["themes"] = themes_out
+
+    bench = dict(payload.get("bench") or {})
+    b1: list[float] = []
+    for q in quotes.values():
+        if q and q.get("change_pct") is not None:
+            b1.append(float(q["change_pct"]))
+    if b1:
+        bench["ret_1d"] = round(sum(b1) / len(b1), 2)
+    out["bench"] = bench
+    out["as_of"] = _as_of_iso()
+    out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
+    out["quote_count"] = len(quotes)
+    out["quote_total"] = len(symbols)
+    prev_src = payload.get("source") or "snapshot"
+    out["source"] = f"{prev_src}+live_1d({src})"
+    out["stale"] = bool(payload.get("stale"))
+    note = (payload.get("note") or "").strip()
+    tip = "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。"
+    out["note"] = f"{note} {tip}".strip() if note else tip
     out["success"] = True
     return out
 
@@ -209,7 +378,10 @@ def _payload_from_db_snapshots() -> dict[str, Any] | None:
     }
 
 
-async def _compute_mainline_fresh() -> dict[str, Any]:
+async def _compute_mainline_fresh(
+    *,
+    period_budget: float | None = _PERIOD_BUDGET_SEC,
+) -> dict[str, Any]:
     """拉行情并计算；缺数保持空，不编造。"""
     from app.database import SessionLocal
     from app.heatmap import fetch_period_returns
@@ -218,9 +390,8 @@ async def _compute_mainline_fresh() -> dict[str, Any]:
     themes_cfg = enabled_themes()
     symbols = all_symbols()
     quotes, source = await fetch_quotes(symbols, allow_slow_fill=False)
-    # 勿用外层 wait_for 整段掐死：period 自带软截止，超时后仍返回已算到的部分（缺数保持 None，不编造）
     try:
-        period = await fetch_period_returns(symbols, budget_sec=_PERIOD_BUDGET_SEC)
+        period = await fetch_period_returns(symbols, budget_sec=period_budget)
     except Exception as exc:
         logger.warning("period returns failed: %s", exc)
         period = {s: {"ret_5d": None, "ret_20d": None} for s in symbols}
@@ -288,7 +459,7 @@ async def _compute_mainline_fresh() -> dict[str, Any]:
 
 
 async def compute_mainline(force: bool = False) -> dict[str, Any]:
-    """盘中/API：计算当前主线排名（带短缓存）。超时回退内存/库内真实快照。"""
+    """页面优先完整日线快照；收盘结算窗全量更新；盘中仅叠加 1D。"""
     import asyncio
 
     if not AI_MAINLINE_ENABLED:
@@ -305,30 +476,68 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
         }
 
     now = time.time()
+    phase = _market_phase()
     cached = _CACHE.get("data")
-    if (
-        not force
-        and cached
-        and now - float(_CACHE.get("ts") or 0) < _CACHE_TTL
-    ):
-        return cached
+    db_payload = _payload_from_db_snapshots()
+    base = _pick_best_base(cached, db_payload)
+
+    if not force:
+        ttl = _cache_ttl_sec(phase, cached if cached else base)
+        cache_age = now - float(_CACHE.get("ts") or 0)
+        needs_full = _needs_full_refresh(base)
+
+        if not needs_full and cached and cache_age < ttl:
+            quote_age = now - float(_CACHE.get("quote_ts") or 0)
+            if phase == "rth" and quote_age >= _QUOTE_OVERLAY_SEC:
+                overlaid = await _overlay_live_1d(cached)
+                _CACHE["data"] = overlaid
+                _CACHE["quote_ts"] = now
+                return overlaid
+            return cached
+
+        if not needs_full and base is not None:
+            out = base
+            if phase == "rth":
+                out = await _overlay_live_1d(base)
+                _CACHE["quote_ts"] = now
+            elif out is db_payload and out is not None:
+                out = dict(out)
+                out["note"] = (out.get("note") or "") or (
+                    "展示库内主线日线快照（主线按日变化，未强制重拉外网）。"
+                )
+            _CACHE["ts"] = now
+            _CACHE["data"] = out
+            return out
+
+        logger.info(
+            "ai_mainline full refresh phase=%s snap=%s cov=%s",
+            phase,
+            _payload_trade_date(base),
+            _period_coverage(base),
+        )
+
+    period_budget = (
+        _PERIOD_BUDGET_SETTLE_SEC
+        if force or phase == "settle"
+        else _PERIOD_BUDGET_SEC
+    )
+    compute_budget = max(_COMPUTE_BUDGET_SEC, period_budget + 40.0)
 
     try:
         payload = await asyncio.wait_for(
-            _compute_mainline_fresh(), timeout=_COMPUTE_BUDGET_SEC
+            _compute_mainline_fresh(period_budget=period_budget),
+            timeout=compute_budget,
         )
     except asyncio.TimeoutError:
-        logger.warning("ai_mainline compute timeout after %.0fs", _COMPUTE_BUDGET_SEC)
-        if cached:
-            return _stale_payload(
-                cached,
-                f"行情拉取超时（>{int(_COMPUTE_BUDGET_SEC)}s），展示上一版可靠结果，未使用估算数据。",
+        logger.warning("ai_mainline compute timeout after %.0fs", compute_budget)
+        if base and _period_coverage(base) >= _COV_OK:
+            kept = _stale_payload(
+                base,
+                f"行情拉取超时（>{int(compute_budget)}s），展示上一版可靠结果，未使用估算数据。",
             )
-        db_payload = _payload_from_db_snapshots()
-        if db_payload:
-            _CACHE["ts"] = now
-            _CACHE["data"] = db_payload
-            return db_payload
+            _CACHE["ts"] = now if phase != "settle" else now - 60
+            _CACHE["data"] = kept
+            return kept
         return {
             "success": False,
             "enabled": True,
@@ -342,19 +551,43 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
         }
     except Exception as exc:
         logger.exception("ai_mainline compute failed: %s", exc)
-        if cached:
+        if base and _period_coverage(base) >= _COV_OK:
             return _stale_payload(
-                cached,
+                base,
                 f"本次刷新失败（{type(exc).__name__}），展示上一版可靠结果。",
             )
-        db_payload = _payload_from_db_snapshots()
-        if db_payload:
-            return db_payload
         raise
 
+    new_cov = _period_coverage(payload)
+    old_cov = _period_coverage(base)
+    if base and old_cov >= _COV_OK and new_cov < max(4, old_cov // 2) and not force:
+        logger.warning(
+            "ai_mainline period coverage regress %s→%s; keep prior",
+            old_cov,
+            new_cov,
+        )
+        kept = _stale_payload(
+            base,
+            f"本次 5D/20D 覆盖不足（评分 {new_cov}/{old_cov}），保留完整日线快照；结算窗将自动重试。",
+        )
+        _CACHE["ts"] = now if phase != "settle" else now - 60
+        _CACHE["data"] = kept
+        return kept
+
+    if new_cov < _COV_OK and base and old_cov > new_cov and not force:
+        kept = _stale_payload(
+            base,
+            f"实时日K未补齐（覆盖 {new_cov}），展示库内/缓存完整快照。",
+        )
+        _CACHE["ts"] = now if phase != "settle" else now - 60
+        _CACHE["data"] = kept
+        return kept
+
     _CACHE["ts"] = now
+    _CACHE["quote_ts"] = now
     _CACHE["data"] = payload
     return payload
+
 
 
 def _load_streak_before_today(db, today: date) -> dict[str, int]:
@@ -545,11 +778,12 @@ async def _maybe_push(db, trade_date: date, payload: dict[str, Any]) -> dict[str
 
 
 async def run_ai_mainline_daily(force: bool = False) -> dict[str, Any]:
-    """收盘后写日快照 + 可选推送。"""
+    """收盘后写日快照 + 可选推送。先补全日 K，再强制重算，避免错过收盘更新。"""
     if not AI_MAINLINE_ENABLED:
         return {"success": True, "skipped": True, "reason": "disabled"}
 
     from app.database import SessionLocal
+    from app.heatmap import refresh_period_daily_closes
     from app.utils import is_us_trading_day
 
     today = _today_et()
@@ -561,9 +795,32 @@ async def run_ai_mainline_daily(force: bool = False) -> dict[str, Any]:
             "trade_date": today.isoformat(),
         }
 
+    period_info: dict[str, Any] = {}
+    try:
+        period_info = await refresh_period_daily_closes()
+        logger.info("ai_mainline daily: period closes %s", period_info)
+    except Exception as exc:
+        logger.warning("ai_mainline daily: period refresh failed: %s", exc)
+        period_info = {"success": False, "error": str(exc)}
+
     payload = await compute_mainline(force=True)
-    if not payload.get("success"):
-        return {"success": False, "error": "compute_failed", "payload": payload}
+    if not payload.get("success") and _period_coverage(payload) < _COV_OK:
+        return {
+            "success": False,
+            "error": "compute_failed",
+            "payload": payload,
+            "period": period_info,
+        }
+
+    # 残缺结果不落库，避免脏快照盖住昨日完整数据
+    if _period_coverage(payload) < _COV_OK:
+        return {
+            "success": False,
+            "error": "coverage_insufficient",
+            "coverage": _period_coverage(payload),
+            "period": period_info,
+            "payload_status": payload.get("status"),
+        }
 
     with SessionLocal() as db:
         saved = _upsert_daily(db, today, payload)
@@ -576,6 +833,7 @@ async def run_ai_mainline_daily(force: bool = False) -> dict[str, Any]:
         "status": payload.get("status"),
         "primary": (payload.get("primary") or {}).get("key"),
         "push": push_info,
+        "period": period_info,
     }
 
 

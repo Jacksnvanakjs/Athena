@@ -797,7 +797,7 @@ async def process_item(
 
 
 # 同轮多条新闻并行处理上限（LLM+入库+推送互不等待）
-_PROCESS_CONCURRENCY = max(1, int(os.getenv("DEAL_PROCESS_CONCURRENCY", "6")))
+_PROCESS_CONCURRENCY = max(1, int(os.getenv("DEAL_PROCESS_CONCURRENCY", "2")))
 
 
 async def _claim_and_filter_items(

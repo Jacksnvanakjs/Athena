@@ -225,10 +225,35 @@ def start_scheduler():
             id="ai_mainline_daily_et_1635",
             replace_existing=True,
         )
+        # 收盘结算窗补跑：日 K 晚到/限流时仍能赶上当日快照
+        scheduler.add_job(
+            scheduled_ai_mainline_daily,
+            CronTrigger(hour=17, minute=0, timezone="America/New_York"),
+            id="ai_mainline_daily_et_1700",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            scheduled_ai_mainline_daily,
+            CronTrigger(hour=17, minute=30, timezone="America/New_York"),
+            id="ai_mainline_daily_et_1730",
+            replace_existing=True,
+        )
         scheduler.add_job(
             scheduled_period_daily_closes,
             CronTrigger(hour=16, minute=32, timezone="America/New_York"),
             id="period_daily_closes_et_1632",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            scheduled_period_daily_closes,
+            CronTrigger(hour=16, minute=50, timezone="America/New_York"),
+            id="period_daily_closes_et_1650",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            scheduled_period_daily_closes,
+            CronTrigger(hour=17, minute=15, timezone="America/New_York"),
+            id="period_daily_closes_et_1715",
             replace_existing=True,
         )
     scheduler.add_job(
@@ -330,7 +355,8 @@ def start_scheduler():
     times = ", ".join(f"{h:02d}:{m:02d}" for h, m in SCRAPE_TIMES)
     logger.info(
         "调度器已启动，时区: %s，基金抓取: %s；美股热力图快照: 美东 16:30；"
-        "deal_monitor: 每 %d 分钟；nvda_signal: %s；earnings: %s；ai_mainline: %s；"
+        "deal_monitor: 每 %d 分钟；nvda_signal: %s；earnings: %s；ai_mainline: %s"
+        "（日K 16:32/16:50/17:15，快照 16:35/17:00/17:30）；"
         "self_heal: %s",
         TIMEZONE,
         times,
