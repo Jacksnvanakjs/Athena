@@ -522,7 +522,7 @@ def _turso_reachable_in_subprocess(database_url: str, timeout_sec: float) -> boo
 
 
 def _try_activate_turso_url(url: str, timeout_sec: float) -> bool:
-    """探测并切到指定 Turso URL；成功则标记 ready。"""
+    """探测并切到指定 Turso URL；成功则补齐 schema 并标记 ready。"""
     global _schema_ready
     host = url.replace("libsql://", "").split("/")[0]
     logger.info("探测 Turso 节点 %s（timeout=%.0fs）...", host, timeout_sec)
@@ -532,8 +532,12 @@ def _try_activate_turso_url(url: str, timeout_sec: float) -> bool:
     try:
         reset_engine(wait=False, backend="turso", turso_url=url)
         _sync_embedded_replica()
+        # 部署新字段后必须 ALTER；此前误在未迁移时就把 schema_ready=True
+        if not _schema_ready:
+            Base.metadata.create_all(bind=engine)
+        _ensure_sqlite_columns()
     except Exception as dispose_exc:
-        logger.warning("切换 Turso 连接池失败 (%s): %s", host, dispose_exc)
+        logger.warning("切换 Turso / schema 失败 (%s): %s", host, dispose_exc)
         return False
     _schema_ready = True
     _db_ready.set()
@@ -608,6 +612,16 @@ def run_with_db_retry(operation: Callable[[Session], T]) -> T:
             return operation(db)
         except Exception as exc:
             last_error = exc
+            msg = str(exc).lower()
+            # 新版本缺列：立刻 ALTER 再试一次
+            if attempt == 0 and ("no such column" in msg or "sql_input_error" in msg):
+                logger.warning("检测到缺列，尝试 _ensure_sqlite_columns 后重试: %s", exc)
+                try:
+                    _ensure_sqlite_columns()
+                except Exception as mig_exc:
+                    logger.warning("补列失败: %s", mig_exc)
+                else:
+                    continue
             if attempt == 0 and _active_backend == "turso" and is_turso_stream_error(exc):
                 # 流错误：软重置连接池，仍留在 Turso；由后台换节点
                 reset_engine(wait=False, backend="turso")
@@ -683,26 +697,41 @@ def _ensure_sqlite_columns() -> None:
         ("nvda_signal_events", "push_bt_note", "VARCHAR(500)"),
         ("nvda_signal_events", "push_bt_checked_at", "DATETIME"),
     )
+
+    def _column_names(conn, table: str) -> set[str]:
+        try:
+            rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
+            if rows:
+                return {r[1] for r in rows}
+        except Exception as exc:
+            logger.warning("PRAGMA table_info(%s) 失败: %s", table, exc)
+        # Turso/libsql 偶发 PRAGMA 空结果：再试一次标准查询
+        try:
+            rows = conn.execute(
+                text(f"SELECT name FROM pragma_table_info('{table}')")
+            ).fetchall()
+            return {r[0] for r in rows}
+        except Exception as exc:
+            logger.warning("pragma_table_info(%s) 失败: %s", table, exc)
+            return set()
+
+    added = 0
     with engine.begin() as conn:
         for table, column, coltype in alters:
-            try:
-                rows = conn.execute(text(f"PRAGMA table_info({table})")).fetchall()
-                names = {r[1] for r in rows}
-            except Exception as exc:
-                logger.warning("PRAGMA table_info(%s) 失败: %s", table, exc)
-                # 仍尝试 ALTER；列已存在时下面会吞错
-                names = set()
+            names = _column_names(conn, table)
             if column in names:
                 continue
             try:
                 conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}"))
+                added += 1
                 logger.info("已补列 %s.%s", table, column)
             except Exception as exc:
-                # 并发启动/已存在
                 msg = str(exc).lower()
                 if "duplicate" in msg or "exists" in msg or "already" in msg:
                     continue
                 logger.warning("ALTER %s.%s 失败: %s", table, column, exc)
+    if added:
+        logger.info("schema 补列完成：新增 %s 列", added)
 
 
 def init_db():
