@@ -25,6 +25,7 @@ from app.config import (
     NVDA_SIGNAL_PUSH_MIN_CONFIDENCE_A_PLUS_B,
 )
 from app.database import NvdaSignalEvent, NvdaSignalSeenUrl, db_session
+from app.seen_url_cache import TtlBox, nvda_seen_urls
 from app.deal_monitor.entities import Entity, registry
 from app.deal_monitor.entity_resolver import is_channel_partner_entity, resolve_entity
 from app.deal_monitor.fetchers.pr_wire import RawItem
@@ -379,6 +380,7 @@ async def process_item(
 
 
 _NVDA_PROCESS_CONCURRENCY = max(1, int(os.getenv("DEAL_PROCESS_CONCURRENCY", "2")))
+_pushed_count_cache = TtlBox(900)
 
 
 async def _nvda_ingest_one(
@@ -400,6 +402,7 @@ async def _nvda_ingest_one(
                     )
                 )
                 db.commit()
+                nvda_seen_urls.add(item.source_url)
                 return result
             except Exception as exc:
                 logger.exception("NVDA 信号处理失败: %s", item.headline[:80])
@@ -424,12 +427,19 @@ async def run_pipeline() -> dict:
     }
 
     with db_session() as db:
-        seen = {r.source_url for r in db.query(NvdaSignalSeenUrl.source_url).all()}
-        new_items = [i for i in items if i.source_url not in seen and not is_test_source_url(i.source_url)]
+        candidates = [
+            i for i in items
+            if (i.source_url or "").strip() and not is_test_source_url(i.source_url)
+        ]
+        _, unseen = nvda_seen_urls.partition(
+            db, NvdaSignalSeenUrl, [i.source_url for i in candidates]
+        )
+        new_items = [i for i in candidates if (i.source_url or "").strip() in unseen]
         summary["fetched_new"] = len(new_items)
 
         stale_dropped = 0
         eligible: list[tuple[RawItem, datetime]] = []
+        marked: list[str] = []
         for item in new_items:
             if _published_too_stale_for_ingest(item.published_at):
                 stale_dropped += 1
@@ -441,10 +451,12 @@ async def run_pipeline() -> dict:
                         relevant=False,
                     )
                 )
+                marked.append(item.source_url)
                 continue
             eligible.append((item, now_beijing()))
-        if stale_dropped:
+        if marked:
             db.commit()
+            nvda_seen_urls.add_many(marked)
             summary["stale_dropped"] = stale_dropped
 
     eligible.sort(
@@ -473,17 +485,20 @@ async def run_pipeline() -> dict:
             summary["saved"] += len(res.get("saved") or [])
 
     with db_session() as db:
-        summary["pushed"] = (
-            db.query(NvdaSignalEvent)
-            .filter(
-                NvdaSignalEvent.pushed_at.isnot(None),
-                NvdaSignalEvent.push_channel.isnot(None),
-                ~NvdaSignalEvent.push_channel.in_(
-                    ["none", "failed", "unconfigured", "disabled", "rate_limited"]
-                ),
+        def _count_pushed():
+            return (
+                db.query(NvdaSignalEvent)
+                .filter(
+                    NvdaSignalEvent.pushed_at.isnot(None),
+                    NvdaSignalEvent.push_channel.isnot(None),
+                    ~NvdaSignalEvent.push_channel.in_(
+                        ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+                    ),
+                )
+                .count()
             )
-            .count()
-        )
+
+        summary["pushed"] = int(_pushed_count_cache.get(_count_pushed) or 0)
 
     logger.info("nvda_signal pipeline: %s", summary)
     return summary

@@ -278,6 +278,25 @@ def _deals_since_windows(days: int) -> tuple[datetime, datetime]:
     return since_utc, since_bj
 
 
+def _window_branches(db: Session, model, since_utc: datetime, since_bj: datetime):
+    """与 published_at>=窗 OR fetched_at>=窗 等价，但走两个索引，避免整表扫描。"""
+    recent = db.query(model).filter(model.published_at >= since_utc)
+    fetched_older = db.query(model).filter(
+        model.fetched_at >= since_bj,
+        model.published_at < since_utc,
+    )
+    return recent, fetched_older
+
+
+def _take_window(recent, fetched_older, *, limit: int | None, order_cols: tuple):
+    if limit is None:
+        return list(recent.all()) + list(fetched_older.all())
+    rows = recent.order_by(*order_cols).limit(limit).all()
+    if len(rows) < limit:
+        rows = rows + fetched_older.order_by(*order_cols).limit(limit - len(rows)).all()
+    return rows
+
+
 def _first_day_fields(event) -> dict:
     from app.config import DEAL_SCORE_OUTCOME_GAP_DISPLAY
 
@@ -534,24 +553,31 @@ def list_deals(
         rows: list[dict] = []
 
         if category in ("all", FEED_AI):
-            q = db.query(DealEvent).filter(
-                or_(
-                    DealEvent.published_at >= since_utc,
-                    DealEvent.fetched_at >= since_bj,
-                )
-            )
+            recent, older = _window_branches(db, DealEvent, since_utc, since_bj)
             if tier_pair:
-                q = q.filter(DealEvent.tier_pair == tier_pair)
+                recent = recent.filter(DealEvent.tier_pair == tier_pair)
+                older = older.filter(DealEvent.tier_pair == tier_pair)
             if min_score:
-                q = q.filter(DealEvent.materiality_score >= min_score)
+                recent = recent.filter(DealEvent.materiality_score >= min_score)
+                older = older.filter(DealEvent.materiality_score >= min_score)
             if pushed_only:
-                q = q.filter(
+                recent = recent.filter(
+                    DealEvent.pushed_at.isnot(None),
+                    DealEvent.push_channel.isnot(None),
+                    ~DealEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
+                )
+                older = older.filter(
                     DealEvent.pushed_at.isnot(None),
                     DealEvent.push_channel.isnot(None),
                     ~DealEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
             fetch_n = min(500, max(limit * 4, limit))
-            for r in q.order_by(desc(DealEvent.published_at), desc(DealEvent.id)).limit(fetch_n).all():
+            for r in _take_window(
+                recent,
+                older,
+                limit=fetch_n,
+                order_cols=(desc(DealEvent.published_at), desc(DealEvent.id)),
+            ):
                 # 与推送门闸一致：隐藏规则命中的一律不展示（含已推送误发）
                 if is_test_source_url(r.source_url) or should_hide_deal_event(r):
                     continue
@@ -563,22 +589,28 @@ def list_deals(
                 rows.append(row)
 
         if category in ("all", FEED_NVDA):
-            q = db.query(NvdaSignalEvent).filter(
-                or_(
-                    NvdaSignalEvent.published_at >= since_utc,
-                    NvdaSignalEvent.fetched_at >= since_bj,
-                )
-            )
+            recent, older = _window_branches(db, NvdaSignalEvent, since_utc, since_bj)
             if min_score:
-                q = q.filter(NvdaSignalEvent.materiality_score >= min_score)
+                recent = recent.filter(NvdaSignalEvent.materiality_score >= min_score)
+                older = older.filter(NvdaSignalEvent.materiality_score >= min_score)
             if pushed_only:
-                q = q.filter(
+                recent = recent.filter(
+                    NvdaSignalEvent.pushed_at.isnot(None),
+                    NvdaSignalEvent.push_channel.isnot(None),
+                    ~NvdaSignalEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
+                )
+                older = older.filter(
                     NvdaSignalEvent.pushed_at.isnot(None),
                     NvdaSignalEvent.push_channel.isnot(None),
                     ~NvdaSignalEvent.push_channel.in_(list(_PUSH_OK_EXCLUDE)),
                 )
             fetch_n = min(500, max(limit * 4, limit))
-            for r in q.order_by(desc(NvdaSignalEvent.published_at), desc(NvdaSignalEvent.id)).limit(fetch_n).all():
+            for r in _take_window(
+                recent,
+                older,
+                limit=fetch_n,
+                order_cols=(desc(NvdaSignalEvent.published_at), desc(NvdaSignalEvent.id)),
+            ):
                 if is_test_source_url(r.source_url):
                     continue
                 row = _nvda_to_dict(r)
@@ -638,16 +670,8 @@ def deals_stats(
 
         if category in ("all", FEED_AI):
             ai_rows = []
-            for e in (
-                db.query(DealEvent)
-                .filter(
-                    or_(
-                        DealEvent.published_at >= since_utc,
-                        DealEvent.fetched_at >= since_bj,
-                    )
-                )
-                .all()
-            ):
+            recent, older = _window_branches(db, DealEvent, since_utc, since_bj)
+            for e in _take_window(recent, older, limit=None, order_cols=()):
                 if is_test_source_url(e.source_url) or should_hide_deal_event(e):
                     continue
                 if do_hide_weak and should_hide_weak_quality_event(e):
@@ -674,16 +698,8 @@ def deals_stats(
                         first_day_down += 1
 
         if category in ("all", FEED_NVDA):
-            nvda_rows = (
-                db.query(NvdaSignalEvent)
-                .filter(
-                    or_(
-                        NvdaSignalEvent.published_at >= since_utc,
-                        NvdaSignalEvent.fetched_at >= since_bj,
-                    )
-                )
-                .all()
-            )
+            recent, older = _window_branches(db, NvdaSignalEvent, since_utc, since_bj)
+            nvda_rows = _take_window(recent, older, limit=None, order_cols=())
             nvda_rows = [
                 e
                 for e in nvda_rows

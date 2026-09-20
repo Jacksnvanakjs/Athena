@@ -14,6 +14,7 @@ from sqlalchemy import and_, desc, func, or_
 from sqlalchemy.orm import Session
 
 from app.database import DealEvent, DealSeenUrl, db_session
+from app.seen_url_cache import TtlBox, deal_seen_urls
 from app.deal_monitor.config import (
     DEAL_DEDUP_DAYS,
     DEAL_HIDE_WEAK_QUALITY,
@@ -798,6 +799,7 @@ async def process_item(
 
 # 同轮多条新闻并行处理上限（LLM+入库+推送互不等待）
 _PROCESS_CONCURRENCY = max(1, int(os.getenv("DEAL_PROCESS_CONCURRENCY", "2")))
+_pushed_count_cache = TtlBox(900)
 
 
 async def _claim_and_filter_items(
@@ -814,12 +816,18 @@ async def _claim_and_filter_items(
 
     async with claim_lock:
         with db_session() as db:
-            seen_urls = {
-                row.source_url for row in db.query(DealSeenUrl.source_url).all()
-            }
+            pending: list[tuple[RawItem, str]] = []
             for item in items:
                 url = (item.source_url or "").strip()
-                if not url or url in claimed or url in seen_urls:
+                if not url or url in claimed:
+                    continue
+                pending.append((item, url))
+            _, unseen = deal_seen_urls.partition(
+                db, DealSeenUrl, [url for _, url in pending]
+            )
+            marked: list[str] = []
+            for item, url in pending:
+                if url not in unseen:
                     continue
                 claimed.add(url)
                 if _published_too_stale_for_ingest(item.published_at):
@@ -832,6 +840,7 @@ async def _claim_and_filter_items(
                             llm_relevant=False,
                         )
                     )
+                    marked.append(url)
                     continue
                 reject, reason = pre_llm_reject(item)
                 if reject:
@@ -845,11 +854,13 @@ async def _claim_and_filter_items(
                             llm_relevant=False,
                         )
                     )
+                    marked.append(url)
                     continue
                 # discovered_at：源侧刚拿到的时间，不被 LLM/兄弟稿拖后
                 discovered.append((item, now_beijing()))
-            if content_rejected or stale_dropped:
+            if marked:
                 db.commit()
+                deal_seen_urls.add_many(marked)
     return discovered, content_rejected, stale_dropped
 
 
@@ -882,6 +893,7 @@ async def _ingest_one(
                     )
                 )
                 db.commit()
+                deal_seen_urls.add(item.source_url)
                 return result
             except Exception as exc:
                 logger.exception("处理条目失败: %s", item.headline[:80])
@@ -1028,17 +1040,21 @@ async def run_pipeline() -> dict:
 
     with db_session() as db:
         summary["push_retried"] = await retry_unpushed_events(db)
-        summary["pushed"] = (
-            db.query(DealEvent)
-            .filter(
-                DealEvent.pushed_at.isnot(None),
-                DealEvent.push_channel.isnot(None),
-                ~DealEvent.push_channel.in_(
-                    ["none", "failed", "unconfigured", "disabled", "rate_limited"]
-                ),
+
+        def _count_pushed():
+            return (
+                db.query(DealEvent)
+                .filter(
+                    DealEvent.pushed_at.isnot(None),
+                    DealEvent.push_channel.isnot(None),
+                    ~DealEvent.push_channel.in_(
+                        ["none", "failed", "unconfigured", "disabled", "rate_limited"]
+                    ),
+                )
+                .count()
             )
-            .count()
-        )
+
+        summary["pushed"] = int(_pushed_count_cache.get(_count_pushed) or 0)
 
     logger.info("deal_monitor pipeline: %s", summary)
     return summary

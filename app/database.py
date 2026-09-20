@@ -81,7 +81,7 @@ class DealEvent(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     published_at = Column(DateTime, nullable=False, index=True)
-    fetched_at = Column(DateTime, nullable=False)
+    fetched_at = Column(DateTime, nullable=False, index=True)
     headline = Column(String(500), nullable=False)
     summary = Column(Text, nullable=True)
     source = Column(String(50), nullable=False)
@@ -133,7 +133,7 @@ class NvdaSignalEvent(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     published_at = Column(DateTime, nullable=False, index=True)
-    fetched_at = Column(DateTime, nullable=False)
+    fetched_at = Column(DateTime, nullable=False, index=True)
     headline = Column(String(500), nullable=False)
     summary = Column(Text, nullable=True)
     source = Column(String(50), nullable=False)
@@ -732,6 +732,21 @@ def _ensure_sqlite_columns() -> None:
                 logger.warning("ALTER %s.%s 失败: %s", table, column, exc)
     if added:
         logger.info("schema 补列完成：新增 %s 列", added)
+    _ensure_window_indexes()
+
+
+def _ensure_window_indexes() -> None:
+    """已有库不会因为模型加了 index=True 就建索引。时间窗查询靠这两列避免整表扫。"""
+    statements = (
+        "CREATE INDEX IF NOT EXISTS ix_deal_events_fetched_at ON deal_events (fetched_at)",
+        "CREATE INDEX IF NOT EXISTS ix_nvda_signal_events_fetched_at ON nvda_signal_events (fetched_at)",
+    )
+    try:
+        with engine.begin() as conn:
+            for sql in statements:
+                conn.execute(text(sql))
+    except Exception as exc:
+        logger.warning("补时间窗索引失败: %s", exc)
 
 
 def init_db():
