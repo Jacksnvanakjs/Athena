@@ -1199,3 +1199,47 @@ async def ai_mainline_run(token: str = Query(default="")):
     if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
         raise HTTPException(status_code=403, detail="无效 token")
     return await run_ai_mainline_daily(force=True)
+
+
+# ── 科技杠杆 ETF 名义成交额（投机温度）──
+
+
+@router.get("/lev-etf/tech/monthly")
+def lev_etf_tech_monthly(year: str = Query(default="all")):
+    from app.config import LEV_ETF_TECH_ENABLED
+    from app.lev_etf.pipeline import get_monthly_payload
+
+    if not LEV_ETF_TECH_ENABLED:
+        return {"success": False, "enabled": False, "points": [], "note": "已关闭"}
+    payload = get_monthly_payload(year=year)
+    if payload.get("success") is False and payload.get("error"):
+        raise HTTPException(status_code=400, detail=payload["error"])
+    return payload
+
+
+@router.get("/lev-etf/tech/meta")
+def lev_etf_tech_meta():
+    from app.config import LEV_ETF_TECH_ENABLED
+    from app.lev_etf.pipeline import get_tech_meta
+
+    if not LEV_ETF_TECH_ENABLED:
+        return {"success": False, "enabled": False}
+    meta = get_tech_meta()
+    meta["success"] = True
+    meta["enabled"] = True
+    return meta
+
+
+@router.post("/lev-etf/tech/run")
+async def lev_etf_tech_run(
+    token: str = Query(default=""),
+    force_full: bool = Query(default=False),
+):
+    from app.config import DEAL_ADMIN_TOKEN, LEV_ETF_TECH_ENABLED
+    from app.lev_etf.pipeline import run_lev_etf_update
+
+    if not LEV_ETF_TECH_ENABLED:
+        return {"success": False, "enabled": False}
+    if DEAL_ADMIN_TOKEN and token != DEAL_ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="无效 token")
+    return await run_lev_etf_update(force_full=force_full)

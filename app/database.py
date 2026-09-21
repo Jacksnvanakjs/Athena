@@ -360,6 +360,25 @@ class AiMainlineDailySnapshot(Base):
     created_at = Column(DateTime, nullable=False, default=now_beijing)
 
 
+class LevEtfMonthly(Base):
+    """科技杠杆 ETF 月度名义成交额（公开行情代理）。"""
+
+    __tablename__ = "lev_etf_monthly"
+    __table_args__ = (
+        UniqueConstraint("basket_key", "month", name="uq_lev_etf_monthly_basket_month"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    basket_key = Column(String(40), nullable=False, index=True, default="tech_lev_etf")
+    month = Column(String(7), nullable=False, index=True)
+    notional_usd = Column(Float, nullable=False, default=0.0)
+    notional_bn = Column(Float, nullable=False, default=0.0)
+    trading_days = Column(Integer, nullable=False, default=0)
+    is_partial = Column(Boolean, nullable=False, default=False)
+    as_of_date = Column(Date, nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=now_beijing)
+
+
 def is_turso_stream_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in STREAM_ERROR_MARKERS)

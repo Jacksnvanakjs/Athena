@@ -12,6 +12,7 @@ from app.config import (
     EARNINGS_CALENDAR_REFRESH_HOURS,
     EARNINGS_MONITOR_ENABLED,
     FUNDS_SOURCE_FILE,
+    LEV_ETF_TECH_ENABLED,
     NVDA_SIGNAL_ENABLED,
     SCRAPE_TIMES,
     SELF_HEAL_ENABLED,
@@ -78,6 +79,20 @@ async def scheduled_period_daily_closes():
     logger.info("开始刷新主线日 K（16:32）...")
     result = await refresh_period_daily_closes()
     logger.info("主线日 K 刷新完成: %s", result)
+
+
+async def scheduled_lev_etf_tech():
+    """美东收盘后更新科技杠杆 ETF 月度名义成交额。"""
+    if not LEV_ETF_TECH_ENABLED:
+        return
+    if not is_us_trading_day():
+        logger.info("非美股交易日，跳过杠杆ETF成交额更新")
+        return
+    from app.lev_etf.pipeline import run_lev_etf_update
+
+    logger.info("开始更新科技杠杆ETF成交额...")
+    result = await run_lev_etf_update(force_full=False)
+    logger.info("科技杠杆ETF成交额更新完成: %s", result)
 
 
 async def scheduled_deal_poll():
@@ -256,6 +271,15 @@ def start_scheduler():
             id="period_daily_closes_et_1715",
             replace_existing=True,
         )
+    if LEV_ETF_TECH_ENABLED:
+        scheduler.add_job(
+            scheduled_lev_etf_tech,
+            CronTrigger(hour=17, minute=45, timezone="America/New_York"),
+            id="lev_etf_tech_et_1745",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.add_job(
         scheduled_deal_poll,
         IntervalTrigger(minutes=DEAL_POLL_INTERVAL_MIN),
@@ -357,13 +381,14 @@ def start_scheduler():
         "调度器已启动，时区: %s，基金抓取: %s；美股热力图快照: 美东 16:30；"
         "deal_monitor: 每 %d 分钟；nvda_signal: %s；earnings: %s；ai_mainline: %s"
         "（日K 16:32/16:50/17:15，快照 16:35/17:00/17:30）；"
-        "self_heal: %s",
+        "lev_etf: %s；self_heal: %s",
         TIMEZONE,
         times,
         DEAL_POLL_INTERVAL_MIN,
         "开启" if NVDA_SIGNAL_ENABLED else "关闭",
         "开启" if EARNINGS_MONITOR_ENABLED else "关闭",
         "开启" if AI_MAINLINE_ENABLED else "关闭",
+        "美东17:45" if LEV_ETF_TECH_ENABLED else "关闭",
         f"每{SELF_HEAL_INTERVAL_MIN}分钟" if SELF_HEAL_ENABLED else "关闭",
     )
 

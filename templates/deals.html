@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI 合作快讯</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
   <script src="/static/js/auto_refresh.js"></script>
   <style>
     :root {
@@ -352,6 +353,63 @@
     .pct-pos { color: var(--green); font-weight: 600; }
     .pct-neg { color: #dc2626; font-weight: 600; }
     .pct-zero { color: var(--text-muted); }
+    .lev-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 16px 20px;
+      margin-top: 12px;
+    }
+    .lev-card-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .lev-title { font-size: 0.95rem; font-weight: 600; }
+    .lev-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+    .lev-controls select {
+      padding: 5px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+    }
+    .lev-stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+    .lev-stats strong { color: var(--text); font-weight: 600; }
+    .lev-chart-wrap {
+      position: relative;
+      height: 260px;
+      width: 100%;
+    }
+    .lev-foot {
+      margin-top: 10px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+    .lev-empty {
+      padding: 28px 12px;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
     .ml-card {
       background: var(--surface);
       border: 1px solid var(--border);
@@ -482,6 +540,29 @@
             <strong>暂无主线数据</strong><br>
             点击右上角「立即扫描」重算；需可访问美股行情源。
           </div>
+        </div>
+      </div>
+
+      <div class="lev-card" id="levCard">
+        <div class="lev-card-top">
+          <div>
+            <div class="lev-title">科技杠杆 ETF 名义成交额（月）</div>
+            <div class="sub" style="margin-top:4px">观察科技投机温度 · 自 2023-01 起</div>
+          </div>
+          <div class="lev-controls">
+            <label for="levYear">年份</label>
+            <select id="levYear">
+              <option value="all">全部</option>
+            </select>
+          </div>
+        </div>
+        <div class="lev-stats" id="levStats"></div>
+        <div class="lev-chart-wrap">
+          <canvas id="levChart"></canvas>
+          <div class="lev-empty" id="levEmpty" style="display:none">加载中…</div>
+        </div>
+        <div class="lev-foot">
+          名义成交额 = 科技杠杆/反向 ETF 篮子当日收盘价×成交量之和的月度合计。公开行情代理，非 Apex 专有数据。单股杠杆按上市后自然纳入；当月未完以 * 标注。
         </div>
       </div>
     </div>
@@ -743,6 +824,9 @@
     let mainlineCache = null;
     let dealsCache = null;      // { queryKey, items }
     let earningsCache = null;   // { queryKey, payload }
+    let levChart = null;
+    let levAllPoints = [];
+    let levMeta = null;
 
     function abortTab(tab) {
       const ctrl = tabAbort[tab];
@@ -816,6 +900,7 @@
         } else {
           loadMainline();
         }
+        loadLevEtf();
       } else if (tab === 'earnings') {
         if (earningsCache) applyEarningsCache(earningsCache);
         if (tabAbort.earnings) {
@@ -1702,8 +1787,17 @@
         if (currentTab === 'mainline') {
           const res = await fetch('/api/ai-mainline/run', { method: 'POST' });
           const data = await res.json();
-          alert(`AI 主线重算：状态 ${data.status || '—'} · 主线 ${data.primary || '无'} · 入库 ${data.saved_rows || 0} 行`);
+          let levNote = '';
+          try {
+            const levRes = await fetch('/api/lev-etf/tech/run', { method: 'POST' });
+            const lev = await levRes.json();
+            if (lev.success) {
+              levNote = `；杠杆ETF月度 ${lev.months || 0} 点 · 截至 ${lev.as_of_date || '—'}`;
+            }
+          } catch (_) { /* 行情源失败不挡主线 */ }
+          alert(`AI 主线重算：状态 ${data.status || '—'} · 主线 ${data.primary || '无'} · 入库 ${data.saved_rows || 0} 行${levNote}`);
           await loadMainline();
+          await loadLevEtf();
         } else if (currentTab === 'earnings') {
           const res = await fetch('/api/earnings/run', { method: 'POST' });
           const data = await res.json();
@@ -1733,10 +1827,149 @@
     }
 
     async function refreshCurrent() {
-      if (currentTab === 'mainline') await loadMainline();
-      else if (currentTab === 'earnings') await loadEarnings();
+      if (currentTab === 'mainline') {
+        await loadMainline();
+        await loadLevEtf();
+      } else if (currentTab === 'earnings') await loadEarnings();
       else await loadDeals();
     }
+
+    function filterLevPoints(year) {
+      if (!year || year === 'all') return levAllPoints.slice();
+      return levAllPoints.filter(p => String(p.month || '').startsWith(String(year)));
+    }
+
+    function renderLevStats(points, data) {
+      const el = document.getElementById('levStats');
+      if (!points.length) {
+        el.innerHTML = data && data.note
+          ? `<span>${data.note}</span>`
+          : '<span>暂无月度数据</span>';
+        return;
+      }
+      const latest = points[points.length - 1];
+      const mx = points.reduce((a, b) => (Number(b.notional_bn) > Number(a.notional_bn) ? b : a), points[0]);
+      const partial = latest.is_partial ? ` · 截至 ${latest.as_of_date || data.as_of_date || '—'}` : '';
+      el.innerHTML =
+        `<span>最新 <strong>${latest.month}${latest.is_partial ? '*' : ''}</strong>：` +
+        `<strong>${Number(latest.notional_bn).toFixed(1)}</strong> 十亿美元${partial}</span>` +
+        `<span>峰值 <strong>${mx.month}</strong>：<strong>${Number(mx.notional_bn).toFixed(1)}</strong></span>` +
+        (data && data.as_of_date ? `<span>数据截至 ${data.as_of_date}</span>` : '');
+    }
+
+    function renderLevChart(points) {
+      const empty = document.getElementById('levEmpty');
+      const canvas = document.getElementById('levChart');
+      if (!points.length) {
+        if (levChart) { levChart.destroy(); levChart = null; }
+        canvas.style.display = 'none';
+        empty.style.display = 'block';
+        empty.textContent = '回填任务未完成，请稍后刷新；或点击「立即扫描」触发更新。';
+        return;
+      }
+      empty.style.display = 'none';
+      canvas.style.display = 'block';
+      const labels = points.map(p => p.is_partial ? `${p.month}*` : p.month);
+      const values = points.map(p => Number(p.notional_bn));
+      const pointRadius = points.map(p => p.is_partial ? 4 : 2);
+      const pointBg = points.map(p => p.is_partial ? '#fff' : '#2563eb');
+      if (levChart) {
+        levChart.data.labels = labels;
+        levChart.data.datasets[0].data = values;
+        levChart.data.datasets[0].pointRadius = pointRadius;
+        levChart.data.datasets[0].pointBackgroundColor = pointBg;
+        levChart.update('none');
+        return;
+      }
+      levChart = new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels,
+          datasets: [{
+            label: '名义成交额（十亿美元）',
+            data: values,
+            borderColor: '#2563eb',
+            backgroundColor: 'rgba(37, 99, 235, 0.10)',
+            fill: true,
+            tension: 0.25,
+            borderWidth: 2,
+            pointRadius,
+            pointBackgroundColor: pointBg,
+            pointBorderColor: '#2563eb',
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              callbacks: {
+                label(ctx) {
+                  const p = points[ctx.dataIndex] || {};
+                  const star = p.is_partial ? '（当月未完）' : '';
+                  return ` ${Number(ctx.parsed.y).toFixed(1)} 十亿美元${star}`;
+                },
+              },
+            },
+          },
+          scales: {
+            x: {
+              ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 14, color: '#64748b', font: { size: 11 } },
+              grid: { display: false },
+            },
+            y: {
+              title: { display: true, text: '十亿美元', color: '#64748b', font: { size: 11 } },
+              ticks: { color: '#64748b', font: { size: 11 } },
+              grid: { color: '#e2e8f0' },
+            },
+          },
+        },
+      });
+    }
+
+    function applyLevPayload(data) {
+      levMeta = data;
+      levAllPoints = Array.isArray(data.points) ? data.points.slice() : [];
+      // API 若带 year 过滤则 points 已过滤；前端年份切换需要全量，故 year=all 拉取
+      const sel = document.getElementById('levYear');
+      const years = data.available_years || [];
+      const prev = sel.value || 'all';
+      sel.innerHTML = '<option value="all">全部</option>' +
+        years.map(y => `<option value="${y}">${y}</option>`).join('');
+      if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+      else sel.value = 'all';
+      const filtered = filterLevPoints(sel.value);
+      renderLevStats(filtered, data);
+      renderLevChart(filtered);
+    }
+
+    async function loadLevEtf() {
+      const empty = document.getElementById('levEmpty');
+      empty.style.display = 'block';
+      empty.textContent = '加载中…';
+      try {
+        const res = await fetch('/api/lev-etf/tech/monthly?year=all');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        applyLevPayload(data);
+        if (data.loading && !(data.points || []).length) {
+          // 后台回填中，稍后自动再试一次
+          setTimeout(() => { if (currentTab === 'mainline') loadLevEtf(); }, 12000);
+        }
+      } catch (e) {
+        empty.style.display = 'block';
+        empty.textContent = '加载失败，请稍后刷新。';
+      }
+    }
+
+    document.getElementById('levYear').addEventListener('change', () => {
+      const year = document.getElementById('levYear').value;
+      const filtered = filterLevPoints(year);
+      renderLevStats(filtered, levMeta || {});
+      renderLevChart(filtered);
+    });
 
     ['days', 'category', 'tier_pair', 'deal_quality', 'min_score', 'pushed_only', 'first_day_move'].forEach(id => {
       document.getElementById(id).addEventListener('change', loadDeals);

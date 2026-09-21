@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "key": "tech_lev_etf",
+  "name": "科技杠杆/反向 ETF",
+  "name_en": "Tech Leveraged/Inverse ETFs",
+  "currency": "USD",
+  "start_month": "2023-01",
+  "groups": [
+    {
+      "key": "nasdaq",
+      "name": "纳指杠杆",
+      "tickers": ["TQQQ", "SQQQ", "QLD", "QID"]
+    },
+    {
+      "key": "semi",
+      "name": "半导体杠杆",
+      "tickers": ["SOXL", "SOXS"]
+    },
+    {
+      "key": "tech_sector",
+      "name": "科技板块杠杆",
+      "tickers": ["TECL", "TECS"]
+    },
+    {
+      "key": "fang",
+      "name": "FANG/主题",
+      "tickers": ["FNGU", "FNGD", "BULZ", "BERZ"]
+    },
+    {
+      "key": "single_stock",
+      "name": "单股科技杠杆",
+      "tickers": [
+        "NVDL", "NVDX", "NVDU", "NVDD",
+        "TSLL", "TSLQ", "CONL",
+        "AAPU", "AAPD", "MSFU", "MSFD",
+        "AMZU", "AMZD", "METU", "METD",
+        "GGLL", "GGLS"
+      ]
+    }
+  ]
+}

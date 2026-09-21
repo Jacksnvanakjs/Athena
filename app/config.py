@@ -233,6 +233,9 @@ AI_MAINLINE_MIN_VALID = int(os.getenv("AI_MAINLINE_MIN_VALID", "3"))
 AI_MAINLINE_PUSH_ENABLED = os.getenv("AI_MAINLINE_PUSH_ENABLED", "false").lower() == "true"
 AI_MAINLINE_PUSH_COOLDOWN_DAYS = int(os.getenv("AI_MAINLINE_PUSH_COOLDOWN_DAYS", "5"))
 
+# ── 科技杠杆 ETF 名义成交额（投机温度）──
+LEV_ETF_TECH_ENABLED = os.getenv("LEV_ETF_TECH_ENABLED", "true").lower() == "true"
+
 # ── 数据自检 / 缺失补全（部署打断定时任务后自动回填）──
 SELF_HEAL_ENABLED = os.getenv("SELF_HEAL_ENABLED", "true").lower() == "true"
 SELF_HEAL_INTERVAL_MIN = int(os.getenv("SELF_HEAL_INTERVAL_MIN", "20"))
