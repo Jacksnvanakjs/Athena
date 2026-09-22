@@ -624,7 +624,10 @@ def _parse_yahoo_meta(
     result: dict[str, Any] | None,
     symbol: str,
 ) -> dict[str, Any] | None:
-    """按 marketState 取价/涨跌/量，涨跌幅均相对 previousClose。"""
+    """按 marketState 取价/涨跌/量，涨跌幅均相对 previousClose。
+
+    CLOSED/隔夜：优先沿用盘后价（若有），避免把「昨收盘涨」当成当前夜盘。
+    """
     state = str(meta.get("marketState") or "").upper()
     prev = _to_float(meta.get("previousClose")) or _to_float(
         meta.get("chartPreviousClose")
@@ -633,24 +636,48 @@ def _parse_yahoo_meta(
     change_pct: float | None = None
     volume = 0.0
 
-    if state == "PRE":
+    def _use_pre() -> bool:
+        nonlocal price, change_pct, volume
         price = _to_float(meta.get("preMarketPrice"))
         change_pct = _to_float(meta.get("preMarketChangePercent"))
         volume = _to_float(meta.get("preMarketVolume")) or 0.0
         if result and volume <= 0:
             volume = _sum_yahoo_session_volume(result, state="PRE")
-    elif state in ("POST", "POSTPOST"):
+        return price is not None and price > 0
+
+    def _use_post() -> bool:
+        nonlocal price, change_pct, volume
         price = _to_float(meta.get("postMarketPrice"))
         change_pct = _to_float(meta.get("postMarketChangePercent"))
         volume = _to_float(meta.get("postMarketVolume")) or 0.0
         if result and volume <= 0:
-            volume = _sum_yahoo_session_volume(result, state=state)
-    else:
+            volume = _sum_yahoo_session_volume(result, state="POST")
+        return price is not None and price > 0
+
+    def _use_regular() -> None:
+        nonlocal price, change_pct, volume
         price = _to_float(meta.get("regularMarketPrice"))
         change_pct = _to_float(meta.get("regularMarketChangePercent"))
         volume = _to_float(meta.get("regularMarketVolume")) or 0.0
         if result and volume <= 0 and state == "REGULAR":
             volume = _sum_yahoo_session_volume(result, state="REGULAR")
+
+    if state == "PRE":
+        if not _use_pre():
+            _use_regular()
+    elif state in ("POST", "POSTPOST"):
+        if not _use_post():
+            _use_regular()
+    elif state in ("PREPRE",):
+        # 盘前集合竞价前：可能已有盘前指示价
+        if not _use_pre() and not _use_post():
+            _use_regular()
+    elif state in ("CLOSED", ""):
+        # 休市：盘后价比常规收盘更能反映夜盘最后成交
+        if not _use_post() and not _use_pre():
+            _use_regular()
+    else:
+        _use_regular()
 
     if price is None and result:
         closes = [
@@ -675,10 +702,14 @@ def _parse_yahoo_meta(
     quote_time = None
     ts_key = {
         "PRE": "preMarketTime",
+        "PREPRE": "preMarketTime",
         "POST": "postMarketTime",
         "POSTPOST": "postMarketTime",
+        "CLOSED": "postMarketTime",
     }.get(state, "regularMarketTime")
     raw_ts = meta.get(ts_key) or meta.get("regularMarketTime")
+    if state in ("CLOSED", "") and not meta.get("postMarketTime"):
+        raw_ts = meta.get("regularMarketTime")
     if raw_ts:
         try:
             dt = datetime.fromtimestamp(int(raw_ts), tz=_US_TZ)
@@ -1291,6 +1322,61 @@ async def get_quotes_for_symbols(
     if not uniq:
         return {}, "none"
     return await _fetch_quotes(uniq, allow_slow_fill=allow_slow_fill)
+
+
+async def get_quotes_session_aware(
+    symbols: list[str],
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """扩展时段优先 Yahoo（含盘前/盘后/休市盘后价），缺口再用 Finnhub / 常规轮动。
+
+    东财盘前盘后涨跌幅常停在常规收盘，不宜作夜盘/盘前主源。
+    """
+    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    if not uniq:
+        return {}, "none"
+
+    sources_used: list[str] = []
+    merged: dict[str, dict[str, Any]] = {}
+
+    skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if not skip_yahoo:
+        try:
+            yahoo = await asyncio.wait_for(_fetch_yahoo(uniq), timeout=22.0)
+        except Exception as exc:
+            logger.warning("session-aware Yahoo failed: %s", exc)
+            yahoo = {}
+        if yahoo:
+            merged.update(yahoo)
+            sources_used.append(f"Yahoo:{len(yahoo)}")
+
+    missing = [s for s in uniq if s not in merged]
+    if missing:
+        try:
+            fh = await _fetch_finnhub_quotes(missing)
+        except Exception as exc:
+            logger.warning("session-aware Finnhub failed: %s", exc)
+            fh = {}
+        if fh:
+            merged.update(fh)
+            sources_used.append(f"Finnhub:{len(fh)}")
+
+    missing = [s for s in uniq if s not in merged]
+    if missing:
+        try:
+            more, src = await _fetch_quotes(missing, allow_slow_fill=False)
+        except Exception as exc:
+            logger.warning("session-aware fallback failed: %s", exc)
+            more, src = {}, "none"
+        if more:
+            merged.update(more)
+            sources_used.append(src if src != "none" else f"fallback:{len(more)}")
+
+    label = "+".join(sources_used) if sources_used else "none"
+    return merged, label
 
 
 async def _fetch_quotes(

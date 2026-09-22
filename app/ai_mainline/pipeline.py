@@ -52,6 +52,7 @@ def _market_phase(now: datetime | None = None) -> str:
     """美东时段：pre_open / rth / settle / overnight / closed。
 
     settle=收盘后约 2 小时，日 K 与主线快照必须赶上，不可长期吃旧缓存。
+    周日 20:00 ET 起常见股票隔夜盘（通往周一），标为 overnight 而非 closed。
     """
     from app.utils import is_us_trading_day
 
@@ -60,9 +61,12 @@ def _market_phase(now: datetime | None = None) -> str:
         now = now.replace(tzinfo=ET)
     else:
         now = now.astimezone(ET)
+    mins = now.hour * 60 + now.minute
+    # 周日晚隔夜：不少券商 20:00 ET 起可交易，通往周一盘前
+    if now.weekday() == 6 and mins >= 20 * 60:
+        return "overnight"
     if not is_us_trading_day(now.date()):
         return "closed"
-    mins = now.hour * 60 + now.minute
     if mins < 9 * 60 + 30:
         return "pre_open"
     if mins < 16 * 60:
@@ -148,17 +152,45 @@ def _pick_best_base(
     return db_payload if d_cov > 0 else cached
 
 
-async def _overlay_live_1d(payload: dict[str, Any]) -> dict[str, Any]:
-    """盘中只叠加即时报价 1D，不重拉日 K、不改主线排名（仍按 5D）。"""
-    import asyncio
+def _live_1d_active(phase: str | None = None) -> bool:
+    """1D 即时叠加：交易日全时段 + 周日晚隔夜；周六全日休市不拉。"""
+    phase = phase or _market_phase()
+    return phase in {"pre_open", "rth", "settle", "overnight"}
 
-    from app.market_data import fetch_quotes
+
+def _session_tip(phase: str) -> str:
+    if phase == "pre_open":
+        return "盘前已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
+    if phase == "settle":
+        return "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
+    if phase == "overnight":
+        return "隔夜/周末夜盘已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
+    if phase == "rth":
+        return "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。"
+    return "5D/20D 与主线判定沿用日线快照。"
+
+
+async def _quotes_for_1d_overlay(phase: str) -> tuple[dict[str, Any], str]:
+    """盘中用多源快路；扩展时段优先 Yahoo 会话价，避免东财停在常规收盘涨跌。"""
+    from app.heatmap import get_quotes_for_symbols, get_quotes_session_aware
 
     symbols = all_symbols()
+    if phase == "rth":
+        return await get_quotes_for_symbols(symbols, allow_slow_fill=False)
+    return await get_quotes_session_aware(symbols)
+
+
+async def _overlay_live_1d(
+    payload: dict[str, Any], *, phase: str | None = None
+) -> dict[str, Any]:
+    """叠加即时报价 1D；不重拉日 K、不改主线排名（仍按 5D）。"""
+    import asyncio
+
+    phase = phase or _market_phase()
     try:
         quotes, src = await asyncio.wait_for(
-            fetch_quotes(symbols, allow_slow_fill=False),
-            timeout=15.0,
+            _quotes_for_1d_overlay(phase),
+            timeout=28.0 if phase != "rth" else 15.0,
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)
@@ -204,12 +236,23 @@ async def _overlay_live_1d(payload: dict[str, Any]) -> dict[str, Any]:
     out["as_of"] = _as_of_iso()
     out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
     out["quote_count"] = len(quotes)
-    out["quote_total"] = len(symbols)
+    out["quote_total"] = len(all_symbols())
+    out["session_phase"] = phase
     prev_src = payload.get("source") or "snapshot"
-    out["source"] = f"{prev_src}+live_1d({src})"
+    # 去掉旧的 live_1d 后缀再挂新源，避免叠多层
+    base_src = str(prev_src).split("+live_1d")[0]
+    out["source"] = f"{base_src}+live_1d({src})"
     out["stale"] = bool(payload.get("stale"))
     note = (payload.get("note") or "").strip()
-    tip = "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。"
+    # 去掉旧提示，避免盘前仍写「盘中已刷新」
+    for old in (
+        "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。",
+        "盘前已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "隔夜展示最近盘后/收盘 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+    ):
+        note = note.replace(old, "").strip()
+    tip = _session_tip(phase)
     out["note"] = f"{note} {tip}".strip() if note else tip
     out["success"] = True
     return out
@@ -488,8 +531,8 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
 
         if not needs_full and cached and cache_age < ttl:
             quote_age = now - float(_CACHE.get("quote_ts") or 0)
-            if phase == "rth" and quote_age >= _QUOTE_OVERLAY_SEC:
-                overlaid = await _overlay_live_1d(cached)
+            if _live_1d_active(phase) and quote_age >= _QUOTE_OVERLAY_SEC:
+                overlaid = await _overlay_live_1d(cached, phase=phase)
                 _CACHE["data"] = overlaid
                 _CACHE["quote_ts"] = now
                 return overlaid
@@ -497,8 +540,8 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
 
         if not needs_full and base is not None:
             out = base
-            if phase == "rth":
-                out = await _overlay_live_1d(base)
+            if _live_1d_active(phase):
+                out = await _overlay_live_1d(base, phase=phase)
                 _CACHE["quote_ts"] = now
             elif out is db_payload and out is not None:
                 out = dict(out)
@@ -585,6 +628,8 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
 
     _CACHE["ts"] = now
     _CACHE["quote_ts"] = now
+    if _live_1d_active(phase):
+        payload = await _overlay_live_1d(payload, phase=phase)
     _CACHE["data"] = payload
     return payload
 
