@@ -1,4 +1,4 @@
-"""科技杠杆 ETF 月度聚合单测。"""
+"""科技杠杆 ETF 日度/月度聚合单测。"""
 
 from datetime import date
 
@@ -7,6 +7,7 @@ from app.lev_etf.aggregate import (
     build_stats,
     daily_basket_notional,
     filter_year,
+    to_daily_points,
 )
 from app.lev_etf.basket import all_tickers, load_basket
 
@@ -35,6 +36,14 @@ def test_daily_and_monthly_aggregate():
     }
     daily = daily_basket_notional(bars)
     assert daily[date(2026, 6, 2)] == 50.0 * 10_000_000 + 20.0 * 5_000_000
+
+    day_pts = to_daily_points(daily, start_date=date(2023, 1, 1))
+    assert len(day_pts) == 3
+    assert day_pts[0]["date"] == "2026-06-02"
+    assert abs(day_pts[0]["notional_bn"] - daily[date(2026, 6, 2)] / 1e9) < 1e-6
+    assert filter_year(day_pts, "2025") == []
+    assert len(filter_year(day_pts, "2026")) == 3
+
     points = aggregate_monthly(
         daily,
         start_month="2023-01",
@@ -45,10 +54,17 @@ def test_daily_and_monthly_aggregate():
     assert by["2026-06"]["is_partial"] is False
     assert by["2026-09"]["is_partial"] is True
     assert by["2026-06"]["trading_days"] == 2
-    assert abs(by["2026-06"]["notional_bn"] - daily[date(2026, 6, 2)] / 1e9 - daily[date(2026, 6, 3)] / 1e9) < 1e-6
+    assert abs(
+        by["2026-06"]["notional_bn"]
+        - daily[date(2026, 6, 2)] / 1e9
+        - daily[date(2026, 6, 3)] / 1e9
+    ) < 1e-6
 
     only_2026 = filter_year(points, "2026")
     assert all(p["month"].startswith("2026") for p in only_2026)
     stats = build_stats(points)
     assert stats["latest"]["month"] == "2026-09"
+    assert stats["latest"]["label"] == "2026-09"
     assert stats["max"]["month"] in {"2026-06", "2026-09"}
+    day_stats = build_stats(day_pts)
+    assert day_stats["latest"]["date"] == "2026-09-02"

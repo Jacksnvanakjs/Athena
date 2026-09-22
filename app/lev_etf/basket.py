@@ -54,6 +54,10 @@ def monthly_cache_path() -> Path:
     return Path(DATA_DIR) / "lev_etf_tech_monthly.json"
 
 
+def daily_cache_path() -> Path:
+    return Path(DATA_DIR) / "lev_etf_tech_daily.json"
+
+
 def start_date_iso(basket: dict[str, Any] | None = None) -> str:
     import os
 

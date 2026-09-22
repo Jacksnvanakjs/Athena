@@ -345,33 +345,57 @@ async def run_self_heal(*, force: bool = False) -> dict:
                         {"action": "deal_rescore", "ok": False, "error": str(exc)[:200]}
                     )
 
-        # 5) 科技杠杆 ETF 月度序列缺失或过旧
+        # 5) 科技杠杆 ETF 日度/月度序列缺失或过旧
         if force or _cooldown_ok("lev_etf_tech"):
             try:
                 from app.config import LEV_ETF_TECH_ENABLED
-                from app.lev_etf.pipeline import get_monthly_payload, run_lev_etf_update
+                from app.lev_etf.pipeline import (
+                    get_daily_payload,
+                    get_monthly_payload,
+                    run_lev_etf_update,
+                )
 
                 if LEV_ETF_TECH_ENABLED:
-                    cur = get_monthly_payload(year="all")
-                    pts = cur.get("points") or []
+                    daily = get_daily_payload(year="all")
+                    monthly = get_monthly_payload(year="all")
+                    d_pts = daily.get("points") or []
+                    m_pts = monthly.get("points") or []
                     stale = False
-                    if not pts:
+                    force_full = False
+                    if not d_pts:
                         stale = True
+                        force_full = True
+                    elif not m_pts:
+                        stale = True
+                        force_full = True
                     else:
-                        as_of = (pts[-1] or {}).get("as_of_date") or cur.get("as_of_date")
+                        as_of = (
+                            (d_pts[-1] or {}).get("date")
+                            or daily.get("as_of_date")
+                            or (m_pts[-1] or {}).get("as_of_date")
+                            or monthly.get("as_of_date")
+                        )
                         if as_of:
                             from datetime import date as date_cls
 
                             try:
                                 last = date_cls.fromisoformat(str(as_of)[:10])
-                                stale = last < (datetime.now(timezone.utc).date() - timedelta(days=5))
+                                stale = last < (
+                                    datetime.now(timezone.utc).date() - timedelta(days=5)
+                                )
                             except ValueError:
                                 stale = True
                         else:
                             stale = True
                     if stale or force:
-                        logger.info("自检补全: lev_etf_tech（points=%s）", len(pts))
-                        result = await run_lev_etf_update(force_full=not pts)
+                        logger.info(
+                            "自检补全: lev_etf_tech（daily=%s monthly=%s）",
+                            len(d_pts),
+                            len(m_pts),
+                        )
+                        result = await run_lev_etf_update(
+                            force_full=force_full or not d_pts
+                        )
                         _mark_ran("lev_etf_tech")
                         actions.append(
                             {
@@ -380,6 +404,7 @@ async def run_self_heal(*, force: bool = False) -> dict:
                                 "result": {
                                     k: result.get(k)
                                     for k in (
+                                        "days",
                                         "months",
                                         "as_of_date",
                                         "symbols_ok",

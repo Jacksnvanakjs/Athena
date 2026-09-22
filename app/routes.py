@@ -1217,6 +1217,19 @@ def lev_etf_tech_monthly(year: str = Query(default="all")):
     return payload
 
 
+@router.get("/lev-etf/tech/daily")
+def lev_etf_tech_daily(year: str = Query(default="all")):
+    from app.config import LEV_ETF_TECH_ENABLED
+    from app.lev_etf.pipeline import get_daily_payload
+
+    if not LEV_ETF_TECH_ENABLED:
+        return {"success": False, "enabled": False, "points": [], "note": "已关闭"}
+    payload = get_daily_payload(year=year)
+    if payload.get("success") is False and payload.get("error"):
+        raise HTTPException(status_code=400, detail=payload["error"])
+    return payload
+
+
 @router.get("/lev-etf/tech/meta")
 def lev_etf_tech_meta():
     from app.config import LEV_ETF_TECH_ENABLED

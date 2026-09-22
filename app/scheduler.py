@@ -82,7 +82,7 @@ async def scheduled_period_daily_closes():
 
 
 async def scheduled_lev_etf_tech():
-    """美东收盘后更新科技杠杆 ETF 月度名义成交额。"""
+    """美东收盘后更新科技杠杆 ETF 日度/月度名义成交额。"""
     if not LEV_ETF_TECH_ENABLED:
         return
     if not is_us_trading_day():

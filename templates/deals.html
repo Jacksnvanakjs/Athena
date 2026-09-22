@@ -598,12 +598,22 @@
       <div class="lev-card" id="levCard">
         <div class="lev-card-top">
           <div>
-            <div class="lev-title">科技杠杆 ETF 名义成交额（月）</div>
+            <div class="lev-title" id="levTitle">科技杠杆 ETF 名义成交额（日）</div>
             <div class="sub" style="margin-top:4px">观察科技投机温度 · 自 2023-01 起</div>
           </div>
           <div class="lev-controls">
-            <label for="levYear">年份</label>
-            <select id="levYear">
+            <label for="levGranularity">粒度</label>
+            <select id="levGranularity">
+              <option value="day" selected>按天</option>
+              <option value="month">按月</option>
+            </select>
+            <label for="levFilter" id="levFilterLabel">周数</label>
+            <select id="levFilter">
+              <option value="1w">近1周</option>
+              <option value="2w">近2周</option>
+              <option value="4w" selected>近4周</option>
+              <option value="8w">近8周</option>
+              <option value="13w">近13周</option>
               <option value="all">全部</option>
             </select>
           </div>
@@ -613,8 +623,8 @@
           <canvas id="levChart"></canvas>
           <div class="lev-empty" id="levEmpty" style="display:none">加载中…</div>
         </div>
-        <div class="lev-foot">
-          名义成交额 = 科技杠杆/反向 ETF 篮子当日收盘价×成交量之和的月度合计。公开行情代理，非 Apex 专有数据。单股杠杆按上市后自然纳入；当月未完以 * 标注。
+        <div class="lev-foot" id="levFoot">
+          名义成交额 = 科技杠杆/反向 ETF 篮子当日收盘价×成交量之和。默认按交易日；可切换为月度合计。公开行情代理，非 Apex 专有数据。单股杠杆按上市后自然纳入；按月时当月未完以 * 标注。
         </div>
       </div>
     </div>
@@ -877,8 +887,21 @@
     let dealsCache = null;      // { queryKey, items }
     let earningsCache = null;   // { queryKey, payload }
     let levChart = null;
-    let levAllPoints = [];
+    let levDailyPoints = [];
+    let levMonthlyPoints = [];
     let levMeta = null;
+    let levMode = 'day';
+    let levAvailableYears = [];
+    let levWeekFilter = '4w';
+    let levYearFilter = 'all';
+    const LEV_WEEK_OPTIONS = [
+      { value: '1w', label: '近1周' },
+      { value: '2w', label: '近2周' },
+      { value: '4w', label: '近4周' },
+      { value: '8w', label: '近8周' },
+      { value: '13w', label: '近13周' },
+      { value: 'all', label: '全部' },
+    ];
 
     function abortTab(tab) {
       const ctrl = tabAbort[tab];
@@ -1988,9 +2011,51 @@
       else await loadDeals();
     }
 
-    function filterLevPoints(year) {
-      if (!year || year === 'all') return levAllPoints.slice();
-      return levAllPoints.filter(p => String(p.month || '').startsWith(String(year)));
+    function levAddCalendarDays(iso, delta) {
+      const d = new Date(`${iso}T12:00:00Z`);
+      if (Number.isNaN(d.getTime())) return iso;
+      d.setUTCDate(d.getUTCDate() + delta);
+      return d.toISOString().slice(0, 10);
+    }
+
+    function filterLevPoints() {
+      if (levMode === 'month') {
+        const year = levYearFilter || 'all';
+        if (!year || year === 'all') return levMonthlyPoints.slice();
+        return levMonthlyPoints.filter(p => String(p.month || '').startsWith(String(year)));
+      }
+      const src = levDailyPoints;
+      const w = levWeekFilter || '4w';
+      if (!w || w === 'all' || !src.length) return src.slice();
+      const weeks = parseInt(String(w).replace('w', ''), 10);
+      if (!weeks || weeks < 1) return src.slice();
+      const last = String(src[src.length - 1].date || '');
+      if (!last) return src.slice();
+      // 按自然日窗口：近 N 周 ≈ 最近 N*7 个自然日（含末日）
+      const cutoff = levAddCalendarDays(last, -(weeks * 7 - 1));
+      return src.filter(p => String(p.date || '') >= cutoff);
+    }
+
+    function levPointLabel(p) {
+      if (levMode === 'month') return p.is_partial ? `${p.month}*` : p.month;
+      const d = String(p.date || '');
+      return d.length >= 10 ? d.slice(5) : d;
+    }
+
+    function levPointKey(p) {
+      return levMode === 'day' ? (p.date || '—') : (p.month || '—');
+    }
+
+    function syncLevChrome() {
+      const title = document.getElementById('levTitle');
+      const foot = document.getElementById('levFoot');
+      if (levMode === 'day') {
+        title.textContent = '科技杠杆 ETF 名义成交额（日）';
+        foot.textContent = '名义成交额 = 科技杠杆/反向 ETF 篮子当日收盘价×成交量之和（按交易日）。日视图按近几周筛选。公开行情代理，非 Apex 专有数据。单股杠杆按上市后自然纳入。可切换为按月合计。';
+      } else {
+        title.textContent = '科技杠杆 ETF 名义成交额（月）';
+        foot.textContent = '名义成交额 = 科技杠杆/反向 ETF 篮子当日收盘价×成交量之和的月度合计。公开行情代理，非 Apex 专有数据。单股杠杆按上市后自然纳入；当月未完以 * 标注。';
+      }
     }
 
     function renderLevStats(points, data) {
@@ -1998,16 +2063,25 @@
       if (!points.length) {
         el.innerHTML = data && data.note
           ? `<span>${data.note}</span>`
-          : '<span>暂无月度数据</span>';
+          : `<span>暂无${levMode === 'day' ? '日度' : '月度'}数据</span>`;
         return;
       }
       const latest = points[points.length - 1];
       const mx = points.reduce((a, b) => (Number(b.notional_bn) > Number(a.notional_bn) ? b : a), points[0]);
-      const partial = latest.is_partial ? ` · 截至 ${latest.as_of_date || data.as_of_date || '—'}` : '';
+      const latestKey = levPointKey(latest);
+      const mxKey = levPointKey(mx);
+      const partial = levMode === 'month' && latest.is_partial
+        ? ` · 截至 ${latest.as_of_date || data.as_of_date || '—'}`
+        : '';
+      const star = levMode === 'month' && latest.is_partial ? '*' : '';
+      const rangeHint = (levMode === 'day' && points.length > 1)
+        ? `<span>区间 ${points[0].date || ''}～${latest.date || ''}</span>`
+        : '';
       el.innerHTML =
-        `<span>最新 <strong>${latest.month}${latest.is_partial ? '*' : ''}</strong>：` +
-        `<strong>${Number(latest.notional_bn).toFixed(1)}</strong> 十亿美元${partial}</span>` +
-        `<span>峰值 <strong>${mx.month}</strong>：<strong>${Number(mx.notional_bn).toFixed(1)}</strong></span>` +
+        `<span>最新 <strong>${latestKey}${star}</strong>：` +
+        `<strong>${Number(latest.notional_bn).toFixed(levMode === 'day' ? 2 : 1)}</strong> 十亿美元${partial}</span>` +
+        `<span>峰值 <strong>${mxKey}</strong>：<strong>${Number(mx.notional_bn).toFixed(levMode === 'day' ? 2 : 1)}</strong></span>` +
+        rangeHint +
         (data && data.as_of_date ? `<span>数据截至 ${data.as_of_date}</span>` : '');
     }
 
@@ -2023,15 +2097,27 @@
       }
       empty.style.display = 'none';
       canvas.style.display = 'block';
-      const labels = points.map(p => p.is_partial ? `${p.month}*` : p.month);
+      const labels = points.map(levPointLabel);
       const values = points.map(p => Number(p.notional_bn));
-      const pointRadius = points.map(p => p.is_partial ? 4 : 2);
-      const pointBg = points.map(p => p.is_partial ? '#fff' : '#2563eb');
+      const isDay = levMode === 'day';
+      const pointRadius = points.map(p => (!isDay && p.is_partial) ? 4 : (isDay ? (points.length <= 12 ? 3 : 0) : 2));
+      const pointBg = points.map(p => (!isDay && p.is_partial) ? '#fff' : '#2563eb');
+      const tickLimit = isDay ? Math.min(12, Math.max(5, points.length)) : 14;
+      const decimals = isDay ? 2 : 1;
       if (levChart) {
         levChart.data.labels = labels;
         levChart.data.datasets[0].data = values;
         levChart.data.datasets[0].pointRadius = pointRadius;
         levChart.data.datasets[0].pointBackgroundColor = pointBg;
+        levChart.data.datasets[0].pointHoverRadius = isDay ? 3 : 4;
+        levChart.options.scales.x.ticks.maxTicksLimit = tickLimit;
+        levChart.options.plugins.tooltip.callbacks.label = function(ctx) {
+          const p = points[ctx.dataIndex] || {};
+          const star = (!isDay && p.is_partial) ? '（当月未完）' : '';
+          const when = isDay ? (p.date || '') : '';
+          const prefix = when ? ` ${when}` : '';
+          return `${prefix} ${Number(ctx.parsed.y).toFixed(decimals)} 十亿美元${star}`;
+        };
         levChart.update('none');
         return;
       }
@@ -2045,9 +2131,10 @@
             borderColor: '#2563eb',
             backgroundColor: 'rgba(37, 99, 235, 0.10)',
             fill: true,
-            tension: 0.25,
+            tension: isDay ? 0.15 : 0.25,
             borderWidth: 2,
             pointRadius,
+            pointHoverRadius: isDay ? 3 : 4,
             pointBackgroundColor: pointBg,
             pointBorderColor: '#2563eb',
           }],
@@ -2062,15 +2149,17 @@
               callbacks: {
                 label(ctx) {
                   const p = points[ctx.dataIndex] || {};
-                  const star = p.is_partial ? '（当月未完）' : '';
-                  return ` ${Number(ctx.parsed.y).toFixed(1)} 十亿美元${star}`;
+                  const star = (!isDay && p.is_partial) ? '（当月未完）' : '';
+                  const when = isDay ? (p.date || '') : '';
+                  const prefix = when ? ` ${when}` : '';
+                  return `${prefix} ${Number(ctx.parsed.y).toFixed(decimals)} 十亿美元${star}`;
                 },
               },
             },
           },
           scales: {
             x: {
-              ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 14, color: '#64748b', font: { size: 11 } },
+              ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: tickLimit, color: '#64748b', font: { size: 11 } },
               grid: { display: false },
             },
             y: {
@@ -2083,19 +2172,33 @@
       });
     }
 
-    function applyLevPayload(data) {
-      levMeta = data;
-      levAllPoints = Array.isArray(data.points) ? data.points.slice() : [];
-      // API 若带 year 过滤则 points 已过滤；前端年份切换需要全量，故 year=all 拉取
-      const sel = document.getElementById('levYear');
-      const years = data.available_years || [];
-      const prev = sel.value || 'all';
-      sel.innerHTML = '<option value="all">全部</option>' +
-        years.map(y => `<option value="${y}">${y}</option>`).join('');
-      if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
-      else sel.value = 'all';
-      const filtered = filterLevPoints(sel.value);
-      renderLevStats(filtered, data);
+    function syncLevFilterControl() {
+      const label = document.getElementById('levFilterLabel');
+      const sel = document.getElementById('levFilter');
+      if (levMode === 'day') {
+        label.textContent = '周数';
+        label.setAttribute('for', 'levFilter');
+        sel.innerHTML = LEV_WEEK_OPTIONS.map(o =>
+          `<option value="${o.value}">${o.label}</option>`
+        ).join('');
+        if ([...sel.options].some(o => o.value === levWeekFilter)) sel.value = levWeekFilter;
+        else { sel.value = '4w'; levWeekFilter = '4w'; }
+      } else {
+        label.textContent = '年份';
+        sel.innerHTML = '<option value="all">全部</option>' +
+          (levAvailableYears || []).map(y => `<option value="${y}">${y}</option>`).join('');
+        if ([...sel.options].some(o => o.value === levYearFilter)) sel.value = levYearFilter;
+        else { sel.value = 'all'; levYearFilter = 'all'; }
+      }
+    }
+
+    function refreshLevView() {
+      syncLevChrome();
+      syncLevFilterControl();
+      const filtered = filterLevPoints();
+      // 切换日/月或筛选时重建图表，避免点半径与密度配置残留
+      if (levChart) { levChart.destroy(); levChart = null; }
+      renderLevStats(filtered, levMeta || {});
       renderLevChart(filtered);
     }
 
@@ -2104,12 +2207,27 @@
       empty.style.display = 'block';
       empty.textContent = '加载中…';
       try {
-        const res = await fetch('/api/lev-etf/tech/monthly?year=all');
-        if (!res.ok) throw new Error('HTTP ' + res.status);
-        const data = await res.json();
-        applyLevPayload(data);
-        if (data.loading && !(data.points || []).length) {
-          // 后台回填中，稍后自动再试一次
+        const [dayRes, monthRes] = await Promise.all([
+          fetch('/api/lev-etf/tech/daily?year=all'),
+          fetch('/api/lev-etf/tech/monthly?year=all'),
+        ]);
+        if (!dayRes.ok && !monthRes.ok) throw new Error('HTTP');
+        const dayData = dayRes.ok ? await dayRes.json() : { points: [], available_years: [] };
+        const monthData = monthRes.ok ? await monthRes.json() : { points: [], available_years: [] };
+        levDailyPoints = Array.isArray(dayData.points) ? dayData.points.slice() : [];
+        levMonthlyPoints = Array.isArray(monthData.points) ? monthData.points.slice() : [];
+        levAvailableYears = Array.from(new Set([
+          ...(dayData.available_years || []),
+          ...(monthData.available_years || []),
+        ])).sort();
+        levMeta = levMode === 'day' ? dayData : monthData;
+        if (!levMeta.as_of_date) {
+          levMeta.as_of_date = dayData.as_of_date || monthData.as_of_date;
+        }
+        refreshLevView();
+        const loading = (dayData.loading && !levDailyPoints.length) ||
+          (monthData.loading && !levMonthlyPoints.length);
+        if (loading) {
           setTimeout(() => { if (currentTab === 'mainline') loadLevEtf(); }, 12000);
         }
       } catch (e) {
@@ -2118,11 +2236,24 @@
       }
     }
 
-    document.getElementById('levYear').addEventListener('change', () => {
-      const year = document.getElementById('levYear').value;
-      const filtered = filterLevPoints(year);
-      renderLevStats(filtered, levMeta || {});
-      renderLevChart(filtered);
+    document.getElementById('levFilter').addEventListener('change', () => {
+      const v = document.getElementById('levFilter').value;
+      if (levMode === 'day') levWeekFilter = v;
+      else levYearFilter = v;
+      refreshLevView();
+    });
+    document.getElementById('levGranularity').addEventListener('change', () => {
+      levMode = document.getElementById('levGranularity').value === 'month' ? 'month' : 'day';
+      levMeta = {
+        ...(levMeta || {}),
+        as_of_date: levMode === 'day'
+          ? (levDailyPoints.length ? levDailyPoints[levDailyPoints.length - 1].date : null)
+          : (levMonthlyPoints.length ? levMonthlyPoints[levMonthlyPoints.length - 1].as_of_date : null),
+        note: (!filterLevPoints().length)
+          ? '回填任务未完成或进行中，请稍后刷新。'
+          : null,
+      };
+      refreshLevView();
     });
 
     ['days', 'category', 'tier_pair', 'deal_quality', 'min_score', 'pushed_only', 'first_day_move'].forEach(id => {

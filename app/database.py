@@ -379,6 +379,24 @@ class LevEtfMonthly(Base):
     updated_at = Column(DateTime, nullable=False, default=now_beijing)
 
 
+class LevEtfDaily(Base):
+    """科技杠杆 ETF 日度名义成交额（公开行情代理）。"""
+
+    __tablename__ = "lev_etf_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "basket_key", "trade_date", name="uq_lev_etf_daily_basket_date"
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    basket_key = Column(String(40), nullable=False, index=True, default="tech_lev_etf")
+    trade_date = Column(Date, nullable=False, index=True)
+    notional_usd = Column(Float, nullable=False, default=0.0)
+    notional_bn = Column(Float, nullable=False, default=0.0)
+    updated_at = Column(DateTime, nullable=False, default=now_beijing)
+
+
 def is_turso_stream_error(exc: BaseException) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in STREAM_ERROR_MARKERS)

@@ -1,4 +1,4 @@
-"""日度 → 月度名义成交额聚合。"""
+"""日度名义成交额与月度聚合。"""
 
 from __future__ import annotations
 
@@ -31,6 +31,43 @@ def month_key(d: date) -> str:
 
 def month_end(year: int, month: int) -> date:
     return date(year, month, calendar.monthrange(year, month)[1])
+
+
+def to_daily_points(
+    daily: dict[date, float],
+    *,
+    start_date: date | None = None,
+) -> list[dict]:
+    """日度名义成交额序列（十亿美元）。"""
+    points: list[dict] = []
+    for d, usd in sorted(daily.items()):
+        if start_date and d < start_date:
+            continue
+        usd_f = float(usd)
+        if usd_f <= 0:
+            continue
+        points.append(
+            {
+                "date": d.isoformat(),
+                "notional_usd": round(usd_f, 2),
+                "notional_bn": round(usd_f / 1e9, 3),
+            }
+        )
+    return points
+
+
+def daily_points_to_map(points: Iterable[dict]) -> dict[date, float]:
+    out: dict[date, float] = {}
+    for p in points:
+        raw = str(p.get("date") or "")[:10]
+        if not raw:
+            continue
+        try:
+            d = date.fromisoformat(raw)
+        except ValueError:
+            continue
+        out[d] = float(p.get("notional_usd") or 0)
+    return out
 
 
 def aggregate_monthly(
@@ -90,7 +127,11 @@ def filter_year(points: Iterable[dict], year: str | int | None) -> list[dict]:
     if year is None or str(year).lower() in {"", "all"}:
         return rows
     y = str(year).strip()
-    return [p for p in rows if str(p.get("month") or "").startswith(y)]
+    return [
+        p
+        for p in rows
+        if str(p.get("month") or p.get("date") or "").startswith(y)
+    ]
 
 
 def build_stats(points: list[dict]) -> dict:
@@ -98,8 +139,11 @@ def build_stats(points: list[dict]) -> dict:
         return {"min": None, "max": None, "latest": None}
 
     def pack(p: dict) -> dict:
+        label = p.get("month") or p.get("date")
         return {
-            "month": p["month"],
+            "month": p.get("month"),
+            "date": p.get("date"),
+            "label": label,
             "notional_bn": p["notional_bn"],
             "is_partial": bool(p.get("is_partial")),
         }
