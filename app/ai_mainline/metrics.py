@@ -45,7 +45,12 @@ def theme_metrics(
             if chg > 0:
                 up += 1
             quoted.append((sym, chg))
-            members.append({"symbol": sym, "name": name, "ret_1d": round(chg, 2)})
+            mem = {"symbol": sym, "name": name, "ret_1d": round(chg, 2)}
+            if q.get("quote_time"):
+                mem["quote_time"] = q["quote_time"]
+            if q.get("quote_time_et"):
+                mem["quote_time_et"] = q["quote_time_et"]
+            members.append(mem)
         else:
             members.append({"symbol": sym, "name": name, "ret_1d": None})
 

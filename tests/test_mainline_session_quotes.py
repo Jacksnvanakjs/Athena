@@ -36,6 +36,25 @@ def test_yahoo_pre_uses_pre_market():
     assert abs(row["change_pct"] + 2.5) < 1e-6
 
 
+def test_data_times_from_quotes_and_trade_date():
+    from datetime import date
+
+    from app.ai_mainline.pipeline import _daily_session_close_times, _quote_data_times
+
+    times = _quote_data_times(
+        {
+            "A": {"quote_time": "2026-09-22 21:10:00", "quote_time_et": "2026-09-22 09:10:00 EDT"},
+            "B": {"quote_time": "2026-09-22 21:15:00", "quote_time_et": "2026-09-22 09:15:00 EDT"},
+        }
+    )
+    assert times["data_time_1d_bj"] == "2026-09-22 21:15:00"
+    assert "09:15" in (times["data_time_1d_et"] or "")
+
+    daily = _daily_session_close_times(date(2026, 9, 19))
+    assert daily["data_time_daily_bj"]  # 夏令时 16:00 ET = 04:00+1 BJ
+    assert "16:00" in (daily["data_time_daily_et"] or "")
+
+
 def test_live_1d_active_phases():
     from datetime import datetime
     from zoneinfo import ZoneInfo

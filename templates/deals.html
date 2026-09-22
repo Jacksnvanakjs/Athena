@@ -525,9 +525,9 @@
               <tr>
                 <th title="按相对5D从强到弱排名；有效成分&lt;3 或无相对5D 时无序号">排名</th>
                 <th title="AI 叙事子板块（篮子成分见设计文档）">子线</th>
-                <th title="1个交易日：成分股当日等权涨跌幅（%）">1D <span class="help" title="近1个交易日：该子线成分股当日涨跌幅的等权平均（%）。缺行情的成分会剔除后再平均。">?</span></th>
-                <th title="近5个交易日累计等权涨跌（%）">5D <span class="help" title="近5个交易日：成分股约5日累计涨跌的等权平均（%）。优先用收盘快照/历史价计算。">?</span></th>
-                <th title="近20个交易日累计等权涨跌（%）">20D <span class="help" title="近20个交易日：成分股约20日累计涨跌的等权平均（%），看中期趋势。">?</span></th>
+                <th title="1个交易日：成分股当日等权涨跌幅（%）。悬停可看行情数据时间（北京/美东）">1D <span class="help" title="近1个交易日：该子线成分股当日涨跌幅的等权平均（%）。缺行情的成分会剔除后再平均。悬停单元格可查看行情数据时间（北京时间为主，美东附后），是行情本身时刻，不是页面计算时刻。">?</span></th>
+                <th title="近5个交易日累计等权涨跌（%）。悬停可看对应收盘数据时间">5D <span class="help" title="近5个交易日：成分股约5日累计涨跌的等权平均（%）。优先用收盘快照/历史价计算。悬停可查看该交易日收盘对应的北京/美东时间。">?</span></th>
+                <th title="近20个交易日累计等权涨跌（%）。悬停可看对应收盘数据时间">20D <span class="help" title="近20个交易日：成分股约20日累计涨跌的等权平均（%），看中期趋势。悬停可查看该交易日收盘对应的北京/美东时间。">?</span></th>
                 <th title="相对AI综合基准的5日超额（主排序）">相对5D <span class="help" title="相对5D = 子线5D − AI综合基准5D（百分点）。&gt;0 表示近5日跑赢AI整体；主线按此列降序排名。">?</span></th>
                 <th title="当日上涨家数 / 有效报价家数">广度 <span class="help" title="广度 = 当日上涨家数 ÷ 有效报价家数。例如 5/6 表示6只有行情里有5只上涨；越高说明涨势越齐。">?</span></th>
                 <th title="主线已确认 / 观察中 / 次强">状态</th>
@@ -957,6 +957,40 @@
       return `<span class="${cls}">${sign}${n.toFixed(1)}%</span>`;
     }
 
+    function escapeAttr(s) {
+      return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;');
+    }
+
+    /** 行情数据时刻悬停：北京为主，美东附后（不是页面计算时间） */
+    function dataTimeTip(bj, et, kind) {
+      const lines = [];
+      if (kind === '1d') lines.push('1D 行情数据时间（非页面刷新时刻）');
+      else if (kind === '5d') lines.push('5D 基于该交易日收盘价（非页面刷新时刻）');
+      else if (kind === '20d') lines.push('20D 基于该交易日收盘价（非页面刷新时刻）');
+      else if (kind === 'rel') lines.push('相对5D 基于该交易日收盘价（非页面刷新时刻）');
+      else lines.push('数据时间（非页面刷新时刻）');
+      lines.push('北京 ' + (bj || '—'));
+      if (et) {
+        const etClean = String(et).replace(/\s*美东\s*$/, '').trim();
+        lines.push(etClean + ' 美东');
+      } else {
+        lines.push('美东 —');
+      }
+      return lines.join('\n');
+    }
+
+    function fmtPctWithDataTime(v, bj, et, kind) {
+      const html = fmtPct(v);
+      if (html === '—') return html;
+      return html.replace(
+        '<span ',
+        `<span title="${escapeAttr(dataTimeTip(bj, et, kind))}" `
+      );
+    }
+
     function fmtBreadth(row) {
       if (row.breadth == null) return '—';
       if (row.n_up != null && row.n_valid) return `${row.n_up}/${row.n_valid}`;
@@ -1050,6 +1084,10 @@
 
       const bench = data.bench || {};
       const sec = data.secondary;
+      const d1bj = data.data_time_1d_bj || '';
+      const d1et = data.data_time_1d_et || '';
+      const dDbj = data.data_time_daily_bj || '';
+      const dDet = data.data_time_daily_et || '';
       let m = [];
       if (primary) {
         m.push(`近5日 ${primary.ret_5d != null ? (primary.ret_5d > 0 ? '+' : '') + Number(primary.ret_5d).toFixed(1) + '%' : '—'}`);
@@ -1060,10 +1098,16 @@
       m.push(`次强：${sec ? sec.name : '无'}`);
       m.push(`AI基准5D ${bench.ret_5d != null ? (bench.ret_5d > 0 ? '+' : '') + Number(bench.ret_5d).toFixed(1) + '%' : '—'}`);
       const asOf = data.trade_date || '';
-      const bj = data.updated_bj || '';
-      m.push(`更新：北京 ${bj || '—'}${asOf ? ' · 美东交易日 ' + asOf : ''}`);
-      if (data.stale) m.push('缓存结果');
-      metrics.textContent = m.join(' ｜ ');
+      // 展示「数据时刻」，不用页面计算时间 updated_bj
+      const dataBj = d1bj || dDbj;
+      const dataEt = d1et || dDet;
+      const timeTip = dataTimeTip(dataBj, dataEt, '1d');
+      const timeLabel = dataBj
+        ? `数据时间：北京 ${dataBj}${dataEt ? ' · ' + dataEt : ''}`
+        : (asOf ? `数据交易日 ${asOf}（收盘）` : '数据时间：—');
+      m.push(`<span title="${escapeAttr(timeTip)}">${timeLabel}</span>`);
+      if (data.stale) m.push('缓存快照');
+      metrics.innerHTML = m.join(' ｜ ');
       summary.textContent = [
         data.note || '',
         data.summary || data.disclaimer || '',
@@ -1088,10 +1132,17 @@
           membersHtml = members.map(m => {
             const sym = m.symbol || m;
             const miss = m.ret_1d == null;
-            const tip = miss
-              ? '暂无行情'
-              : (`1D ${(m.ret_1d > 0 ? '+' : '')}${Number(m.ret_1d).toFixed(1)}%` + (m.name ? ' · ' + m.name : ''));
-            return `<span class="${miss ? 'miss' : 'ok'}" title="${tip}">${sym}</span>`;
+            let tip;
+            if (miss) {
+              tip = '暂无行情';
+            } else {
+              tip = `1D ${(m.ret_1d > 0 ? '+' : '')}${Number(m.ret_1d).toFixed(1)}%` +
+                (m.name ? ' · ' + m.name : '');
+              const mbj = m.quote_time || d1bj;
+              const met = m.quote_time_et || d1et;
+              if (mbj || met) tip += '\n' + dataTimeTip(mbj, met, '1d');
+            }
+            return `<span class="${miss ? 'miss' : 'ok'}" title="${escapeAttr(tip)}">${sym}</span>`;
           }).join(', ');
         } else {
           const tickers = row.tickers || row.leaders || [];
@@ -1103,10 +1154,10 @@
         tr.innerHTML = `
           <td>${rankCell}</td>
           <td>${row.name || row.key}</td>
-          <td>${fmtPct(row.ret_1d)}</td>
-          <td>${fmtPct(row.ret_5d)}</td>
-          <td>${fmtPct(row.ret_20d)}</td>
-          <td>${fmtPct(row.rel_5d)}</td>
+          <td>${fmtPctWithDataTime(row.ret_1d, d1bj, d1et, '1d')}</td>
+          <td>${fmtPctWithDataTime(row.ret_5d, dDbj, dDet, '5d')}</td>
+          <td>${fmtPctWithDataTime(row.ret_20d, dDbj, dDet, '20d')}</td>
+          <td>${fmtPctWithDataTime(row.rel_5d, dDbj, dDet, 'rel')}</td>
           <td>${fmtBreadth(row)}</td>
           <td>${row.status_label || '—'}</td>
           <td><div class="ml-members">${membersHtml}</div></td>

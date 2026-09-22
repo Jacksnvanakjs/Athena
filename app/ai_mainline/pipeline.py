@@ -212,6 +212,10 @@ async def _overlay_live_1d(
             if q and q.get("change_pct") is not None:
                 chg = round(float(q["change_pct"]), 2)
                 mem["ret_1d"] = chg
+                if q.get("quote_time"):
+                    mem["quote_time"] = q["quote_time"]
+                if q.get("quote_time_et"):
+                    mem["quote_time_et"] = q["quote_time_et"]
                 ret_1d_list.append(chg)
                 if chg > 0:
                     up += 1
@@ -233,8 +237,11 @@ async def _overlay_live_1d(
     if b1:
         bench["ret_1d"] = round(sum(b1) / len(b1), 2)
     out["bench"] = bench
+    # as_of / updated_bj 仍是请求/计算时刻；1D 数据时刻单独字段
     out["as_of"] = _as_of_iso()
     out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
+    out.update(_quote_data_times(quotes))
+    out.update(_daily_session_close_times(out.get("trade_date")))
     out["quote_count"] = len(quotes)
     out["quote_total"] = len(all_symbols())
     out["session_phase"] = phase
@@ -250,6 +257,7 @@ async def _overlay_live_1d(
         "盘前已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "隔夜展示最近盘后/收盘 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "隔夜/周末夜盘已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
     ):
         note = note.replace(old, "").strip()
     tip = _session_tip(phase)
@@ -260,6 +268,37 @@ async def _overlay_live_1d(
 
 def _theme_name_map() -> dict[str, str]:
     return {t["key"]: t.get("name") or t["key"] for t in enabled_themes()}
+
+
+def _quote_data_times(quotes: dict[str, dict[str, Any]]) -> dict[str, str | None]:
+    """从行情行取「数据本身」时间（最新一条），不是服务端计算时刻。"""
+    bj_times = [str(q["quote_time"]) for q in quotes.values() if q and q.get("quote_time")]
+    et_times = [
+        str(q["quote_time_et"]) for q in quotes.values() if q and q.get("quote_time_et")
+    ]
+    return {
+        "data_time_1d_bj": max(bj_times) if bj_times else None,
+        "data_time_1d_et": max(et_times) if et_times else None,
+    }
+
+
+def _daily_session_close_times(trade_date: date | str | None) -> dict[str, str | None]:
+    """日线 5D/20D 对应的美东收盘时刻（16:00 ET）及其北京时间。"""
+    if trade_date is None:
+        return {"data_time_daily_bj": None, "data_time_daily_et": None}
+    if isinstance(trade_date, str):
+        try:
+            trade_date = date.fromisoformat(trade_date[:10])
+        except ValueError:
+            return {"data_time_daily_bj": None, "data_time_daily_et": None}
+    dt_et = datetime(
+        trade_date.year, trade_date.month, trade_date.day, 16, 0, tzinfo=ET
+    )
+    bj = ZoneInfo("Asia/Shanghai")
+    return {
+        "data_time_daily_bj": dt_et.astimezone(bj).strftime("%Y-%m-%d %H:%M"),
+        "data_time_daily_et": dt_et.strftime("%Y-%m-%d %H:%M %Z"),
+    }
 
 
 def _basket_members(theme_key: str) -> list[dict[str, Any]]:
@@ -393,7 +432,7 @@ def _payload_from_db_snapshots() -> dict[str, Any] | None:
         }
 
     trade_s = latest.isoformat() if hasattr(latest, "isoformat") else str(latest)
-    return {
+    payload = {
         "success": True,
         "enabled": True,
         "as_of": _as_of_iso(),
@@ -419,6 +458,11 @@ def _payload_from_db_snapshots() -> dict[str, Any] | None:
         "stale": True,
         "note": f"实时行情较慢，展示库内 {trade_s} 主线快照（非估算）。",
     }
+    payload.update(_daily_session_close_times(trade_s))
+    # 无即时报价时：1D 也按该交易日收盘理解
+    payload["data_time_1d_bj"] = payload.get("data_time_daily_bj")
+    payload["data_time_1d_et"] = payload.get("data_time_daily_et")
+    return payload
 
 
 async def _compute_mainline_fresh(
@@ -498,6 +542,8 @@ async def _compute_mainline_fresh(
         "disclaimer": "相对强弱判断，非互斥；不构成投资建议。",
         "updated_bj": now_beijing().strftime("%Y-%m-%d %H:%M"),
         "stale": False,
+        **_quote_data_times(quotes),
+        **_daily_session_close_times(today),
     }
 
 
