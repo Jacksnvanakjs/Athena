@@ -173,21 +173,21 @@ def _build_summary(
     st_label = "已确认" if primary.get("status") == "confirmed" else "观察中"
     rel = primary.get("rel_5d")
     ret = primary.get("ret_5d")
-    breadth = primary.get("breadth")
     n_up = primary.get("n_up")
     n_valid = primary.get("n_valid")
-    breadth_txt = ""
-    if breadth is not None:
-        if n_up is not None and n_valid:
-            breadth_txt = f"｜上涨 {n_up}/{n_valid}"
-        else:
-            breadth_txt = f"｜上涨占比 {breadth:.0%}"
+    # 广度是当日 1D，不写进「近5日」行，避免与已确认主线混读
+    breadth_1d = ""
+    if n_up is not None and n_valid:
+        breadth_1d = f"今日1D广度：上涨 {n_up}/{n_valid}\n"
+    elif primary.get("breadth") is not None:
+        breadth_1d = f"今日1D广度：上涨占比 {float(primary['breadth']):.0%}\n"
     sec_name = secondary["name"] if secondary else "无"
     rel_s = f"{rel:+.1f}%" if rel is not None else "—"
     ret_s = f"{ret:+.1f}%" if ret is not None else "—"
     return (
-        f"当前主线：{primary['name']}（{st_label}）\n"
-        f"近5日相对 AI 基准：{rel_s}｜板块 {ret_s}{breadth_txt}\n"
+        f"5日主线：{primary['name']}（{st_label}）\n"
+        f"近5日相对 AI 基准：{rel_s}｜板块 {ret_s}\n"
+        f"{breadth_1d}"
         f"次强：{sec_name}\n"
-        f"说明：相对强弱判断，非互斥；不构成投资建议。"
+        f"说明：主线按5日相对强弱确认；1D广度是当日脉搏，不单独改主线。相对强弱非互斥；不构成投资建议。"
     )

@@ -455,6 +455,50 @@
     }
     .ml-members .ok { color: var(--text); font-weight: 500; }
     .ml-members .miss { color: #94a3b8; }
+    .ml-badge-weak { background: #fef3c7; color: #92400e; }
+    .ml-rotation {
+      margin: 12px 0 16px;
+      padding: 12px 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+    }
+    .ml-rotation-title {
+      font-size: 0.88rem;
+      font-weight: 600;
+      margin-bottom: 10px;
+      color: var(--text);
+    }
+    .ml-rotation-track {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: stretch;
+      gap: 6px 4px;
+    }
+    .ml-rot-item {
+      min-width: 88px;
+      max-width: 140px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      font-size: 0.78rem;
+      line-height: 1.35;
+    }
+    .ml-rot-item.ml-rot-current {
+      background: #ecfdf5;
+      border-color: #86efac;
+    }
+    .ml-rot-date { color: var(--text-muted); font-size: 0.72rem; }
+    .ml-rot-name { font-weight: 600; margin-top: 2px; color: var(--text); }
+    .ml-rot-st { color: var(--text-muted); margin-top: 2px; font-size: 0.72rem; }
+    .ml-rot-arrow {
+      align-self: center;
+      color: #94a3b8;
+      padding: 0 2px;
+      font-size: 0.85rem;
+    }
     .strategy-hint { font-size: 0.75rem; color: var(--text-muted); margin-top: 2px; }
     .pushed { color: var(--green); font-weight: 600; }
     .empty {
@@ -492,7 +536,7 @@
         <strong>AI财报</strong>、<strong>AI合作</strong>、<strong>黄仁勋</strong>。
       </p>
       <ul>
-        <li><strong>AI 主线</strong>：用各子板块相对 AI 综合基准的 5 日强弱判断资金偏向哪条链，<strong>不是</strong>软硬件互斥。「已确认」约需连续 3 个交易日排名靠前。</li>
+        <li><strong>AI 主线</strong>：用各子板块相对 AI 综合基准的 <strong>5 日</strong>强弱判断资金偏向哪条链，<strong>不是</strong>软硬件互斥。「已确认」约需连续 3 个交易日排名靠前。表格里的 <strong>1D / 广度</strong>是当日脉搏，盘前/隔夜可能接近 0/N，<strong>不会单独改掉 5 日主线</strong>。</li>
         <li><strong>合作 / 黄仁勋</strong>：事件驱动即时推送；入库 ≠ 一定推送。</li>
         <li><strong>财报日历</strong>：监控 AI 链相关标的（含 DELL 等）；可提前数周上网站；手机推送<strong>仅财报前 2 天</strong>且须过市值/评分门槛，同日多家合并一条。揭晓后展示 <strong>开盘·D1～D5</strong>（皆相对「财报前收」的累计涨跌，非日涨跌；评分异常主对照取 <strong>D2</strong>）。时点随<strong>财报发布时间</strong>不同：<strong>财报盘后发布</strong>时前收=财报日收盘、开盘/D1=次一交易日；<strong>财报盘前发布</strong>时前收=前一交易日收盘、开盘/D1=财报日当天。对不上的进<strong>评分异常区</strong>。行情/日线/市值均<strong>多源自动切换</strong>。</li>
         <li>仅供研究，非投资建议。</li>
@@ -529,7 +573,7 @@
                 <th title="近5个交易日累计等权涨跌（%）。悬停可看对应收盘数据时间">5D <span class="help" title="近5个交易日：成分股约5日累计涨跌的等权平均（%）。优先用收盘快照/历史价计算。悬停可查看该交易日收盘对应的北京/美东时间。">?</span></th>
                 <th title="近20个交易日累计等权涨跌（%）。悬停可看对应收盘数据时间">20D <span class="help" title="近20个交易日：成分股约20日累计涨跌的等权平均（%），看中期趋势。悬停可查看该交易日收盘对应的北京/美东时间。">?</span></th>
                 <th title="相对AI综合基准的5日超额（主排序）">相对5D <span class="help" title="相对5D = 子线5D − AI综合基准5D（百分点）。&gt;0 表示近5日跑赢AI整体；主线按此列降序排名。">?</span></th>
-                <th title="当日上涨家数 / 有效报价家数">广度 <span class="help" title="广度 = 当日上涨家数 ÷ 有效报价家数。例如 5/6 表示6只有行情里有5只上涨；越高说明涨势越齐。">?</span></th>
+                <th title="当日上涨家数 / 有效报价家数（1D 脉搏，非 5 日确认条件）">广度 <span class="help" title="广度 = 当日上涨家数 ÷ 有效报价家数（1D）。例如 0/6 表示当日有效行情里暂无上涨；这是盘中/盘前脉搏，主线「已确认」仍按近5日相对强弱，二者可并存。">?</span></th>
                 <th title="主线已确认 / 观察中 / 次强">状态</th>
                 <th title="该子线全部成分股（按当日涨跌排序；无行情标灰）">成分</th>
               </tr>
@@ -541,6 +585,14 @@
             点击右上角「立即扫描」重算；需可访问美股行情源。
           </div>
         </div>
+      </div>
+
+      <div class="ml-rotation" id="mlRotation" style="display:none">
+        <div class="ml-rotation-title">
+          近2周主线轮动
+          <span class="help" title="按交易日快照压缩：同一主线连续多日合并为一段。顺序从左到右为时间先后；最右侧为最近一段。主线判定按5日相对强弱，与当日1D脉搏可不同。">?</span>
+        </div>
+        <div class="ml-rotation-track" id="mlRotationTrack"></div>
       </div>
 
       <div class="lev-card" id="levCard">
@@ -1066,20 +1118,29 @@
       const title = document.getElementById('mlTitle');
       const metrics = document.getElementById('mlMetrics');
       const summary = document.getElementById('mlSummary');
+      const weak1d = !!data.pulse_1d_weak;
+      const pulse = data.pulse_1d;
 
       badge.className = 'ml-badge';
       if (status === 'confirmed' && primary) {
-        badge.classList.add('ml-badge-confirmed');
-        badge.textContent = '已确认';
-        title.textContent = `当前主线：${primary.name}`;
+        badge.classList.add(weak1d ? 'ml-badge-weak' : 'ml-badge-confirmed');
+        badge.textContent = weak1d ? '已确认·5日' : '已确认';
+        badge.title = weak1d
+          ? '主线按近5日相对强弱已确认；今日1D广度偏弱，仅为当日脉搏'
+          : '近5日相对强弱已确认';
+        title.textContent = `5日主线：${primary.name}`;
       } else if (status === 'emerging' && primary) {
-        badge.classList.add('ml-badge-emerging');
-        badge.textContent = '观察中';
-        title.textContent = `当前主线：${primary.name}`;
+        badge.classList.add(weak1d ? 'ml-badge-weak' : 'ml-badge-emerging');
+        badge.textContent = weak1d ? '观察中·5日' : '观察中';
+        badge.title = weak1d
+          ? '5日主线观察中；今日1D广度偏弱'
+          : '5日相对强弱观察中';
+        title.textContent = `5日主线：${primary.name}`;
       } else {
         badge.classList.add('ml-badge-none');
         badge.textContent = '暂无明确主线';
-        title.textContent = '当前主线：暂无';
+        badge.title = '';
+        title.textContent = '5日主线：暂无';
       }
 
       const bench = data.bench || {};
@@ -1092,8 +1153,17 @@
       if (primary) {
         m.push(`近5日 ${primary.ret_5d != null ? (primary.ret_5d > 0 ? '+' : '') + Number(primary.ret_5d).toFixed(1) + '%' : '—'}`);
         m.push(`相对基准 ${primary.rel_5d != null ? (primary.rel_5d > 0 ? '+' : '') + Number(primary.rel_5d).toFixed(1) + '%' : '—'}`);
-        if (primary.n_up != null && primary.n_valid) m.push(`上涨 ${primary.n_up}/${primary.n_valid}`);
+        if (primary.n_up != null && primary.n_valid) {
+          m.push(`今日1D ${primary.n_up}/${primary.n_valid}${weak1d ? '（偏弱）' : ''}`);
+        }
         if (primary.streak_days) m.push(`连续靠前 ${primary.streak_days} 日`);
+      }
+      if (pulse && pulse.name) {
+        const same = primary && pulse.key === primary.key;
+        const pr = pulse.ret_1d != null
+          ? ((pulse.ret_1d > 0 ? '+' : '') + Number(pulse.ret_1d).toFixed(1) + '%')
+          : '—';
+        m.push(same ? `今日脉搏：与主线一致 ${pr}` : `今日脉搏：${pulse.name} ${pr}`);
       }
       m.push(`次强：${sec ? sec.name : '无'}`);
       m.push(`AI基准5D ${bench.ret_5d != null ? (bench.ret_5d > 0 ? '+' : '') + Number(bench.ret_5d).toFixed(1) + '%' : '—'}`);
@@ -1111,7 +1181,7 @@
       summary.textContent = [
         data.note || '',
         data.summary || data.disclaimer || '',
-      ].filter(Boolean).join(' ');
+      ].filter(Boolean).join('\n');
 
       const tbody = document.getElementById('mlTbody');
       const empty = document.getElementById('mlEmpty');
@@ -1119,6 +1189,7 @@
       const themes = data.themes || [];
       if (!themes.length) {
         empty.style.display = 'block';
+        renderRotation([]);
         return;
       }
       empty.style.display = 'none';
@@ -1158,12 +1229,44 @@
           <td>${fmtPctWithDataTime(row.ret_5d, dDbj, dDet, '5d')}</td>
           <td>${fmtPctWithDataTime(row.ret_20d, dDbj, dDet, '20d')}</td>
           <td>${fmtPctWithDataTime(row.rel_5d, dDbj, dDet, 'rel')}</td>
-          <td>${fmtBreadth(row)}</td>
+          <td title="${escapeAttr('当日1D广度；主线确认看相对5D')}">${fmtBreadth(row)}</td>
           <td>${row.status_label || '—'}</td>
           <td><div class="ml-members">${membersHtml}</div></td>
         `;
         tbody.appendChild(tr);
       }
+      renderRotation(data.rotation_14d || []);
+    }
+
+    function renderRotation(runs) {
+      const wrap = document.getElementById('mlRotation');
+      const track = document.getElementById('mlRotationTrack');
+      if (!wrap || !track) return;
+      if (!runs || !runs.length) {
+        wrap.style.display = 'none';
+        track.innerHTML = '';
+        return;
+      }
+      wrap.style.display = 'block';
+      const parts = [];
+      runs.forEach((r, i) => {
+        if (i > 0) parts.push('<span class="ml-rot-arrow" aria-hidden="true">→</span>');
+        const st = r.status === 'confirmed' ? '已确认'
+          : (r.status === 'emerging' ? '观察中' : '—');
+        const start = (r.start || '').slice(5);
+        const end = (r.end || '').slice(5);
+        const range = start && end && start !== end ? `${start}~${end}` : (start || end || '—');
+        const cur = i === runs.length - 1 ? ' ml-rot-current' : '';
+        const name = r.name || r.key || '—';
+        parts.push(
+          `<div class="ml-rot-item${cur}" title="${escapeAttr((r.start || '') + ' → ' + (r.end || '') + ' · ' + name + ' · ' + st)}">` +
+          `<div class="ml-rot-date">${range}</div>` +
+          `<div class="ml-rot-name">${name}</div>` +
+          `<div class="ml-rot-st">${st} · ${r.days || 1}日</div>` +
+          `</div>`
+        );
+      });
+      track.innerHTML = parts.join('');
     }
 
     function fmtDualTime(bj, et) {

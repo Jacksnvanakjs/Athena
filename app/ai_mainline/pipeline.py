@@ -48,6 +48,158 @@ def _stale_payload(base: dict[str, Any], note: str) -> dict[str, Any]:
     return out
 
 
+def _sync_primary_from_themes(payload: dict[str, Any]) -> None:
+    """把主题行上的当日 1D/广度同步回 primary，避免卡片仍是快照旧值、表格已是 0/6。"""
+    themes = {
+        t.get("key"): t for t in (payload.get("themes") or []) if t.get("key")
+    }
+    primary = payload.get("primary")
+    if isinstance(primary, dict) and primary.get("key") in themes:
+        t = themes[primary["key"]]
+        for k in ("ret_1d", "breadth", "n_up", "n_valid"):
+            if t.get(k) is not None:
+                primary[k] = t[k]
+        payload["primary"] = primary
+    secondary = payload.get("secondary")
+    if isinstance(secondary, dict) and secondary.get("key") in themes:
+        t = themes[secondary["key"]]
+        for k in ("ret_1d", "breadth", "n_up", "n_valid"):
+            if t.get(k) is not None:
+                secondary[k] = t[k]
+        payload["secondary"] = secondary
+
+
+def _compute_pulse_1d(themes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """当日 1D 最强子线（有效成分≥3），与 5 日主线可不同。"""
+    best: dict[str, Any] | None = None
+    for t in themes:
+        if t.get("ret_1d") is None:
+            continue
+        if int(t.get("n_valid") or 0) < 3:
+            continue
+        if best is None or float(t["ret_1d"]) > float(best["ret_1d"]):
+            best = t
+    if not best:
+        return None
+    return {
+        "key": best.get("key"),
+        "name": best.get("name") or best.get("key"),
+        "ret_1d": best.get("ret_1d"),
+        "breadth": best.get("breadth"),
+        "n_up": best.get("n_up"),
+        "n_valid": best.get("n_valid"),
+    }
+
+
+def _is_1d_weak(primary: dict[str, Any] | None) -> bool:
+    if not primary:
+        return False
+    n_valid = int(primary.get("n_valid") or 0)
+    if n_valid < 3:
+        return False
+    n_up = primary.get("n_up")
+    if n_up is not None and int(n_up) == 0:
+        return True
+    breadth = primary.get("breadth")
+    if breadth is not None and float(breadth) < 0.35:
+        return True
+    return False
+
+
+def _display_summary(payload: dict[str, Any]) -> str:
+    primary = payload.get("primary")
+    secondary = payload.get("secondary")
+    status = payload.get("status") or "no_mainline"
+    if not primary or status in ("no_mainline", "disabled", "error"):
+        return (
+            payload.get("summary")
+            or "暂无明确主线（宏观/共振下跌或普涨）。相对强弱判断，非互斥；不构成投资建议。"
+        )
+    st_label = "已确认" if primary.get("status") == "confirmed" else "观察中"
+    rel = primary.get("rel_5d")
+    ret = primary.get("ret_5d")
+    rel_s = f"{rel:+.1f}%" if rel is not None else "—"
+    ret_s = f"{ret:+.1f}%" if ret is not None else "—"
+    n_up, n_valid = primary.get("n_up"), primary.get("n_valid")
+    if n_up is not None and n_valid:
+        b1 = f"今日1D广度：上涨 {n_up}/{n_valid}"
+    elif primary.get("breadth") is not None:
+        b1 = f"今日1D广度：上涨占比 {float(primary['breadth']):.0%}"
+    else:
+        b1 = "今日1D广度：—"
+    if _is_1d_weak(primary) and primary.get("status") in ("confirmed", "emerging"):
+        b1 += "（偏弱，不改5日主线）"
+    pulse = payload.get("pulse_1d")
+    pulse_line = ""
+    if pulse and pulse.get("key"):
+        pr = pulse.get("ret_1d")
+        pr_s = f"{pr:+.1f}%" if pr is not None else "—"
+        if pulse.get("key") != primary.get("key"):
+            pulse_line = f"今日1D脉搏：{pulse.get('name')}（{pr_s}）｜与5日主线不同\n"
+        else:
+            pulse_line = f"今日1D脉搏：与主线一致（{pr_s}）\n"
+    sec_name = secondary["name"] if secondary else "无"
+    return (
+        f"5日主线：{primary['name']}（{st_label}）\n"
+        f"近5日相对 AI 基准：{rel_s}｜板块 {ret_s}\n"
+        f"{b1}\n"
+        f"{pulse_line}"
+        f"次强：{sec_name}\n"
+        f"说明：主线按5日相对强弱确认；表格广度/1D是当日脉搏。相对强弱非互斥；不构成投资建议。"
+    )
+
+
+def _rotation_runs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把逐日 primary 压成连续区间，便于近2周轮动展示。"""
+    runs: list[dict[str, Any]] = []
+    for item in items:
+        key = item.get("primary_key")
+        name = item.get("primary_name") or key or "暂无明确主线"
+        if not key:
+            key = None
+            name = "暂无明确主线"
+        td = item.get("trade_date") or ""
+        if runs and runs[-1].get("key") == key:
+            runs[-1]["end"] = td
+            runs[-1]["status"] = item.get("status")
+            runs[-1]["days"] = int(runs[-1].get("days") or 0) + 1
+            if item.get("streak_days") is not None:
+                runs[-1]["streak_days"] = item.get("streak_days")
+        else:
+            runs.append(
+                {
+                    "key": key,
+                    "name": name,
+                    "start": td,
+                    "end": td,
+                    "status": item.get("status"),
+                    "days": 1,
+                    "streak_days": item.get("streak_days"),
+                }
+            )
+    return runs
+
+
+def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """API 出口：同步 1D、脉搏、轮动；主线判定本身仍是 5D。"""
+    if not payload:
+        return payload
+    if payload.get("enabled") is False or payload.get("status") == "disabled":
+        return payload
+    out = payload
+    _sync_primary_from_themes(out)
+    out["pulse_1d"] = _compute_pulse_1d(out.get("themes") or [])
+    out["pulse_1d_weak"] = _is_1d_weak(out.get("primary"))
+    out["mainline_basis"] = "rel_5d"
+    out["summary"] = _display_summary(out)
+    try:
+        out["rotation_14d"] = _rotation_runs(history_primary(14))
+    except Exception:
+        logger.exception("ai_mainline rotation_14d failed")
+        out.setdefault("rotation_14d", [])
+    return out
+
+
 def _market_phase(now: datetime | None = None) -> str:
     """美东时段：pre_open / rth / settle / overnight / closed。
 
@@ -581,8 +733,8 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                 overlaid = await _overlay_live_1d(cached, phase=phase)
                 _CACHE["data"] = overlaid
                 _CACHE["quote_ts"] = now
-                return overlaid
-            return cached
+                return _finalize_payload(overlaid)
+            return _finalize_payload(cached)
 
         if not needs_full and base is not None:
             out = base
@@ -596,7 +748,7 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                 )
             _CACHE["ts"] = now
             _CACHE["data"] = out
-            return out
+            return _finalize_payload(out)
 
         logger.info(
             "ai_mainline full refresh phase=%s snap=%s cov=%s",
@@ -626,7 +778,7 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
             )
             _CACHE["ts"] = now if phase != "settle" else now - 60
             _CACHE["data"] = kept
-            return kept
+            return _finalize_payload(kept)
         return {
             "success": False,
             "enabled": True,
@@ -641,9 +793,11 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
     except Exception as exc:
         logger.exception("ai_mainline compute failed: %s", exc)
         if base and _period_coverage(base) >= _COV_OK:
-            return _stale_payload(
-                base,
-                f"本次刷新失败（{type(exc).__name__}），展示上一版可靠结果。",
+            return _finalize_payload(
+                _stale_payload(
+                    base,
+                    f"本次刷新失败（{type(exc).__name__}），展示上一版可靠结果。",
+                )
             )
         raise
 
@@ -661,7 +815,7 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
         )
         _CACHE["ts"] = now if phase != "settle" else now - 60
         _CACHE["data"] = kept
-        return kept
+        return _finalize_payload(kept)
 
     if new_cov < _COV_OK and base and old_cov > new_cov and not force:
         kept = _stale_payload(
@@ -670,14 +824,14 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
         )
         _CACHE["ts"] = now if phase != "settle" else now - 60
         _CACHE["data"] = kept
-        return kept
+        return _finalize_payload(kept)
 
     _CACHE["ts"] = now
     _CACHE["quote_ts"] = now
     if _live_1d_active(phase):
         payload = await _overlay_live_1d(payload, phase=phase)
     _CACHE["data"] = payload
-    return payload
+    return _finalize_payload(payload)
 
 
 
