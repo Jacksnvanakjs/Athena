@@ -1040,30 +1040,75 @@
     }
 
     /** 行情数据时刻悬停：北京为主，美东附后（不是页面计算时间） */
-    function dataTimeTip(bj, et, kind) {
+    function dataTimeTip(bj, et, kind, source) {
       const lines = [];
-      if (kind === '1d') lines.push('1D 行情数据时间（非页面刷新时刻）');
-      else if (kind === '5d') lines.push('5D 基于该交易日收盘价（非页面刷新时刻）');
-      else if (kind === '20d') lines.push('20D 基于该交易日收盘价（非页面刷新时刻）');
-      else if (kind === 'rel') lines.push('相对5D 基于该交易日收盘价（非页面刷新时刻）');
-      else lines.push('数据时间（非页面刷新时刻）');
-      lines.push('北京 ' + (bj || '—'));
-      if (et) {
-        const etClean = String(et).replace(/\s*美东\s*$/, '').trim();
-        lines.push(etClean + ' 美东');
+      const closeLike = source === 'session_close' || kind === '5d' || kind === '20d' || kind === 'rel';
+      if (kind === '1d' && closeLike) {
+        lines.push('当前为收盘快照时间（非盘中实时）');
+        lines.push('夏令时美东16:00≈北京次日04:00，是时区换算');
+      } else if (kind === '1d' && source === 'overlay_refresh') {
+        lines.push('1D 已叠加即时报价；行情源未给成交印记，显示本次刷新时刻');
+      } else if (kind === '1d') {
+        lines.push('1D 行情数据时间（非页面刷新时刻）');
+      } else if (kind === '5d') {
+        lines.push('5D 基于该交易日美东收盘价');
+        lines.push('北京时间为美东16:00换算（夏令时多为次日凌晨）');
+      } else if (kind === '20d') {
+        lines.push('20D 基于该交易日美东收盘价');
+        lines.push('北京时间为美东16:00换算（夏令时多为次日凌晨）');
+      } else if (kind === 'rel') {
+        lines.push('相对5D 基于该交易日美东收盘价');
       } else {
-        lines.push('美东 —');
+        lines.push('数据时间（非页面刷新时刻）');
+      }
+      if (closeLike && (et || bj)) {
+        if (et) lines.push('美东收盘 ' + String(et).replace(/\s*美东\s*$/, '').trim());
+        if (bj) lines.push('北京换算 ' + bj);
+      } else {
+        lines.push('北京 ' + (bj || '—'));
+        if (et) lines.push(String(et).replace(/\s*美东\s*$/, '').trim() + ' 美东');
+        else lines.push('美东 —');
       }
       return lines.join('\n');
     }
 
-    function fmtPctWithDataTime(v, bj, et, kind) {
+    function fmtPctWithDataTime(v, bj, et, kind, source) {
       const html = fmtPct(v);
       if (html === '—') return html;
       return html.replace(
         '<span ',
-        `<span title="${escapeAttr(dataTimeTip(bj, et, kind))}" `
+        `<span title="${escapeAttr(dataTimeTip(bj, et, kind, source))}" `
       );
+    }
+
+    function mainlineDataTimeDisplay(data) {
+      const asOf = data.trade_date || '';
+      const src = data.data_time_1d_source || '';
+      const live = !!data.live_1d;
+      const d1bj = data.data_time_1d_bj || '';
+      const d1et = data.data_time_1d_et || '';
+      const dDbj = data.data_time_daily_bj || '';
+      const dDet = data.data_time_daily_et || '';
+      const sameAsClose = d1bj && dDbj && d1bj === dDbj;
+      const closeLike = src === 'session_close' || (!live && sameAsClose) || /16:0\d/.test(String(d1et));
+      if (live && d1bj && !closeLike) {
+        const tag = src === 'overlay_refresh' ? '1D刷新' : '1D行情';
+        return {
+          label: `${tag}：北京 ${d1bj}${d1et ? ' · ' + d1et : ''}`,
+          tip: dataTimeTip(d1bj, d1et, '1d', src || 'live_quote'),
+        };
+      }
+      const bj = d1bj || dDbj;
+      const et = d1et || dDet;
+      if (asOf || bj || et) {
+        return {
+          label: asOf
+            ? `收盘快照：美东 ${asOf} 16:00${bj ? '（北京换算 ' + bj + '）' : ''}`
+            : `收盘快照${et ? '：' + et : ''}${bj ? '（北京换算 ' + bj + '）' : ''}`,
+          tip: dataTimeTip(bj, et || (asOf ? asOf + ' 16:00 ET' : ''), '1d', 'session_close'),
+        };
+      }
+      return { label: '数据时间：—', tip: '暂无数据时间' };
     }
 
     function fmtBreadth(row) {
@@ -1190,15 +1235,10 @@
       }
       m.push(`次强：${sec ? sec.name : '无'}`);
       m.push(`AI基准5D ${bench.ret_5d != null ? (bench.ret_5d > 0 ? '+' : '') + Number(bench.ret_5d).toFixed(1) + '%' : '—'}`);
-      const asOf = data.trade_date || '';
-      // 展示「数据时刻」，不用页面计算时间 updated_bj
-      const dataBj = d1bj || dDbj;
-      const dataEt = d1et || dDet;
-      const timeTip = dataTimeTip(dataBj, dataEt, '1d');
-      const timeLabel = dataBj
-        ? `数据时间：北京 ${dataBj}${dataEt ? ' · ' + dataEt : ''}`
-        : (asOf ? `数据交易日 ${asOf}（收盘）` : '数据时间：—');
-      m.push(`<span title="${escapeAttr(timeTip)}">${timeLabel}</span>`);
+      const timeDisp = mainlineDataTimeDisplay(data);
+      m.push(`<span title="${escapeAttr(timeDisp.tip)}">${timeDisp.label}</span>`);
+      if (data.live_1d) m.push('1D实时');
+      else if (data.live_1d_note) m.push(`<span title="${escapeAttr(data.live_1d_note)}">1D未刷新</span>`);
       if (data.stale) m.push('缓存快照');
       metrics.innerHTML = m.join(' ｜ ');
       summary.textContent = [
@@ -1216,6 +1256,8 @@
         return;
       }
       empty.style.display = 'none';
+      const oneSrc = data.data_time_1d_source || (data.live_1d ? 'live_quote' : 'session_close');
+      const closeSrc = 'session_close';
       for (const row of themes) {
         const tr = document.createElement('tr');
         if (row.role === 'primary') tr.className = 'row-mainline';
@@ -1234,7 +1276,8 @@
                 (m.name ? ' · ' + m.name : '');
               const mbj = m.quote_time || d1bj;
               const met = m.quote_time_et || d1et;
-              if (mbj || met) tip += '\n' + dataTimeTip(mbj, met, '1d');
+              const msrc = m.quote_time ? 'live_quote' : oneSrc;
+              if (mbj || met) tip += '\n' + dataTimeTip(mbj, met, '1d', msrc);
             }
             return `<span class="${miss ? 'miss' : 'ok'}" title="${escapeAttr(tip)}">${sym}</span>`;
           }).join(', ');
@@ -1248,10 +1291,10 @@
         tr.innerHTML = `
           <td>${rankCell}</td>
           <td>${row.name || row.key}</td>
-          <td>${fmtPctWithDataTime(row.ret_1d, d1bj, d1et, '1d')}</td>
-          <td>${fmtPctWithDataTime(row.ret_5d, dDbj, dDet, '5d')}</td>
-          <td>${fmtPctWithDataTime(row.ret_20d, dDbj, dDet, '20d')}</td>
-          <td>${fmtPctWithDataTime(row.rel_5d, dDbj, dDet, 'rel')}</td>
+          <td>${fmtPctWithDataTime(row.ret_1d, d1bj, d1et, '1d', oneSrc)}</td>
+          <td>${fmtPctWithDataTime(row.ret_5d, dDbj, dDet, '5d', closeSrc)}</td>
+          <td>${fmtPctWithDataTime(row.ret_20d, dDbj, dDet, '20d', closeSrc)}</td>
+          <td>${fmtPctWithDataTime(row.rel_5d, dDbj, dDet, 'rel', closeSrc)}</td>
           <td title="${escapeAttr('当日1D广度；主线确认看相对5D')}">${fmtBreadth(row)}</td>
           <td>${row.status_label || '—'}</td>
           <td><div class="ml-members">${membersHtml}</div></td>
@@ -1969,7 +2012,7 @@
             const levRes = await fetch('/api/lev-etf/tech/run', { method: 'POST' });
             const lev = await levRes.json();
             if (lev.success) {
-              levNote = `；杠杆ETF月度 ${lev.months || 0} 点 · 截至 ${lev.as_of_date || '—'}`;
+              levNote = `；杠杆ETF月度 ${lev.months || 0} 点 · 截至 ${lev.as_of_date || '—'}（美东交易日）`;
             }
           } catch (_) { /* 行情源失败不挡主线 */ }
           alert(`AI 主线重算：状态 ${data.status || '—'} · 主线 ${data.primary || '无'} · 入库 ${data.saved_rows || 0} 行${levNote}`);
@@ -2082,7 +2125,9 @@
         `<strong>${Number(latest.notional_bn).toFixed(levMode === 'day' ? 2 : 1)}</strong> 十亿美元${partial}</span>` +
         `<span>峰值 <strong>${mxKey}</strong>：<strong>${Number(mx.notional_bn).toFixed(levMode === 'day' ? 2 : 1)}</strong></span>` +
         rangeHint +
-        (data && data.as_of_date ? `<span>数据截至 ${data.as_of_date}</span>` : '');
+        (data && data.as_of_date
+          ? `<span>数据截至 ${data.as_of_date}（美东交易日）</span>`
+          : '');
     }
 
     function renderLevChart(points) {

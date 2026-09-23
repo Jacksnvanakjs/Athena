@@ -28,7 +28,17 @@ _CACHE: dict[str, Any] = {"ts": 0.0, "quote_ts": 0.0, "data": None}
 _COMPUTE_BUDGET_SEC = 110.0  # 报价 + 日K 软截止；超时回退库内快照（不编造）
 _PERIOD_BUDGET_SEC = 75.0
 _PERIOD_BUDGET_SETTLE_SEC = 180.0  # 收盘结算窗给足时间写全日 K
-_QUOTE_OVERLAY_SEC = 180.0  # 盘中 1D 报价叠加最短间隔
+_QUOTE_OVERLAY_SEC = 180.0  # 非盘中默认叠加间隔
+_QUOTE_OVERLAY_RTH_SEC = 45.0  # 盘中更勤快刷 1D，避免卡在收盘快照
+
+
+def _overlay_interval_sec(phase: str | None = None) -> float:
+    phase = phase or _market_phase()
+    if phase == "rth":
+        return _QUOTE_OVERLAY_RTH_SEC
+    if phase in {"pre_open", "settle", "overnight"}:
+        return 90.0
+    return _QUOTE_OVERLAY_SEC
 _COV_OK = 6  # 5D×2+20D 覆盖评分门槛
 
 
@@ -334,21 +344,38 @@ async def _quotes_for_1d_overlay(phase: str) -> tuple[dict[str, Any], str]:
 
 async def _overlay_live_1d(
     payload: dict[str, Any], *, phase: str | None = None
-) -> dict[str, Any]:
-    """叠加即时报价 1D；不重拉日 K、不改主线排名（仍按 5D）。"""
+) -> tuple[dict[str, Any], bool]:
+    """叠加即时报价 1D；不重拉日 K、不改主线排名（仍按 5D）。
+
+    返回 (payload, ok)。ok=False 时调用方不要推进 quote_ts，以便尽快重试。
+    """
     import asyncio
 
     phase = phase or _market_phase()
     try:
         quotes, src = await asyncio.wait_for(
             _quotes_for_1d_overlay(phase),
-            timeout=28.0 if phase != "rth" else 15.0,
+            timeout=28.0 if phase != "rth" else 18.0,
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)
-        return payload
+        out = dict(payload)
+        out["live_1d"] = False
+        msg = f"1D 即时行情暂未刷新（{type(exc).__name__}）"
+        out["live_1d_note"] = msg
+        base_note = (out.get("note") or "").strip()
+        if msg not in base_note:
+            out["note"] = f"{base_note} {msg}".strip() if base_note else msg
+        return out, False
     if not quotes:
-        return payload
+        out = dict(payload)
+        out["live_1d"] = False
+        msg = "1D 即时行情暂无返回，仍展示上一版"
+        out["live_1d_note"] = msg
+        base_note = (out.get("note") or "").strip()
+        if msg not in base_note:
+            out["note"] = f"{base_note} {msg}".strip() if base_note else msg
+        return out, False
 
     out = dict(payload)
     themes_out: list[dict[str, Any]] = []
@@ -392,8 +419,18 @@ async def _overlay_live_1d(
     # as_of / updated_bj 仍是请求/计算时刻；1D 数据时刻单独字段
     out["as_of"] = _as_of_iso()
     out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
-    out.update(_quote_data_times(quotes))
+    qtimes = _quote_data_times(quotes)
+    out.update(qtimes)
     out.update(_daily_session_close_times(out.get("trade_date")))
+    # 有行情但源没给 quote_time 时，绝不能回落到「美东收盘→北京次日04:00」
+    if not out.get("data_time_1d_bj") and not out.get("data_time_1d_et"):
+        out["data_time_1d_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M:%S")
+        out["data_time_1d_et"] = datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S %Z")
+        out["data_time_1d_source"] = "overlay_refresh"
+    else:
+        out["data_time_1d_source"] = "live_quote"
+    out["live_1d"] = True
+    out.pop("live_1d_note", None)
     out["quote_count"] = len(quotes)
     out["quote_total"] = len(all_symbols())
     out["session_phase"] = phase
@@ -401,21 +438,25 @@ async def _overlay_live_1d(
     # 去掉旧的 live_1d 后缀再挂新源，避免叠多层
     base_src = str(prev_src).split("+live_1d")[0]
     out["source"] = f"{base_src}+live_1d({src})"
-    out["stale"] = bool(payload.get("stale"))
+    out["stale"] = False
     note = (payload.get("note") or "").strip()
-    # 去掉旧提示，避免盘前仍写「盘中已刷新」
     for old in (
         "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。",
         "盘前已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "隔夜展示最近盘后/收盘 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "隔夜/周末夜盘已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "1D 即时行情暂无返回，仍展示上一版",
     ):
         note = note.replace(old, "").strip()
+    # 去掉失败提示整句（可能带异常名）
+    if "1D 即时行情暂未刷新" in note:
+        chunks = [c.strip() for c in note.replace("。", "。|").split("|") if c.strip()]
+        note = " ".join(c for c in chunks if "1D 即时行情暂未刷新" not in c).strip()
     tip = _session_tip(phase)
     out["note"] = f"{note} {tip}".strip() if note else tip
     out["success"] = True
-    return out
+    return out, True
 
 
 def _theme_name_map() -> dict[str, str]:
@@ -611,9 +652,11 @@ def _payload_from_db_snapshots() -> dict[str, Any] | None:
         "note": f"实时行情较慢，展示库内 {trade_s} 主线快照（非估算）。",
     }
     payload.update(_daily_session_close_times(trade_s))
-    # 无即时报价时：1D 也按该交易日收盘理解
+    # 无即时报价时：1D 也按该交易日收盘理解（勿被前端当成实时）
     payload["data_time_1d_bj"] = payload.get("data_time_daily_bj")
     payload["data_time_1d_et"] = payload.get("data_time_daily_et")
+    payload["data_time_1d_source"] = "session_close"
+    payload["live_1d"] = False
     return payload
 
 
@@ -729,18 +772,23 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
 
         if not needs_full and cached and cache_age < ttl:
             quote_age = now - float(_CACHE.get("quote_ts") or 0)
-            if _live_1d_active(phase) and quote_age >= _QUOTE_OVERLAY_SEC:
-                overlaid = await _overlay_live_1d(cached, phase=phase)
+            need_overlay = _live_1d_active(phase) and (
+                quote_age >= _overlay_interval_sec(phase) or not cached.get("live_1d")
+            )
+            if need_overlay:
+                overlaid, ok = await _overlay_live_1d(cached, phase=phase)
                 _CACHE["data"] = overlaid
-                _CACHE["quote_ts"] = now
+                if ok:
+                    _CACHE["quote_ts"] = now
                 return _finalize_payload(overlaid)
             return _finalize_payload(cached)
 
         if not needs_full and base is not None:
             out = base
             if _live_1d_active(phase):
-                out = await _overlay_live_1d(base, phase=phase)
-                _CACHE["quote_ts"] = now
+                out, ok = await _overlay_live_1d(base, phase=phase)
+                if ok:
+                    _CACHE["quote_ts"] = now
             elif out is db_payload and out is not None:
                 out = dict(out)
                 out["note"] = (out.get("note") or "") or (
@@ -749,7 +797,6 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
             _CACHE["ts"] = now
             _CACHE["data"] = out
             return _finalize_payload(out)
-
         logger.info(
             "ai_mainline full refresh phase=%s snap=%s cov=%s",
             phase,
@@ -827,9 +874,12 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
         return _finalize_payload(kept)
 
     _CACHE["ts"] = now
-    _CACHE["quote_ts"] = now
     if _live_1d_active(phase):
-        payload = await _overlay_live_1d(payload, phase=phase)
+        payload, ok = await _overlay_live_1d(payload, phase=phase)
+        if ok:
+            _CACHE["quote_ts"] = now
+    else:
+        _CACHE["quote_ts"] = now
     _CACHE["data"] = payload
     return _finalize_payload(payload)
 

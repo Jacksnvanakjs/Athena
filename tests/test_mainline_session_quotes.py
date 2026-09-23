@@ -59,13 +59,19 @@ def test_live_1d_active_phases():
     from datetime import datetime
     from zoneinfo import ZoneInfo
 
-    from app.ai_mainline.pipeline import _live_1d_active, _market_phase
+    from app.ai_mainline.pipeline import (
+        _live_1d_active,
+        _market_phase,
+        _overlay_interval_sec,
+    )
 
     assert _live_1d_active("pre_open")
     assert _live_1d_active("rth")
     assert _live_1d_active("settle")
     assert _live_1d_active("overnight")
     assert not _live_1d_active("closed")
+    assert _overlay_interval_sec("rth") == 45.0
+    assert _overlay_interval_sec("overnight") == 90.0
 
     et = ZoneInfo("America/New_York")
     # 周日 20:00 ET → 隔夜盘，应继续拉 1D
