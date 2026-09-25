@@ -37,6 +37,9 @@ HEADERS = {
 
 YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 YAHOO_SPARK = "https://query1.finance.yahoo.com/v7/finance/spark"
+CNBC_QUOTE = (
+    "https://quote.cnbc.com/quote-html-webservice/restQuote/symbolType/symbol"
+)
 FINNHUB_QUOTE = "https://finnhub.io/api/v1/quote"
 FINNHUB_QUOTE_CONCURRENCY = 6
 # 成功样本过少时视为失败（避免「全 0」或「单板块 100%」）
@@ -852,6 +855,183 @@ async def _fetch_yahoo(symbols: list[str]) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _cnbc_parse_pct(raw: Any) -> float | None:
+    if raw is None:
+        return None
+    text = str(raw).replace(",", "").replace("%", "").replace("+", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _cnbc_parse_price(raw: Any) -> float | None:
+    if raw is None:
+        return None
+    text = str(raw).replace(",", "").replace("$", "").strip()
+    text = re.sub(r"[^0-9.\-]", "", text)
+    try:
+        v = float(text)
+        return v if v > 0 else None
+    except ValueError:
+        return None
+
+
+def _cnbc_quote_times(ext: dict[str, Any], status: str) -> tuple[str | None, str | None]:
+    """从 CNBC ExtendedMktQuote 推北京/美东时间。"""
+    timedate = str(ext.get("last_timedate") or ext.get("last_time") or "").strip()
+    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", timedate)
+    et_date = None
+    if m:
+        mm, dd, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if yy < 100:
+            yy += 2000
+        try:
+            et_date = datetime(yy, mm, dd, tzinfo=_US_TZ).date()
+        except ValueError:
+            et_date = None
+    if et_date is None:
+        m2 = re.search(r"(\d{4})-(\d{2})-(\d{2})", timedate)
+        if m2:
+            try:
+                et_date = datetime(
+                    int(m2.group(1)), int(m2.group(2)), int(m2.group(3)), tzinfo=_US_TZ
+                ).date()
+            except ValueError:
+                et_date = None
+    st = (status or str(ext.get("type") or "")).upper()
+    if "PRE" in st:
+        hour = 8
+    elif "POST" in st:
+        hour = 20
+    else:
+        hour = 16
+    if et_date is None:
+        return None, None
+    dt_et = datetime(
+        et_date.year, et_date.month, et_date.day, hour, 0, 0, tzinfo=_US_TZ
+    )
+    return (
+        dt_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        dt_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
+    )
+
+
+def _parse_cnbc_formatted_quote(q: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+    """解析 CNBC FormattedQuote；优先 ExtendedMktQuote（盘前/盘后）。"""
+    ext = q.get("ExtendedMktQuote") or {}
+    status = str(q.get("curmktstatus") or ext.get("type") or "").upper()
+    reg_last = _cnbc_parse_price(q.get("last"))
+    reg_chgp = _cnbc_parse_pct(q.get("change_pct"))
+    ext_last = _cnbc_parse_price(ext.get("last") or ext.get("Last"))
+    # 昨收：用常规涨跌反推，避免 previous_day_closing 在收盘后被改成当日收盘
+    prior = None
+    if reg_last is not None and reg_chgp is not None and abs(reg_chgp + 100) > 1e-6:
+        prior = reg_last / (1.0 + reg_chgp / 100.0)
+    if prior is None:
+        prior = _cnbc_parse_price(q.get("previous_day_closing"))
+
+    price = None
+    change_pct = None
+    use_ext = bool(ext_last) and (
+        "PRE" in status or "POST" in status or status in ("CLOSED", "")
+    )
+    if use_ext and ext_last and prior and prior > 0:
+        price = ext_last
+        change_pct = (ext_last - prior) / prior * 100.0
+    elif reg_last is not None:
+        price = reg_last
+        change_pct = reg_chgp if reg_chgp is not None else 0.0
+    elif ext_last is not None and prior and prior > 0:
+        price = ext_last
+        change_pct = (ext_last - prior) / prior * 100.0
+    if price is None or change_pct is None:
+        return None
+
+    vol = _cnbc_parse_price(ext.get("volume") or q.get("volume")) or 0.0
+    bj, et = _cnbc_quote_times(ext if use_ext else {}, status)
+    name = str(q.get("name") or q.get("shortName") or symbol)
+    return _quote_row(
+        symbol,
+        name=name,
+        price=float(price),
+        change_pct=float(change_pct),
+        volume=float(vol),
+        quote_time=bj,
+        quote_time_et=et,
+    )
+
+
+async def _fetch_cnbc_session_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """CNBC 扩展时段报价（Yahoo 429 时的夜盘/盘前稳定兜底）。
+
+    注意：批量 symbols=A,B 时 CNBC 常返回一条 symbol=\"A,B\"，故改为并发单标的。
+    """
+    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    if not uniq:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    sem = asyncio.Semaphore(8)
+
+    async with httpx.AsyncClient(
+        headers={**HEADERS, "Referer": "https://www.cnbc.com/"},
+        timeout=18,
+        follow_redirects=True,
+    ) as client:
+
+        async def one(sym: str) -> tuple[str, dict[str, Any] | None]:
+            async with sem:
+                try:
+                    resp = await client.get(
+                        CNBC_QUOTE,
+                        params={
+                            "symbols": sym,
+                            "requestMethod": "quick",
+                            "exthrs": "1",
+                            "noform": "1",
+                            "partnerId": "2",
+                            "fund": "1",
+                            "output": "json",
+                            "events": "1",
+                        },
+                    )
+                    if resp.status_code != 200:
+                        return sym, None
+                    quotes = (
+                        (resp.json() or {}).get("FormattedQuoteResult") or {}
+                    ).get("FormattedQuote") or []
+                    if isinstance(quotes, dict):
+                        quotes = [quotes]
+                    if not quotes:
+                        return sym, None
+                    q = quotes[0] if isinstance(quotes[0], dict) else None
+                    if not q:
+                        return sym, None
+                    row = _parse_cnbc_formatted_quote(q, sym)
+                    return sym, row
+                except Exception:
+                    return sym, None
+
+        results = await asyncio.gather(*[one(s) for s in uniq])
+    for sym, row in results:
+        if row:
+            out[sym] = row
+    return out
+
+
+def _quote_looks_like_rth_close(row: dict[str, Any] | None) -> bool:
+    """Finnhub/东财常在夜盘仍返回常规收盘印记（美东 16:00 / 北京次日 04:00）。"""
+    if not row:
+        return False
+    et = str(row.get("quote_time_et") or "")
+    bj = str(row.get("quote_time") or "")
+    if re.search(r"\b16:0\d", et):
+        return True
+    if re.search(r"\b0[45]:0\d", bj):
+        return True
+    return False
+
+
 def _akshare_us_spot_table():
     """同步拉 AKShare 东方财富美股现货表。"""
     import os
@@ -1327,9 +1507,12 @@ async def get_quotes_for_symbols(
 async def get_quotes_session_aware(
     symbols: list[str],
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """扩展时段优先 Yahoo（含盘前/盘后/休市盘后价），缺口再用 Finnhub / 常规轮动。
+    """扩展时段优先会话价：CNBC → Yahoo → Finnhub/常规轮动。
 
-    东财盘前盘后涨跌幅常停在常规收盘，不宜作夜盘/盘前主源。
+    说明：
+    - 东财/Finnhub 夜盘常停在常规收盘，不宜作主源。
+    - 本路径**忽略** HEATMAP_SKIP_YAHOO（扩展时段必须有会话源）。
+    - Yahoo 易 429 时 CNBC ExtendedMktQuote 作稳定兜底。
     """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     if not uniq:
@@ -1338,14 +1521,22 @@ async def get_quotes_session_aware(
     sources_used: list[str] = []
     merged: dict[str, dict[str, Any]] = {}
 
-    skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-    if not skip_yahoo:
+    # 1) CNBC 扩展时段（本地 Yahoo 常 429，先走更稳的会话源）
+    try:
+        cnbc = await asyncio.wait_for(_fetch_cnbc_session_quotes(uniq), timeout=28.0)
+    except Exception as exc:
+        logger.warning("session-aware CNBC failed: %s", exc)
+        cnbc = {}
+    if cnbc:
+        merged.update(cnbc)
+        sources_used.append(f"CNBC:{len(cnbc)}")
+
+    # 2) Yahoo（强制尝试；已有足够 CNBC 时只补缺口且短超时）
+    missing = [s for s in uniq if s not in merged]
+    if missing:
+        yahoo_timeout = 8.0 if len(merged) >= max(3, int(len(uniq) * 0.5)) else 14.0
         try:
-            yahoo = await asyncio.wait_for(_fetch_yahoo(uniq), timeout=22.0)
+            yahoo = await asyncio.wait_for(_fetch_yahoo(missing), timeout=yahoo_timeout)
         except Exception as exc:
             logger.warning("session-aware Yahoo failed: %s", exc)
             yahoo = {}
@@ -1353,6 +1544,7 @@ async def get_quotes_session_aware(
             merged.update(yahoo)
             sources_used.append(f"Yahoo:{len(yahoo)}")
 
+    # 3) Finnhub / 常规：只补仍缺的；已有会话价的不要被收盘印记覆盖
     missing = [s for s in uniq if s not in merged]
     if missing:
         try:
@@ -1361,8 +1553,13 @@ async def get_quotes_session_aware(
             logger.warning("session-aware Finnhub failed: %s", exc)
             fh = {}
         if fh:
-            merged.update(fh)
-            sources_used.append(f"Finnhub:{len(fh)}")
+            added = 0
+            for sym, row in fh.items():
+                if sym not in merged:
+                    merged[sym] = row
+                    added += 1
+            if added:
+                sources_used.append(f"Finnhub:{added}")
 
     missing = [s for s in uniq if s not in merged]
     if missing:
@@ -1372,8 +1569,15 @@ async def get_quotes_session_aware(
             logger.warning("session-aware fallback failed: %s", exc)
             more, src = {}, "none"
         if more:
-            merged.update(more)
+            for sym, row in more.items():
+                if sym not in merged:
+                    merged[sym] = row
             sources_used.append(src if src != "none" else f"fallback:{len(more)}")
+
+    if merged:
+        rth_n = sum(1 for r in merged.values() if _quote_looks_like_rth_close(r))
+        if rth_n >= max(1, int(len(merged) * 0.7)):
+            sources_used.append("rth_stamp_heavy")
 
     label = "+".join(sources_used) if sources_used else "none"
     return merged, label

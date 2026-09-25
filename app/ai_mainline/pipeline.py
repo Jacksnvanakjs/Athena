@@ -420,6 +420,17 @@ async def _overlay_live_1d(
     out["as_of"] = _as_of_iso()
     out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
     qtimes = _quote_data_times(quotes)
+    # 扩展时段：丢掉「美东16:00/北京04:00」收盘印记，避免伪装成实时
+    if phase != "rth":
+        from app.heatmap import _quote_looks_like_rth_close
+
+        session_quotes = {
+            k: v for k, v in quotes.items() if v and not _quote_looks_like_rth_close(v)
+        }
+        if session_quotes:
+            qtimes = _quote_data_times(session_quotes)
+        else:
+            qtimes = {"data_time_1d_bj": None, "data_time_1d_et": None}
     out.update(qtimes)
     out.update(_daily_session_close_times(out.get("trade_date")))
     # 有行情但源没给 quote_time 时，绝不能回落到「美东收盘→北京次日04:00」
@@ -430,7 +441,10 @@ async def _overlay_live_1d(
     else:
         out["data_time_1d_source"] = "live_quote"
     out["live_1d"] = True
-    out.pop("live_1d_note", None)
+    if "rth_stamp_heavy" in str(src) and phase != "rth":
+        out["live_1d_note"] = "扩展时段会话源偏弱，部分报价仍可能停在常规收盘"
+    else:
+        out.pop("live_1d_note", None)
     out["quote_count"] = len(quotes)
     out["quote_total"] = len(all_symbols())
     out["session_phase"] = phase
