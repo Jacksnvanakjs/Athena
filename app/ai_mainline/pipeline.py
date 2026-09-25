@@ -223,7 +223,9 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     if payload.get("enabled") is False or payload.get("status") == "disabled":
         return payload
-    out = payload
+    out = dict(payload)
+    # 出口时刻以当前时段为准，避免缓存仍挂 overnight 而页面已是盘前
+    out["session_phase"] = _market_phase()
     _sync_primary_from_themes(out)
     out["pulse_1d"] = _compute_pulse_1d(out.get("themes") or [])
     out["pulse_1d_weak"] = _is_1d_weak(out.get("primary"))
@@ -361,13 +363,13 @@ def _live_1d_active(phase: str | None = None) -> bool:
 
 def _session_tip(phase: str) -> str:
     if phase == "pre_open":
-        return "盘前已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
+        return "已刷新最新1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
     if phase == "settle":
-        return "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
+        return "已刷新最新1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
     if phase == "overnight":
-        return "夜盘无免费 ATS 源，1D 用夜盘前最新盘后价；5D/20D 与主线判定沿用日线快照。"
+        return "夜盘无免费 ATS 源，1D 用当前能拿到的最新盘后价；5D/20D 与主线判定沿用日线快照。"
     if phase == "rth":
-        return "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。"
+        return "已刷新最新1D 报价；5D/20D 与主线判定沿用日线快照。"
     return "5D/20D 与主线判定沿用日线快照。"
 
 
@@ -382,21 +384,63 @@ def _parse_member_quote_dt(row: dict[str, Any] | None) -> datetime | None:
             continue
         # "2026-09-24 19:59:00 EDT" / "2026-09-25 07:59:00"
         m = re.search(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?", raw)
-        if not m:
-            continue
-        try:
-            sec = int(m.group(6) or 0)
-            return datetime(
-                int(m.group(1)),
-                int(m.group(2)),
-                int(m.group(3)),
-                int(m.group(4)),
-                int(m.group(5)),
-                sec,
-                tzinfo=tz,
-            ).astimezone(ET)
-        except ValueError:
-            continue
+        if m:
+            try:
+                sec = int(m.group(6) or 0)
+                return datetime(
+                    int(m.group(1)),
+                    int(m.group(2)),
+                    int(m.group(3)),
+                    int(m.group(4)),
+                    int(m.group(5)),
+                    sec,
+                    tzinfo=tz,
+                ).astimezone(ET)
+            except ValueError:
+                pass
+        # 新浪等："Sep 25 04:39AM EDT"
+        m2 = re.search(
+            r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+            r"(\d{1,2})\s+(\d{1,2}):(\d{2})\s*(AM|PM)",
+            raw,
+            re.I,
+        )
+        if m2:
+            months = {
+                "jan": 1,
+                "feb": 2,
+                "mar": 3,
+                "apr": 4,
+                "may": 5,
+                "jun": 6,
+                "jul": 7,
+                "aug": 8,
+                "sep": 9,
+                "oct": 10,
+                "nov": 11,
+                "dec": 12,
+            }
+            try:
+                mon = months[m2.group(1).lower()[:3]]
+                hour = int(m2.group(3)) % 12
+                if m2.group(5).upper() == "PM":
+                    hour += 12
+                year = datetime.now(ET).year
+                # 若带年份则用
+                ym = re.search(r"\b(20\d{2})\b", raw)
+                if ym:
+                    year = int(ym.group(1))
+                return datetime(
+                    year,
+                    mon,
+                    int(m2.group(2)),
+                    hour,
+                    int(m2.group(4)),
+                    0,
+                    tzinfo=tz,
+                ).astimezone(ET)
+            except (ValueError, KeyError):
+                continue
     return None
 
 
@@ -529,11 +573,11 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
     if lag < 0:
         return False
     if phase == "pre_open":
-        return lag > 180  # 盘前 3 分钟未刷新视为旧
+        return lag > 90  # 盘前 90 秒未刷新视为旧，配合自动检测重拉
     if phase == "rth":
         return lag > 120
     if phase == "settle":
-        return lag > 300
+        return lag > 180
     # overnight：允许挂昨盘后数小时，只拦极端过期
     return lag > 60 * 60 * 48
 
@@ -709,6 +753,8 @@ async def _overlay_live_1d(
         "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。",
         "盘前已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "已刷新最新1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "已刷新最新1D 报价；5D/20D 与主线判定沿用日线快照。",
         "隔夜展示最近盘后/收盘 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "隔夜/周末夜盘已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "隔夜已刷新 1D 夜盘主会话（常规收盘相对昨收）；5D/20D 与主线判定沿用日线快照。",
@@ -716,6 +762,7 @@ async def _overlay_live_1d(
         "暂无 ATS 夜盘源，1D 回退盘后价；配置 TIINGO_API_KEY(BOATS) 后可拉真夜盘。5D/20D 沿用日线快照。",
         "夜盘时段暂无免费 ATS 源，1D 回退盘后价；5D/20D 与主线判定沿用日线快照。",
         "夜盘无免费 ATS 源，1D 用夜盘前最新盘后价；5D/20D 与主线判定沿用日线快照。",
+        "夜盘无免费 ATS 源，1D 用当前能拿到的最新盘后价；5D/20D 与主线判定沿用日线快照。",
         "1D 即时行情暂无返回，仍展示上一版",
     ):
         note = note.replace(old, "").strip()
@@ -734,10 +781,31 @@ def _theme_name_map() -> dict[str, str]:
 
 
 def _quote_data_times(quotes: dict[str, dict[str, Any]]) -> dict[str, str | None]:
-    """从行情行取「数据本身」时间（最新一条），不是服务端计算时刻。"""
-    bj_times = [str(q["quote_time"]) for q in quotes.values() if q and q.get("quote_time")]
+    """从行情行取「数据本身」最新时刻（按解析后的时间，不是字符串 max）。"""
+    best: dict[str, Any] | None = None
+    best_dt: datetime | None = None
+    for q in quotes.values():
+        if not q:
+            continue
+        dt = _parse_member_quote_dt(q)
+        if dt is None:
+            continue
+        if best_dt is None or dt > best_dt:
+            best_dt = dt
+            best = q
+    if best:
+        return {
+            "data_time_1d_bj": best.get("quote_time") or None,
+            "data_time_1d_et": best.get("quote_time_et") or None,
+        }
+    # 解析失败时退回 ISO 北京时间字符串排序
+    bj_times = [
+        str(q["quote_time"]) for q in quotes.values() if q and q.get("quote_time")
+    ]
     et_times = [
-        str(q["quote_time_et"]) for q in quotes.values() if q and q.get("quote_time_et")
+        str(q["quote_time_et"])
+        for q in quotes.values()
+        if q and q.get("quote_time_et") and re.match(r"\d{4}-", str(q["quote_time_et"]))
     ]
     return {
         "data_time_1d_bj": max(bj_times) if bj_times else None,

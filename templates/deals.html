@@ -1126,31 +1126,26 @@
       const dDet = data.data_time_daily_et || '';
       const sameAsClose = d1bj && dDbj && d1bj === dDbj;
       const extPhase = phase === 'pre_open' || phase === 'settle' || phase === 'overnight';
-      // 北京次日 04:00 / 美东 16:00 = 常规收盘印记，盘前绝不当 live
+      // 北京次日 04:00 / 美东 16:00 = 常规收盘印记，扩展时段绝不当最新
       const rthCloseStamp = /\b16:0\d/.test(String(d1et))
         || (/\b0[45]:00(?::00)?\b/.test(String(d1bj)) && !/\b0[45]:0[1-9]/.test(String(d1bj)));
-      // 盘前/盘后/夜盘的 live 印记不要被「16:00」误判成收盘快照
       const extLive = live && extPhase && !rthCloseStamp;
       const closeLike = !extLive && (
         src === 'session_close' || (!live && sameAsClose) || rthCloseStamp || /16:0\d/.test(String(d1et))
       );
+      // 有有效最新 1D 印记：只展示数据时刻，不强调盘前/盘后标签
       if (live && d1bj && !closeLike) {
-        const tag = phase === 'pre_open' ? '盘前'
-          : (phase === 'settle' ? '盘后'
-            : (phase === 'overnight' ? '夜盘前盘后'
-              : (src === 'overlay_refresh' ? '1D刷新' : '1D行情')));
         return {
-          label: `${tag}：北京 ${d1bj}${d1et ? ' · ' + d1et : ''}`,
+          label: `最新1D：北京 ${d1bj}${d1et ? ' · ' + d1et : ''}`,
           tip: dataTimeTip(d1bj, d1et, '1d', src || 'live_quote'),
         };
       }
-      // 扩展时段：不要把日线收盘 BJ 04:00 当成当前 1D 展示
+      // 扩展时段：不要把日线收盘 BJ 04:00 当成当前 1D
       if (extPhase && (!live || rthCloseStamp || closeLike)) {
-        const tag = phase === 'pre_open' ? '盘前' : (phase === 'settle' ? '盘后' : '夜盘');
         const note = (data.live_1d_note || '').trim();
         return {
-          label: note ? `${tag}刷新中（${note}）` : `${tag}刷新中（勿用收盘 04:00）`,
-          tip: note || '扩展时段尚无有效会话价，拒绝展示常规收盘印记',
+          label: note ? `最新1D拉取中（${note}）` : '最新1D拉取中…',
+          tip: note || '自动检测：印记非最新，正在重拉会话价',
         };
       }
       const bj = d1bj || dDbj;
@@ -2061,17 +2056,55 @@
       btn.textContent = '扫描中…';
       try {
         if (currentTab === 'mainline') {
-          const res = await fetch('/api/ai-mainline/run', { method: 'POST' });
-          const data = await res.json();
-          let levNote = '';
+          // 主线与杠杆 ETF 并行：主线行情源卡死时不再挡住杠杆回填
+          const ctrlMain = new AbortController();
+          const ctrlLev = new AbortController();
+          const tMain = setTimeout(() => ctrlMain.abort(), 120000);
+          const tLev = setTimeout(() => ctrlLev.abort(), 300000);
+          let mainData = null;
+          let lev = null;
+          let mainErr = '';
+          let levErr = '';
           try {
-            const levRes = await fetch('/api/lev-etf/tech/run', { method: 'POST' });
-            const lev = await levRes.json();
-            if (lev.success) {
-              levNote = `；杠杆ETF月度 ${lev.months || 0} 点 · 截至 ${lev.as_of_date || '—'}（美东交易日）`;
-            }
-          } catch (_) { /* 行情源失败不挡主线 */ }
-          alert(`AI 主线重算：状态 ${data.status || '—'} · 主线 ${data.primary || '无'} · 入库 ${data.saved_rows || 0} 行${levNote}`);
+            const [mainSettled, levSettled] = await Promise.allSettled([
+              fetch('/api/ai-mainline/run', { method: 'POST', signal: ctrlMain.signal })
+                .then(async (res) => {
+                  if (!res.ok) throw new Error('HTTP ' + res.status);
+                  return res.json();
+                }),
+              fetch('/api/lev-etf/tech/run', { method: 'POST', signal: ctrlLev.signal })
+                .then(async (res) => {
+                  if (!res.ok) throw new Error('HTTP ' + res.status);
+                  return res.json();
+                }),
+            ]);
+            if (mainSettled.status === 'fulfilled') mainData = mainSettled.value;
+            else mainErr = (mainSettled.reason && mainSettled.reason.name === 'AbortError')
+              ? '主线超时'
+              : ('主线失败: ' + (mainSettled.reason?.message || mainSettled.reason));
+            if (levSettled.status === 'fulfilled') lev = levSettled.value;
+            else levErr = (levSettled.reason && levSettled.reason.name === 'AbortError')
+              ? '杠杆ETF超时'
+              : ('杠杆ETF失败: ' + (levSettled.reason?.message || levSettled.reason));
+          } finally {
+            clearTimeout(tMain);
+            clearTimeout(tLev);
+          }
+          let levNote = '';
+          if (lev && lev.success) {
+            levNote = `；杠杆ETF ${lev.days || 0} 日 / ${lev.months || 0} 月 · 截至 ${lev.as_of_date || '—'} · 标的 ${lev.symbols_ok || 0}/${lev.symbols_total || 0}`;
+          } else if (lev && lev.error) {
+            levNote = `；杠杆ETF未更新: ${lev.error}`;
+          } else if (levErr) {
+            levNote = `；${levErr}`;
+          }
+          if (mainData) {
+            alert(`AI 主线重算：状态 ${mainData.status || '—'} · 主线 ${mainData.primary || '无'} · 入库 ${mainData.saved_rows || 0} 行${levNote}`);
+          } else if (lev && lev.success) {
+            alert(`主线未完成（${mainErr || '失败'}），杠杆ETF已更新${levNote}`);
+          } else {
+            throw new Error(mainErr || levErr || '扫描失败');
+          }
           await loadMainline();
           await loadLevEtf();
         } else if (currentTab === 'earnings') {
@@ -2095,7 +2128,7 @@
           await loadDeals();
         }
       } catch (e) {
-        alert('扫描失败，请查看服务端日志');
+        alert('扫描失败：' + (e && e.message ? e.message : '请查看服务端日志（常见原因：Finnhub/Gemini 429、主线行情超时）'));
       } finally {
         btn.disabled = false;
         btn.textContent = '立即扫描';
@@ -2193,7 +2226,7 @@
         if (levChart) { levChart.destroy(); levChart = null; }
         canvas.style.display = 'none';
         empty.style.display = 'block';
-        empty.textContent = '回填任务未完成，请稍后刷新；或点击「立即扫描」触发更新。';
+        empty.textContent = '回填未完成（行情源限流或抓取失败）。稍后刷新，或在本页点「立即扫描」；杠杆ETF已与主线并行更新。';
         return;
       }
       empty.style.display = 'none';

@@ -105,3 +105,31 @@ def test_strip_clears_rth_stamp_in_pre():
     )
     assert out.get("data_time_1d_bj") is None
     assert out.get("live_1d") is False
+
+
+def test_quote_data_times_picks_latest_parsed():
+    from app.ai_mainline.pipeline import _parse_member_quote_dt, _quote_data_times
+
+    dt = _parse_member_quote_dt(
+        {"quote_time_et": "Sep 25 04:39AM EDT", "quote_time": "2026-09-25 16:39:00"}
+    )
+    assert dt is not None
+    assert dt.hour == 4 and dt.minute == 39
+
+    times = _quote_data_times(
+        {
+            "A": {
+                "quote_time": "2026-09-25 16:30:00",
+                "quote_time_et": "2026-09-25 04:30:00 EDT",
+            },
+            "B": {
+                "quote_time": "2026-09-25 16:45:00",
+                "quote_time_et": "Sep 25 04:45AM EDT",
+            },
+            "C": {
+                "quote_time": "2026-09-25 07:59:00",
+                "quote_time_et": "2026-09-24 19:59:00 EDT",
+            },
+        }
+    )
+    assert times["data_time_1d_bj"] == "2026-09-25 16:45:00"
