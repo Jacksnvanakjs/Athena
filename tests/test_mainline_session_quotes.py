@@ -62,6 +62,8 @@ def test_live_1d_active_phases():
     from app.ai_mainline.pipeline import (
         _live_1d_active,
         _market_phase,
+        _near_phase_switch,
+        _needs_1d_refresh,
         _overlay_interval_sec,
     )
 
@@ -70,8 +72,9 @@ def test_live_1d_active_phases():
     assert _live_1d_active("settle")
     assert _live_1d_active("overnight")
     assert not _live_1d_active("closed")
-    assert _overlay_interval_sec("rth") == 45.0
-    assert _overlay_interval_sec("overnight") == 90.0
+    assert _overlay_interval_sec("rth") == 45.0 or _near_phase_switch()
+    assert _overlay_interval_sec("pre_open") in (30.0, 45.0)
+    assert _overlay_interval_sec("overnight") in (30.0, 90.0)
 
     et = ZoneInfo("America/New_York")
     # 周日 20:00 ET → 夜盘
@@ -90,3 +93,22 @@ def test_live_1d_active_phases():
     # 盘前 05:00
     thu_pre = datetime(2026, 9, 25, 5, 0, tzinfo=et)
     assert _market_phase(thu_pre) == "pre_open"
+
+    # 切换点附近
+    assert _near_phase_switch(datetime(2026, 9, 25, 3, 55, tzinfo=et))
+    assert _near_phase_switch(datetime(2026, 9, 25, 9, 28, tzinfo=et))
+    assert not _near_phase_switch(datetime(2026, 9, 25, 12, 0, tzinfo=et))
+
+    # 盘前还挂昨收 → 必须重拉
+    need, reason = _needs_1d_refresh(
+        {
+            "live_1d": True,
+            "session_phase": "overnight",
+            "data_time_1d_bj": "2026-09-25 04:00:00",
+            "data_time_1d_et": "2026-09-24 16:00:00 EDT",
+        },
+        "pre_open",
+        quote_age=10.0,
+    )
+    assert need
+    assert reason.startswith("phase_switch") or reason == "stamp_mismatch"

@@ -25,21 +25,47 @@ from app.utils import now_beijing
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
-_CACHE: dict[str, Any] = {"ts": 0.0, "quote_ts": 0.0, "data": None}
+_CACHE: dict[str, Any] = {"ts": 0.0, "quote_ts": 0.0, "data": None, "phase": None}
 _COMPUTE_BUDGET_SEC = 110.0  # 报价 + 日K 软截止；超时回退库内快照（不编造）
 _PERIOD_BUDGET_SEC = 75.0
 _PERIOD_BUDGET_SETTLE_SEC = 180.0  # 收盘结算窗给足时间写全日 K
 _QUOTE_OVERLAY_SEC = 180.0  # 非盘中默认叠加间隔
 _QUOTE_OVERLAY_RTH_SEC = 45.0  # 盘中更勤快刷 1D，避免卡在收盘快照
+# 美东时段切换点（分钟）：盘前开 / 开盘 / 收盘进盘后 / 进夜盘
+_PHASE_SWITCH_MINUTES = (4 * 60, 9 * 60 + 30, 16 * 60, 20 * 60)
+_PHASE_SWITCH_WINDOW_MIN = 10  # 切换点前后 N 分钟加紧检测
+
+
+def _near_phase_switch(now: datetime | None = None, *, window_min: int = _PHASE_SWITCH_WINDOW_MIN) -> bool:
+    """是否接近盘前/开盘/收盘/夜盘切换点（重点盯这些窗口）。"""
+    now = now or datetime.now(ET)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=ET)
+    else:
+        now = now.astimezone(ET)
+    mins = now.hour * 60 + now.minute
+    for b in _PHASE_SWITCH_MINUTES:
+        delta = abs(mins - b)
+        # 跨日：23:55 接近次日 04:00 不算；00:05 接近 20:00 用环形距离
+        wrap = min(delta, 24 * 60 - delta)
+        if wrap <= window_min:
+            return True
+    return False
 
 
 def _overlay_interval_sec(phase: str | None = None) -> float:
     phase = phase or _market_phase()
+    if _near_phase_switch():
+        return 30.0  # 切换窗口加紧
     if phase == "rth":
         return _QUOTE_OVERLAY_RTH_SEC
-    if phase in {"pre_open", "settle", "overnight"}:
+    if phase == "pre_open":
+        return 45.0
+    if phase in {"settle", "overnight"}:
         return 90.0
     return _QUOTE_OVERLAY_SEC
+
+
 _COV_OK = 6  # 5D×2+20D 覆盖评分门槛
 
 
@@ -432,6 +458,98 @@ def _strip_stale_1d_fields(payload: dict[str, Any]) -> dict[str, Any]:
         themes_out.append(row)
     out["themes"] = themes_out
     return out
+
+
+def _1d_stamp_mismatch_phase(payload: dict[str, Any] | None, phase: str) -> bool:
+    """缓存 1D 印记与当前时段不符 → 必须重拉（避免盘前还挂昨收 04:00）。"""
+    if not payload:
+        return True
+    if payload.get("session_phase") and payload.get("session_phase") != phase:
+        return True
+    row = {
+        "quote_time": payload.get("data_time_1d_bj"),
+        "quote_time_et": payload.get("data_time_1d_et"),
+    }
+    from app.heatmap import _quote_looks_like_rth_close
+
+    if phase == "pre_open":
+        # 盘前：昨收 16:00/北京次日04:00 一律视为过期
+        if _quote_looks_like_rth_close(row):
+            return True
+        dt = _parse_member_quote_dt(row)
+        if dt is None:
+            return not payload.get("live_1d")
+        # 早于今日美东 04:00 的印记（昨盘后等）在盘前也要换新
+        pre_start = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
+        return dt < pre_start
+    if phase == "rth":
+        # 盘中：还停在盘前/盘后扩展印记也可以，但不应是「无 live」
+        return False
+    if phase == "settle":
+        # 盘后：不应还停在常规收盘 16:00
+        return _quote_looks_like_rth_close(row)
+    if phase == "overnight":
+        # 夜盘：宣称 live 却仍是收盘印记 → 重拉盘后回退价
+        return bool(payload.get("live_1d")) and _quote_looks_like_rth_close(row)
+    return False
+
+
+def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
+    """相对「此刻」印记过旧则重拉（盘前/盘中更严）。"""
+    if not payload:
+        return True
+    dt = _parse_member_quote_dt(
+        {
+            "quote_time": payload.get("data_time_1d_bj"),
+            "quote_time_et": payload.get("data_time_1d_et"),
+        }
+    )
+    if dt is None:
+        return not bool(payload.get("live_1d"))
+    lag = (datetime.now(ET) - dt).total_seconds()
+    if lag < 0:
+        return False
+    if phase == "pre_open":
+        return lag > 180  # 盘前 3 分钟未刷新视为旧
+    if phase == "rth":
+        return lag > 120
+    if phase == "settle":
+        return lag > 300
+    # overnight：允许挂昨盘后数小时，只拦极端过期
+    return lag > 60 * 60 * 48
+
+
+def _needs_1d_refresh(
+    payload: dict[str, Any] | None,
+    phase: str,
+    *,
+    quote_age: float,
+) -> tuple[bool, str]:
+    """自动检测：要不要重拉 1D。返回 (需要, 原因)。
+
+    着重：时段切换、印记与时段不符、印记滞后、常规轮询间隔。
+    """
+    if not _live_1d_active(phase):
+        return False, ""
+    if not payload:
+        return True, "no_payload"
+    if not payload.get("live_1d"):
+        return True, "no_live"
+    prev = payload.get("session_phase")
+    if prev and prev != phase:
+        return True, f"phase_switch:{prev}->{phase}"
+    if _CACHE.get("phase") and _CACHE.get("phase") != phase:
+        return True, f"cache_phase:{_CACHE.get('phase')}->{phase}"
+    if _1d_stamp_mismatch_phase(payload, phase):
+        return True, "stamp_mismatch"
+    if _1d_lag_too_large(payload, phase):
+        return True, "stamp_lag"
+    interval = _overlay_interval_sec(phase)
+    if quote_age >= interval:
+        return True, f"interval:{int(quote_age)}s>={int(interval)}s"
+    if _near_phase_switch() and quote_age >= 25.0:
+        return True, "near_boundary"
+    return False, ""
 
 
 async def _quotes_for_1d_overlay(phase: str) -> tuple[dict[str, Any], str]:
@@ -901,12 +1019,19 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
 
         if not needs_full and cached and cache_age < ttl:
             quote_age = now - float(_CACHE.get("quote_ts") or 0)
-            need_overlay = _live_1d_active(phase) and (
-                quote_age >= _overlay_interval_sec(phase) or not cached.get("live_1d")
+            need_overlay, reason = _needs_1d_refresh(
+                cached, phase, quote_age=quote_age
             )
             if need_overlay:
+                logger.info(
+                    "ai_mainline 1d refresh phase=%s reason=%s quote_age=%.0fs",
+                    phase,
+                    reason,
+                    quote_age,
+                )
                 overlaid, ok = await _overlay_live_1d(cached, phase=phase)
                 _CACHE["data"] = overlaid
+                _CACHE["phase"] = phase
                 if ok:
                     _CACHE["quote_ts"] = now
                 return _finalize_payload(overlaid)
@@ -915,6 +1040,13 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
         if not needs_full and base is not None:
             out = base
             if _live_1d_active(phase):
+                need, reason = _needs_1d_refresh(base, phase, quote_age=1e9)
+                if need:
+                    logger.info(
+                        "ai_mainline 1d refresh from base phase=%s reason=%s",
+                        phase,
+                        reason,
+                    )
                 out, ok = await _overlay_live_1d(base, phase=phase)
                 if ok:
                     _CACHE["quote_ts"] = now
@@ -925,6 +1057,7 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                 )
             _CACHE["ts"] = now
             _CACHE["data"] = out
+            _CACHE["phase"] = phase
             return _finalize_payload(out)
         logger.info(
             "ai_mainline full refresh phase=%s snap=%s cov=%s",
@@ -1010,6 +1143,7 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
     else:
         _CACHE["quote_ts"] = now
     _CACHE["data"] = payload
+    _CACHE["phase"] = phase
     return _finalize_payload(payload)
 
 

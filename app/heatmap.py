@@ -46,6 +46,8 @@ FINNHUB_QUOTE_CONCURRENCY = 6
 _MIN_QUOTE_RATIO = 0.55
 _CACHE: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 180  # 秒（3 分钟，减轻 Yahoo 429 与兜底源压力）
+_YAHOO_COOL_UNTIL = 0.0  # time.time()；429 后冷却，避免会话路径反复打爆
+_YAHOO_COOL_SEC = 180.0
 _SINA_SPOT_CACHE: dict[str, Any] = {"ts": 0.0, "df": None}
 _SINA_SPOT_TTL = 180
 _SINA_SPOT_FETCH_TIMEOUT = 600  # 新浪全表约 900 页，本地网络需 7–10 分钟
@@ -779,6 +781,14 @@ def _parse_yahoo_spark_item(
 
 async def _fetch_yahoo_spark(symbols: list[str]) -> dict[str, dict[str, Any]]:
     """Yahoo spark 批量报价：一次最多约 20 只。"""
+    global _YAHOO_COOL_UNTIL
+    now = time.time()
+    if now < _YAHOO_COOL_UNTIL:
+        logger.info(
+            "Yahoo cooling %.0fs left; skip spark",
+            _YAHOO_COOL_UNTIL - now,
+        )
+        return {}
     out: dict[str, dict[str, Any]] = {}
     wanted = set(symbols)
     headers = {**HEADERS, "Referer": "https://finance.yahoo.com/"}
@@ -797,7 +807,11 @@ async def _fetch_yahoo_spark(symbols: list[str]) -> dict[str, dict[str, Any]]:
                     },
                 )
                 if resp.status_code == 429:
-                    logger.warning("Yahoo spark rate limited; skip remaining batches")
+                    _YAHOO_COOL_UNTIL = time.time() + _YAHOO_COOL_SEC
+                    logger.warning(
+                        "Yahoo spark rate limited; cool %.0fs, skip remaining",
+                        _YAHOO_COOL_SEC,
+                    )
                     break
                 if resp.status_code != 200:
                     logger.warning("Yahoo spark HTTP %s", resp.status_code)
@@ -1120,14 +1134,22 @@ async def _fetch_cnbc_session_quotes(symbols: list[str]) -> dict[str, dict[str, 
 
 
 def _quote_looks_like_rth_close(row: dict[str, Any] | None) -> bool:
-    """Finnhub/东财常在夜盘仍返回常规收盘印记（美东 16:00 / 北京次日 04:00）。"""
+    """常规收盘印记：美东 16:00 / 北京次日 04:00（夏令）或 05:00（冬令）。
+
+    注意：盘前也是美东 04:xx，不能只凭「04:」判断；必须是整点收盘换算。
+    """
     if not row:
         return False
     et = str(row.get("quote_time_et") or "")
     bj = str(row.get("quote_time") or "")
+    # 美东正规收盘
     if re.search(r"\b16:0\d", et):
         return True
-    if re.search(r"\b0[45]:0\d", bj):
+    # 北京次日凌晨整点（由 16:00 ET 换算），排除盘前 16:xx
+    if re.search(r"\b0[45]:00(?::00)?\b", bj) and not re.search(r"\b0[45]:0[1-9]", bj):
+        # 若美东戳是盘前 04:xx，则不是收盘
+        if re.search(r"\b0[45]:\d{2}", et) and not re.search(r"\b16:0\d", et):
+            return False
         return True
     return False
 
@@ -1607,11 +1629,12 @@ async def get_quotes_for_symbols(
 async def get_quotes_session_aware(
     symbols: list[str],
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """扩展时段优先会话价：CNBC → Yahoo → Finnhub/常规轮动。
+    """扩展时段优先会话价：CNBC →（冷却中则跳过）Yahoo → Finnhub/常规轮动。
 
     说明：
     - 盘前/盘后：用扩展价；夜盘窗(20:00–04:00)无免费 ATS 源，回退最近盘后价。
-    - 本路径**忽略** HEATMAP_SKIP_YAHOO。
+    - 本路径**忽略** HEATMAP_SKIP_YAHOO，但尊重 Yahoo 429 冷却，避免轮询打爆。
+    - CNBC 已覆盖大半时不再打 Yahoo，只补缺口。
     """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     if not uniq:
@@ -1630,10 +1653,17 @@ async def get_quotes_session_aware(
         merged.update(cnbc)
         sources_used.append(f"CNBC:{len(cnbc)}")
 
-    # 2) Yahoo（强制尝试；已有足够 CNBC 时只补缺口且短超时）
+    # 2) Yahoo：冷却中跳过；CNBC 已够则只补缺且短超时
     missing = [s for s in uniq if s not in merged]
-    if missing:
-        yahoo_timeout = 8.0 if len(merged) >= max(3, int(len(uniq) * 0.5)) else 14.0
+    yahoo_cooled = time.time() < _YAHOO_COOL_UNTIL
+    cnbc_enough = len(merged) >= max(3, int(len(uniq) * 0.55))
+    if missing and yahoo_cooled:
+        sources_used.append("Yahoo:cool")
+    elif missing and cnbc_enough and len(missing) > 12:
+        # 大半已有会话价：缺口太多时优先 Finnhub，少打 Yahoo
+        sources_used.append("Yahoo:skip_gap")
+    elif missing:
+        yahoo_timeout = 8.0 if cnbc_enough else 14.0
         try:
             yahoo = await asyncio.wait_for(_fetch_yahoo(missing), timeout=yahoo_timeout)
         except Exception as exc:
@@ -1642,6 +1672,8 @@ async def get_quotes_session_aware(
         if yahoo:
             merged.update(yahoo)
             sources_used.append(f"Yahoo:{len(yahoo)}")
+        elif yahoo_cooled or time.time() < _YAHOO_COOL_UNTIL:
+            sources_used.append("Yahoo:cool")
 
     # 3) Finnhub / 常规：只补仍缺的；已有会话价的不要被收盘印记覆盖
     missing = [s for s in uniq if s not in merged]

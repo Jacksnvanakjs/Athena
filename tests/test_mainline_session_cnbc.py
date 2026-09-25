@@ -59,3 +59,7 @@ def test_rth_stamp_detector():
     assert not _quote_looks_like_rth_close(
         {"quote_time": "2026-09-25 07:59:00", "quote_time_et": "2026-09-24 19:59:00 EDT"}
     )
+    # 盘前美东 04:10 ≠ 收盘印记
+    assert not _quote_looks_like_rth_close(
+        {"quote_time": "2026-09-25 16:10:00", "quote_time_et": "2026-09-25 04:10:00 EDT"}
+    )

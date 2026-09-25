@@ -879,6 +879,33 @@
     const tabAbort = { mainline: null, deals: null, earnings: null };
     const tabSeq = { mainline: 0, deals: 0, earnings: 0 };
     let mainlineHasData = false;
+    let mainlinePollTimer = null;
+
+    function mainlinePollMs(data) {
+      const phase = (data && data.session_phase) || '';
+      // 前端配合后端：盘前/盘中更勤；切换窗口后端会 30s 重拉
+      if (phase === 'pre_open' || phase === 'rth') return 45000;
+      if (phase === 'settle') return 60000;
+      if (phase === 'overnight') return 90000;
+      return 120000;
+    }
+
+    function scheduleMainlinePoll(data) {
+      if (mainlinePollTimer) {
+        clearTimeout(mainlinePollTimer);
+        mainlinePollTimer = null;
+      }
+      if (currentTab !== 'mainline') return;
+      const ms = mainlinePollMs(data);
+      mainlinePollTimer = setTimeout(async () => {
+        mainlinePollTimer = null;
+        if (currentTab !== 'mainline') return;
+        try {
+          await loadMainline();
+        } catch (_) { /* ignore */ }
+        scheduleMainlinePoll(mainlineCache);
+      }, ms);
+    }
     let dealsHasData = false;
     let earningsHasData = false;
     let dealsOkQuery = '';
@@ -976,21 +1003,28 @@
           loadMainline();
         }
         loadLevEtf();
-      } else if (tab === 'earnings') {
-        if (earningsCache) applyEarningsCache(earningsCache);
-        if (tabAbort.earnings) {
-          if (!earningsHasData) showLoading('erEmpty', '财报日历加载中…');
-        } else {
-          loadEarnings();
-        }
+        scheduleMainlinePoll(mainlineCache);
       } else {
-        if (dealsCache && dealsCache.queryKey === currentDealsQuery()) {
-          applyDealsItems(dealsCache.items, dealsCache.queryKey);
+        if (mainlinePollTimer) {
+          clearTimeout(mainlinePollTimer);
+          mainlinePollTimer = null;
         }
-        if (tabAbort.deals) {
-          if (!dealsHasData) showLoading('empty', '合作快讯加载中…');
+        if (tab === 'earnings') {
+          if (earningsCache) applyEarningsCache(earningsCache);
+          if (tabAbort.earnings) {
+            if (!earningsHasData) showLoading('erEmpty', '财报日历加载中…');
+          } else {
+            loadEarnings();
+          }
         } else {
-          loadDeals();
+          if (dealsCache && dealsCache.queryKey === currentDealsQuery()) {
+            applyDealsItems(dealsCache.items, dealsCache.queryKey);
+          }
+          if (tabAbort.deals) {
+            if (!dealsHasData) showLoading('empty', '合作快讯加载中…');
+          } else {
+            loadDeals();
+          }
         }
       }
     }
@@ -1085,14 +1119,22 @@
       const asOf = data.trade_date || '';
       const src = data.data_time_1d_source || '';
       const live = !!data.live_1d;
+      const phase = data.session_phase || '';
       const d1bj = data.data_time_1d_bj || '';
       const d1et = data.data_time_1d_et || '';
       const dDbj = data.data_time_daily_bj || '';
       const dDet = data.data_time_daily_et || '';
       const sameAsClose = d1bj && dDbj && d1bj === dDbj;
-      const closeLike = src === 'session_close' || (!live && sameAsClose) || /16:0\d/.test(String(d1et));
+      // 盘前/盘后/夜盘的 live 印记不要被「16:00」误判成收盘快照
+      const extLive = live && (phase === 'pre_open' || phase === 'settle' || phase === 'overnight');
+      const closeLike = !extLive && (
+        src === 'session_close' || (!live && sameAsClose) || /16:0\d/.test(String(d1et))
+      );
       if (live && d1bj && !closeLike) {
-        const tag = src === 'overlay_refresh' ? '1D刷新' : '1D行情';
+        const tag = phase === 'pre_open' ? '盘前'
+          : (phase === 'settle' ? '盘后'
+            : (phase === 'overnight' ? '夜盘前盘后'
+              : (src === 'overlay_refresh' ? '1D刷新' : '1D行情')));
         return {
           label: `${tag}：北京 ${d1bj}${d1et ? ' · ' + d1et : ''}`,
           tip: dataTimeTip(d1bj, d1et, '1d', src || 'live_quote'),
@@ -1158,6 +1200,7 @@
               setStaleHint('mlMetrics', '');
               loadStatus();
             }
+            scheduleMainlinePoll(data);
             return;
           } catch (e) {
             if (!isLatest()) return;
