@@ -1076,6 +1076,67 @@ def _parse_cnbc_formatted_quote(q: dict[str, Any], symbol: str) -> dict[str, Any
     )
 
 
+def _sina_hq_code(symbol: str) -> str:
+    """新浪美股 hq 代码：gb_nvda / gb_brkb。"""
+    return "gb_" + symbol.upper().strip().replace(".", "").replace("-", "").lower()
+
+
+async def _fetch_sina_hq_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
+    """新浪 hq.sinajs.cn 批量美股现货（含盘前/盘后扩展价，国内可达）。
+
+    解析复用 _parse_sina_row：扩展窗用字段 [21] 扩展价 + [24] 美东扩展时间。
+    """
+    uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
+    if not uniq:
+        return {}
+    code_to_sym = {_sina_hq_code(s): s for s in uniq}
+    headers = {
+        **HEADERS,
+        "Referer": "https://finance.sina.com.cn",
+        "Accept": "*/*",
+    }
+    out: dict[str, dict[str, Any]] = {}
+    # 批量请求，每批 ≤40，避免 URL 过长
+    codes = list(code_to_sym.keys())
+    now_et = datetime.now(_US_TZ)
+    async with httpx.AsyncClient(timeout=14.0, headers=headers, follow_redirects=True) as client:
+        for i in range(0, len(codes), 40):
+            chunk = codes[i : i + 40]
+            try:
+                resp = await client.get(
+                    "https://hq.sinajs.cn/list=" + ",".join(chunk)
+                )
+            except Exception as exc:
+                logger.warning("sina hq batch failed: %s", exc)
+                continue
+            if resp.status_code != 200 or not resp.text:
+                continue
+            text = resp.text
+            # 编码多为 gb18030；httpx 可能误判
+            if "\\u" not in text and any(ord(c) > 127 for c in text[:80]):
+                try:
+                    text = resp.content.decode("gb18030", errors="ignore")
+                except Exception:
+                    pass
+            for m in re.finditer(
+                r'hq_str_(gb_[a-z0-9]+)\s*=\s*"([^"]*)"',
+                text,
+                re.I,
+            ):
+                code = m.group(1).lower()
+                body = m.group(2)
+                if not body or body.count(",") < 10:
+                    continue
+                sym = code_to_sym.get(code)
+                if not sym:
+                    continue
+                parts = body.split(",")
+                row = _parse_sina_row(parts, sym, now_et=now_et)
+                if row and row.get("change_pct") is not None:
+                    out[sym] = row
+    return out
+
+
 async def _fetch_cnbc_session_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
     """CNBC 扩展时段报价（Yahoo 429 时的夜盘/盘前稳定兜底）。
 
@@ -1629,12 +1690,13 @@ async def get_quotes_for_symbols(
 async def get_quotes_session_aware(
     symbols: list[str],
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """扩展时段优先会话价：CNBC →（冷却中则跳过）Yahoo → Finnhub/常规轮动。
+    """扩展时段优先会话价：CNBC → 新浪 hq →（冷却中则跳过）Yahoo → Finnhub/常规。
 
     说明：
     - 盘前/盘后：用扩展价；夜盘窗(20:00–04:00)无免费 ATS 源，回退最近盘后价。
+    - 新浪 hq 国内可达，可覆盖 CNBC 不可达时的 RTH 收盘印记。
     - 本路径**忽略** HEATMAP_SKIP_YAHOO，但尊重 Yahoo 429 冷却，避免轮询打爆。
-    - CNBC 已覆盖大半时不再打 Yahoo，只补缺口。
+    - 会话源已覆盖大半时不再打 Yahoo，只补缺口。
     """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     if not uniq:
@@ -1653,24 +1715,60 @@ async def get_quotes_session_aware(
         merged.update(cnbc)
         sources_used.append(f"CNBC:{len(cnbc)}")
 
-    # 2) Yahoo：冷却中跳过；CNBC 已够则只补缺且短超时
+    # 1b) 新浪 hq：国内稳定；补缺且可覆盖 CNBC 失败后的收盘印记缺口
+    missing = [s for s in uniq if s not in merged]
+    # 若已有会话价大半是 RTH 印记，也用新浪覆盖
+    rth_heavy_early = bool(merged) and (
+        sum(1 for r in merged.values() if _quote_looks_like_rth_close(r))
+        >= max(1, int(len(merged) * 0.55))
+    )
+    sina_targets = missing if not rth_heavy_early else uniq
+    if sina_targets:
+        try:
+            sina = await asyncio.wait_for(_fetch_sina_hq_quotes(sina_targets), timeout=16.0)
+        except Exception as exc:
+            logger.warning("session-aware sina hq failed: %s", exc)
+            sina = {}
+        if sina:
+            added = 0
+            replaced = 0
+            for sym, row in sina.items():
+                if _quote_looks_like_rth_close(row):
+                    continue
+                prev = merged.get(sym)
+                if prev is None:
+                    merged[sym] = row
+                    added += 1
+                elif _quote_looks_like_rth_close(prev):
+                    merged[sym] = row
+                    replaced += 1
+            if added or replaced:
+                sources_used.append(f"SinaHQ:{added}+r{replaced}")
+
+    # 2) Yahoo：冷却中跳过；CNBC/新浪已够则只补缺且短超时
     missing = [s for s in uniq if s not in merged]
     yahoo_cooled = time.time() < _YAHOO_COOL_UNTIL
-    cnbc_enough = len(merged) >= max(3, int(len(uniq) * 0.55))
+    session_enough = len(merged) >= max(3, int(len(uniq) * 0.55))
     if missing and yahoo_cooled:
         sources_used.append("Yahoo:cool")
-    elif missing and cnbc_enough and len(missing) > 12:
+    elif missing and session_enough and len(missing) > 12:
         # 大半已有会话价：缺口太多时优先 Finnhub，少打 Yahoo
         sources_used.append("Yahoo:skip_gap")
     elif missing:
-        yahoo_timeout = 8.0 if cnbc_enough else 14.0
+        yahoo_timeout = 8.0 if session_enough else 14.0
         try:
             yahoo = await asyncio.wait_for(_fetch_yahoo(missing), timeout=yahoo_timeout)
         except Exception as exc:
             logger.warning("session-aware Yahoo failed: %s", exc)
             yahoo = {}
         if yahoo:
-            merged.update(yahoo)
+            # 勿用 RTH 印记覆盖已有扩展价
+            for sym, row in yahoo.items():
+                prev = merged.get(sym)
+                if prev is None:
+                    merged[sym] = row
+                elif _quote_looks_like_rth_close(prev) and not _quote_looks_like_rth_close(row):
+                    merged[sym] = row
             sources_used.append(f"Yahoo:{len(yahoo)}")
         elif yahoo_cooled or time.time() < _YAHOO_COOL_UNTIL:
             sources_used.append("Yahoo:cool")

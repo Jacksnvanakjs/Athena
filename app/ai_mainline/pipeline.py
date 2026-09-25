@@ -412,7 +412,10 @@ def _quote_stamp_too_old(row: dict[str, Any] | None, *, now: datetime | None = N
 def _filter_quotes_for_1d(
     quotes: dict[str, dict[str, Any]], phase: str
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """夜盘/盘前/盘后：优先非收盘印记；丢掉过期戳；无扩展价时才退回收盘价。"""
+    """夜盘/盘前/盘后：只用非收盘印记；盘前/盘后绝不把 RTH 收盘当 live。
+
+    夜盘无扩展价时才允许 rth_fallback（夜盘前最后一档）。
+    """
     from app.heatmap import _quote_looks_like_rth_close
 
     now = datetime.now(ET)
@@ -430,27 +433,43 @@ def _filter_quotes_for_1d(
     }
     if non_rth:
         return non_rth, "session"
+    # 盘前/盘后：宁可失败重试，也不把北京 04:00 常规收盘标成盘前 live
+    if phase in ("pre_open", "settle"):
+        return {}, "no_ext"
     return fresh, "rth_fallback"
 
 
-def _strip_stale_1d_fields(payload: dict[str, Any]) -> dict[str, Any]:
-    """叠加失败时清掉过期 1D 时间戳，避免页面一直显示几天前的盘后。"""
+def _strip_stale_1d_fields(
+    payload: dict[str, Any], *, phase: str | None = None
+) -> dict[str, Any]:
+    """叠加失败时清掉过期/收盘假 live 的 1D 戳，避免盘前挂「25凌晨4点」。"""
+    from app.heatmap import _quote_looks_like_rth_close
+
     out = dict(payload)
     now = datetime.now(ET)
-    if _quote_stamp_too_old(
-        {"quote_time": out.get("data_time_1d_bj"), "quote_time_et": out.get("data_time_1d_et")},
-        now=now,
-    ):
+    stamp = {
+        "quote_time": out.get("data_time_1d_bj"),
+        "quote_time_et": out.get("data_time_1d_et"),
+    }
+    clear = _quote_stamp_too_old(stamp, now=now)
+    # 盘前/盘后：常规收盘印记一律清掉（勿继续展示为当前 1D）
+    if phase in ("pre_open", "settle") and _quote_looks_like_rth_close(stamp):
+        clear = True
+    if clear:
         out["data_time_1d_bj"] = None
         out["data_time_1d_et"] = None
         out["data_time_1d_source"] = None
+        out["live_1d"] = False
     themes_out: list[dict[str, Any]] = []
     for theme in out.get("themes") or []:
         row = dict(theme)
         members = []
         for m in theme.get("members") or []:
             mem = dict(m)
-            if _quote_stamp_too_old(mem, now=now):
+            drop = _quote_stamp_too_old(mem, now=now)
+            if phase in ("pre_open", "settle") and _quote_looks_like_rth_close(mem):
+                drop = True
+            if drop:
                 mem.pop("quote_time", None)
                 mem.pop("quote_time_et", None)
             members.append(mem)
@@ -580,7 +599,7 @@ async def _overlay_live_1d(
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)
-        out = _strip_stale_1d_fields(dict(payload))
+        out = _strip_stale_1d_fields(dict(payload), phase=phase)
         out["live_1d"] = False
         msg = f"1D 即时行情暂未刷新（{type(exc).__name__}）"
         out["live_1d_note"] = msg
@@ -589,7 +608,7 @@ async def _overlay_live_1d(
             out["note"] = f"{base_note} {msg}".strip() if base_note else msg
         return out, False
     if not quotes:
-        out = _strip_stale_1d_fields(dict(payload))
+        out = _strip_stale_1d_fields(dict(payload), phase=phase)
         out["live_1d"] = False
         msg = "1D 即时行情暂无返回，仍展示上一版"
         out["live_1d_note"] = msg
@@ -600,9 +619,13 @@ async def _overlay_live_1d(
 
     use_quotes, qkind = _filter_quotes_for_1d(quotes, phase)
     if not use_quotes:
-        out = _strip_stale_1d_fields(dict(payload))
+        out = _strip_stale_1d_fields(dict(payload), phase=phase)
         out["live_1d"] = False
-        msg = "1D 行情印记过期，已丢弃，待下一轮刷新"
+        msg = (
+            "盘前/盘后暂无扩展价，已拒绝常规收盘印记，待下一轮刷新"
+            if qkind == "no_ext"
+            else "1D 行情印记过期，已丢弃，待下一轮刷新"
+        )
         out["live_1d_note"] = msg
         return out, False
 

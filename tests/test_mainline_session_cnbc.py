@@ -63,3 +63,45 @@ def test_rth_stamp_detector():
     assert not _quote_looks_like_rth_close(
         {"quote_time": "2026-09-25 16:10:00", "quote_time_et": "2026-09-25 04:10:00 EDT"}
     )
+
+
+def test_filter_quotes_refuses_rth_in_pre_open():
+    from app.ai_mainline.pipeline import _filter_quotes_for_1d
+
+    rth = {
+        "NVDA": {
+            "change_pct": -0.4,
+            "quote_time": "2026-09-25 04:00:00",
+            "quote_time_et": "2026-09-24 16:00:00 EDT",
+        }
+    }
+    got, kind = _filter_quotes_for_1d(rth, "pre_open")
+    assert got == {}
+    assert kind == "no_ext"
+
+    pre = {
+        "NVDA": {
+            "change_pct": 0.5,
+            "quote_time": "2026-09-25 16:37:00",
+            "quote_time_et": "Sep 25 04:37AM EDT",
+        }
+    }
+    got2, kind2 = _filter_quotes_for_1d(pre, "pre_open")
+    assert "NVDA" in got2
+    assert kind2 == "session"
+
+
+def test_strip_clears_rth_stamp_in_pre():
+    from app.ai_mainline.pipeline import _strip_stale_1d_fields
+
+    out = _strip_stale_1d_fields(
+        {
+            "data_time_1d_bj": "2026-09-25 04:00:00",
+            "data_time_1d_et": "2026-09-24 16:00:00 EDT",
+            "live_1d": True,
+            "themes": [],
+        },
+        phase="pre_open",
+    )
+    assert out.get("data_time_1d_bj") is None
+    assert out.get("live_1d") is False

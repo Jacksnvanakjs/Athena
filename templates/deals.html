@@ -1125,10 +1125,14 @@
       const dDbj = data.data_time_daily_bj || '';
       const dDet = data.data_time_daily_et || '';
       const sameAsClose = d1bj && dDbj && d1bj === dDbj;
+      const extPhase = phase === 'pre_open' || phase === 'settle' || phase === 'overnight';
+      // 北京次日 04:00 / 美东 16:00 = 常规收盘印记，盘前绝不当 live
+      const rthCloseStamp = /\b16:0\d/.test(String(d1et))
+        || (/\b0[45]:00(?::00)?\b/.test(String(d1bj)) && !/\b0[45]:0[1-9]/.test(String(d1bj)));
       // 盘前/盘后/夜盘的 live 印记不要被「16:00」误判成收盘快照
-      const extLive = live && (phase === 'pre_open' || phase === 'settle' || phase === 'overnight');
+      const extLive = live && extPhase && !rthCloseStamp;
       const closeLike = !extLive && (
-        src === 'session_close' || (!live && sameAsClose) || /16:0\d/.test(String(d1et))
+        src === 'session_close' || (!live && sameAsClose) || rthCloseStamp || /16:0\d/.test(String(d1et))
       );
       if (live && d1bj && !closeLike) {
         const tag = phase === 'pre_open' ? '盘前'
@@ -1138,6 +1142,15 @@
         return {
           label: `${tag}：北京 ${d1bj}${d1et ? ' · ' + d1et : ''}`,
           tip: dataTimeTip(d1bj, d1et, '1d', src || 'live_quote'),
+        };
+      }
+      // 扩展时段：不要把日线收盘 BJ 04:00 当成当前 1D 展示
+      if (extPhase && (!live || rthCloseStamp || closeLike)) {
+        const tag = phase === 'pre_open' ? '盘前' : (phase === 'settle' ? '盘后' : '夜盘');
+        const note = (data.live_1d_note || '').trim();
+        return {
+          label: note ? `${tag}刷新中（${note}）` : `${tag}刷新中（勿用收盘 04:00）`,
+          tip: note || '扩展时段尚无有效会话价，拒绝展示常规收盘印记',
         };
       }
       const bj = d1bj || dDbj;
