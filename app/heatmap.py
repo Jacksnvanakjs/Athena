@@ -962,9 +962,9 @@ def _cnbc_quote_times(ext: dict[str, Any], status: str) -> tuple[str | None, str
     dt_et = datetime(
         et_date.year, et_date.month, et_date.day, hour, minute, 0, tzinfo=_US_TZ
     )
-    # 过旧会话价不当作「实时」：超过 3 个自然日则丢弃时间戳
+    # 过旧会话价不当作「实时」：超过 2 个自然日则丢弃时间戳
     age_days = (datetime.now(_US_TZ).date() - et_date).days
-    if age_days > 3:
+    if age_days > 2:
         return None, None
     return (
         dt_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S"),

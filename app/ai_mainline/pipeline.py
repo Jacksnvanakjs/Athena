@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -338,14 +339,103 @@ def _session_tip(phase: str) -> str:
     if phase == "settle":
         return "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
     if phase == "overnight":
-        return "夜盘时段暂无免费 ATS 源，1D 回退盘后价；5D/20D 与主线判定沿用日线快照。"
+        return "夜盘无免费 ATS 源，1D 用夜盘前最新盘后价；5D/20D 与主线判定沿用日线快照。"
     if phase == "rth":
         return "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。"
     return "5D/20D 与主线判定沿用日线快照。"
 
 
+def _parse_member_quote_dt(row: dict[str, Any] | None) -> datetime | None:
+    """解析行情行上的美东/北京时间戳。"""
+    if not row:
+        return None
+    et = str(row.get("quote_time_et") or "").strip()
+    bj = str(row.get("quote_time") or "").strip()
+    for raw, tz in ((et, ET), (bj, ZoneInfo("Asia/Shanghai"))):
+        if not raw:
+            continue
+        # "2026-09-24 19:59:00 EDT" / "2026-09-25 07:59:00"
+        m = re.search(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?", raw)
+        if not m:
+            continue
+        try:
+            sec = int(m.group(6) or 0)
+            return datetime(
+                int(m.group(1)),
+                int(m.group(2)),
+                int(m.group(3)),
+                int(m.group(4)),
+                int(m.group(5)),
+                sec,
+                tzinfo=tz,
+            ).astimezone(ET)
+        except ValueError:
+            continue
+    return None
+
+
+def _quote_stamp_too_old(row: dict[str, Any] | None, *, now: datetime | None = None) -> bool:
+    """超过约 2.5 个自然日的印记视为过期（避免一直挂着 22 号盘后）。"""
+    dt = _parse_member_quote_dt(row)
+    if dt is None:
+        return False
+    now = now or datetime.now(ET)
+    return (now - dt).total_seconds() > 60 * 60 * 60  # 60h
+
+
+def _filter_quotes_for_1d(
+    quotes: dict[str, dict[str, Any]], phase: str
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """夜盘/盘前/盘后：优先非收盘印记；丢掉过期戳；无扩展价时才退回收盘价。"""
+    from app.heatmap import _quote_looks_like_rth_close
+
+    now = datetime.now(ET)
+    fresh = {
+        k: v
+        for k, v in quotes.items()
+        if v and v.get("change_pct") is not None and not _quote_stamp_too_old(v, now=now)
+    }
+    if not fresh:
+        fresh = {k: v for k, v in quotes.items() if v and v.get("change_pct") is not None}
+    if phase not in ("pre_open", "settle", "overnight"):
+        return fresh, "rth"
+    non_rth = {
+        k: v for k, v in fresh.items() if v and not _quote_looks_like_rth_close(v)
+    }
+    if non_rth:
+        return non_rth, "session"
+    return fresh, "rth_fallback"
+
+
+def _strip_stale_1d_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """叠加失败时清掉过期 1D 时间戳，避免页面一直显示几天前的盘后。"""
+    out = dict(payload)
+    now = datetime.now(ET)
+    if _quote_stamp_too_old(
+        {"quote_time": out.get("data_time_1d_bj"), "quote_time_et": out.get("data_time_1d_et")},
+        now=now,
+    ):
+        out["data_time_1d_bj"] = None
+        out["data_time_1d_et"] = None
+        out["data_time_1d_source"] = None
+    themes_out: list[dict[str, Any]] = []
+    for theme in out.get("themes") or []:
+        row = dict(theme)
+        members = []
+        for m in theme.get("members") or []:
+            mem = dict(m)
+            if _quote_stamp_too_old(mem, now=now):
+                mem.pop("quote_time", None)
+                mem.pop("quote_time_et", None)
+            members.append(mem)
+        row["members"] = members
+        themes_out.append(row)
+    out["themes"] = themes_out
+    return out
+
+
 async def _quotes_for_1d_overlay(phase: str) -> tuple[dict[str, Any], str]:
-    """盘中用多源快路；扩展时段优先 Yahoo 会话价，避免东财停在常规收盘涨跌。"""
+    """盘中用多源快路；扩展时段优先会话价，避免东财停在常规收盘涨跌。"""
     from app.heatmap import get_quotes_for_symbols, get_quotes_session_aware
 
     symbols = all_symbols()
@@ -360,6 +450,7 @@ async def _overlay_live_1d(
     """叠加即时报价 1D；不重拉日 K、不改主线排名（仍按 5D）。
 
     返回 (payload, ok)。ok=False 时调用方不要推进 quote_ts，以便尽快重试。
+    夜盘无 ATS 时用夜盘前最新盘后价；失败则清掉过期时间戳，不继续挂旧印记。
     """
     import asyncio
 
@@ -371,7 +462,7 @@ async def _overlay_live_1d(
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)
-        out = dict(payload)
+        out = _strip_stale_1d_fields(dict(payload))
         out["live_1d"] = False
         msg = f"1D 即时行情暂未刷新（{type(exc).__name__}）"
         out["live_1d_note"] = msg
@@ -380,13 +471,21 @@ async def _overlay_live_1d(
             out["note"] = f"{base_note} {msg}".strip() if base_note else msg
         return out, False
     if not quotes:
-        out = dict(payload)
+        out = _strip_stale_1d_fields(dict(payload))
         out["live_1d"] = False
         msg = "1D 即时行情暂无返回，仍展示上一版"
         out["live_1d_note"] = msg
         base_note = (out.get("note") or "").strip()
         if msg not in base_note:
             out["note"] = f"{base_note} {msg}".strip() if base_note else msg
+        return out, False
+
+    use_quotes, qkind = _filter_quotes_for_1d(quotes, phase)
+    if not use_quotes:
+        out = _strip_stale_1d_fields(dict(payload))
+        out["live_1d"] = False
+        msg = "1D 行情印记过期，已丢弃，待下一轮刷新"
+        out["live_1d_note"] = msg
         return out, False
 
     out = dict(payload)
@@ -399,14 +498,18 @@ async def _overlay_live_1d(
         for m in theme.get("members") or []:
             mem = dict(m)
             sym = (mem.get("symbol") or "").upper()
-            q = quotes.get(sym)
+            q = use_quotes.get(sym)
             if q and q.get("change_pct") is not None:
                 chg = round(float(q["change_pct"]), 2)
                 mem["ret_1d"] = chg
                 if q.get("quote_time"):
                     mem["quote_time"] = q["quote_time"]
+                else:
+                    mem.pop("quote_time", None)
                 if q.get("quote_time_et"):
                     mem["quote_time_et"] = q["quote_time_et"]
+                else:
+                    mem.pop("quote_time_et", None)
                 ret_1d_list.append(chg)
                 if chg > 0:
                     up += 1
@@ -422,7 +525,7 @@ async def _overlay_live_1d(
 
     bench = dict(payload.get("bench") or {})
     b1: list[float] = []
-    for q in quotes.values():
+    for q in use_quotes.values():
         if q and q.get("change_pct") is not None:
             b1.append(float(q["change_pct"]))
     if b1:
@@ -431,20 +534,10 @@ async def _overlay_live_1d(
     # as_of / updated_bj 仍是请求/计算时刻；1D 数据时刻单独字段
     out["as_of"] = _as_of_iso()
     out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
-    qtimes = _quote_data_times(quotes)
-    # 盘前/盘后/夜盘：丢掉常规收盘印记，避免把 16:00 当成扩展/夜盘实时
-    if phase in ("pre_open", "settle", "overnight"):
-        from app.heatmap import _quote_looks_like_rth_close
-
-        session_quotes = {
-            k: v for k, v in quotes.items() if v and not _quote_looks_like_rth_close(v)
-        }
-        if session_quotes:
-            qtimes = _quote_data_times(session_quotes)
-        else:
-            qtimes = {"data_time_1d_bj": None, "data_time_1d_et": None}
+    qtimes = _quote_data_times(use_quotes)
     out.update(qtimes)
     out.update(_daily_session_close_times(out.get("trade_date")))
+    # 有成交印记就用印记；没有才用刷新时刻（勿回落几天前的缓存戳）
     if not out.get("data_time_1d_bj") and not out.get("data_time_1d_et"):
         out["data_time_1d_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M:%S")
         out["data_time_1d_et"] = datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -453,18 +546,22 @@ async def _overlay_live_1d(
         out["data_time_1d_source"] = "live_quote"
     out["live_1d"] = True
     if phase == "overnight":
-        out["live_1d_note"] = "夜盘时段暂无免费 ATS 源，当前为盘后回退价"
-    elif "rth_stamp_heavy" in str(src) and phase in ("pre_open", "settle", "overnight"):
+        out["live_1d_note"] = (
+            "夜盘无免费 ATS，已用夜盘前最新盘后价"
+            if qkind == "session"
+            else "夜盘无扩展价，暂用常规收盘回退"
+        )
+    elif "rth_stamp_heavy" in str(src) and phase in ("pre_open", "settle"):
         out["live_1d_note"] = "扩展时段会话源偏弱，部分报价仍可能停在常规收盘"
     else:
         out.pop("live_1d_note", None)
-    out["quote_count"] = len(quotes)
+    out["quote_count"] = len(use_quotes)
     out["quote_total"] = len(all_symbols())
     out["session_phase"] = phase
     prev_src = payload.get("source") or "snapshot"
     # 去掉旧的 live_1d 后缀再挂新源，避免叠多层
     base_src = str(prev_src).split("+live_1d")[0]
-    out["source"] = f"{base_src}+live_1d({src})"
+    out["source"] = f"{base_src}+live_1d({src}/{qkind})"
     out["stale"] = False
     note = (payload.get("note") or "").strip()
     for old in (
@@ -477,6 +574,7 @@ async def _overlay_live_1d(
         "夜盘(ATS)已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "暂无 ATS 夜盘源，1D 回退盘后价；配置 TIINGO_API_KEY(BOATS) 后可拉真夜盘。5D/20D 沿用日线快照。",
         "夜盘时段暂无免费 ATS 源，1D 回退盘后价；5D/20D 与主线判定沿用日线快照。",
+        "夜盘无免费 ATS 源，1D 用夜盘前最新盘后价；5D/20D 与主线判定沿用日线快照。",
         "1D 即时行情暂无返回，仍展示上一版",
     ):
         note = note.replace(old, "").strip()
