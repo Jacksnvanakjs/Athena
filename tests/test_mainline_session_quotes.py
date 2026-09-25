@@ -1,4 +1,4 @@
-"""Yahoo 会话价解析：休市应优先盘后价。"""
+"""Yahoo 会话价解析：休市优先盘后价作公共回退。"""
 
 from app.heatmap import _parse_yahoo_meta
 
@@ -74,11 +74,19 @@ def test_live_1d_active_phases():
     assert _overlay_interval_sec("overnight") == 90.0
 
     et = ZoneInfo("America/New_York")
-    # 周日 20:00 ET → 隔夜盘，应继续拉 1D
-    sunday_night = datetime(2026, 9, 20, 20, 5, tzinfo=et)  # Sunday
+    # 周日 20:00 ET → 夜盘
+    sunday_night = datetime(2026, 9, 20, 20, 5, tzinfo=et)
     assert _market_phase(sunday_night) == "overnight"
     assert _live_1d_active(_market_phase(sunday_night))
-    # 周六白天 → 休市不拉
-    saturday = datetime(2026, 9, 19, 15, 0, tzinfo=et)
-    assert _market_phase(saturday) == "closed"
-    assert not _live_1d_active(_market_phase(saturday))
+
+    # 交易日凌晨 02:30 = 夜盘 ATS（不是盘前）
+    thu_owl = datetime(2026, 9, 25, 2, 30, tzinfo=et)
+    assert _market_phase(thu_owl) == "overnight"
+
+    # 盘后 17:00 = settle
+    thu_post = datetime(2026, 9, 24, 17, 0, tzinfo=et)
+    assert _market_phase(thu_post) == "settle"
+
+    # 盘前 05:00
+    thu_pre = datetime(2026, 9, 25, 5, 0, tzinfo=et)
+    assert _market_phase(thu_pre) == "pre_open"

@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -458,10 +458,30 @@ def _parse_sina_et_time(text: str) -> datetime | None:
 
 
 def _us_market_session(now_et: datetime | None = None) -> dict[str, str]:
-    """美股交易时段（按美东时间）。"""
+    """美股交易时段（按美东时间）。
+
+    盘后=16:00–20:00；夜盘(ATS)=20:00–次日04:00；盘前=04:00–09:30；盘中=09:30–16:00。
+    """
     now_et = now_et or datetime.now(_US_TZ)
     minutes = now_et.hour * 60 + now_et.minute
     weekday = now_et.weekday()  # 0=Mon
+    # 夜盘可跨午夜：周日20:00–周一04:00，以及交易日20:00–次日04:00
+    in_overnight = minutes >= 20 * 60 or minutes < 4 * 60
+    if in_overnight:
+        # 周六全日 / 周日早盘前不算夜盘
+        if weekday == 5 or (weekday == 6 and minutes < 20 * 60):
+            return {
+                "session": "closed",
+                "session_label": "周末休市",
+                "data_freshness": "休市中，显示最近一个交易日收盘/盘后价",
+                "change_pct_basis": "涨跌幅为最近一个交易日收盘价",
+            }
+        return {
+            "session": "overnight",
+            "session_label": "夜盘交易",
+            "data_freshness": "夜盘时段(美东20:00–04:00)无免费 ATS 源，展示最近盘后价",
+            "change_pct_basis": "涨跌幅相对昨收（夜盘）",
+        }
     if weekday >= 5:
         return {
             "session": "closed",
@@ -483,23 +503,24 @@ def _us_market_session(now_et: datetime | None = None) -> dict[str, str]:
             "data_freshness": "盘中实时（Yahoo Finance）",
             "change_pct_basis": "涨跌幅相对昨收（盘中）",
         }
-    if 16 * 60 <= minutes < 20 * 60:
-        return {
-            "session": "post",
-            "session_label": "盘后交易",
-            "data_freshness": "盘后实时（Yahoo Finance）",
-            "change_pct_basis": "涨跌幅相对昨收（盘后）",
-        }
     return {
-        "session": "overnight",
-        "session_label": "隔夜休市",
-        "data_freshness": "隔夜休市，价格停在昨盘后；开盘前（北京约16:00/17:00起，对应美东04:00）才会继续变动",
-        "change_pct_basis": "涨跌幅停在昨盘后",
+        "session": "post",
+        "session_label": "盘后交易",
+        "data_freshness": "盘后实时（Yahoo Finance）",
+        "change_pct_basis": "涨跌幅相对昨收（盘后）",
     }
 
 
-def _parse_sina_row(parts: list[str], sym: str) -> dict[str, Any] | None:
-    """解析新浪 hq 字段；盘中勿用 [21] 盘前价覆盖 [1] 最新价。"""
+def _parse_sina_row(
+    parts: list[str],
+    sym: str,
+    *,
+    now_et: datetime | None = None,
+) -> dict[str, Any] | None:
+    """解析新浪 hq 字段；盘中勿用 [21] 盘前价覆盖 [1] 最新价。
+
+    选价按**当前**美东时段，不用报价戳上的盘后时间误判仍在盘后。
+    """
     if len(parts) < 11:
         return None
     price = _to_float(parts[1])
@@ -509,22 +530,25 @@ def _parse_sina_row(parts: list[str], sym: str) -> dict[str, Any] | None:
     ext_price = _to_float(parts[21]) if len(parts) > 21 else None
     et_raw = parts[24].strip() if len(parts) > 24 else ""
     et_dt = _parse_sina_et_time(et_raw)
-    ref_et = et_dt.astimezone(_US_TZ) if et_dt else datetime.now(_US_TZ)
-    session = _us_market_session(ref_et).get("session", "closed")
+    # parts[24]=扩展时段时间(盘前/盘后)，parts[25]=常规收盘时间(夜盘主会话)
+    reg_et_raw = parts[25].strip() if len(parts) > 25 else ""
+    session = _us_market_session(now_et or datetime.now(_US_TZ)).get("session", "closed")
 
     if session == "regular":
         # 盘中：字段 [1] 为最新成交，[21] 可能仍是滞后盘前价
         if price and prev_close and prev_close > 0:
             change_pct = round((price - prev_close) / prev_close * 100, 2)
-    elif session in ("pre", "post"):
+    elif session in ("pre", "post", "overnight"):
+        # 盘前/盘后/夜盘窗：公共源通常只有扩展(盘后)价
         if ext_price and ext_price > 0 and prev_close and prev_close > 0:
             price = ext_price
             change_pct = round((ext_price - prev_close) / prev_close * 100, 2)
-    elif ext_price and ext_price > 0 and prev_close and prev_close > 0:
-        price = ext_price
-        change_pct = round((ext_price - prev_close) / prev_close * 100, 2)
-    elif price and prev_close and prev_close > 0:
-        change_pct = round((price - prev_close) / prev_close * 100, 2)
+    else:
+        if price and prev_close and prev_close > 0:
+            change_pct = round((price - prev_close) / prev_close * 100, 2)
+        if reg_et_raw:
+            et_raw = reg_et_raw
+            et_dt = _parse_sina_et_time(et_raw)
 
     if price is None or price <= 0:
         return None
@@ -629,7 +653,7 @@ def _parse_yahoo_meta(
 ) -> dict[str, Any] | None:
     """按 marketState 取价/涨跌/量，涨跌幅均相对 previousClose。
 
-    CLOSED/隔夜：优先沿用盘后价（若有），避免把「昨收盘涨」当成当前夜盘。
+    CLOSED：优先盘后价作公共回退。
     """
     state = str(meta.get("marketState") or "").upper()
     prev = _to_float(meta.get("previousClose")) or _to_float(
@@ -676,7 +700,7 @@ def _parse_yahoo_meta(
         if not _use_pre() and not _use_post():
             _use_regular()
     elif state in ("CLOSED", ""):
-        # 休市：盘后价比常规收盘更能反映夜盘最后成交
+        # 休市/夜盘窗：公共 Yahoo 无 ATS，盘后价优于卡住的常规收盘
         if not _use_post() and not _use_pre():
             _use_regular()
     else:
@@ -878,39 +902,105 @@ def _cnbc_parse_price(raw: Any) -> float | None:
 
 
 def _cnbc_quote_times(ext: dict[str, Any], status: str) -> tuple[str | None, str | None]:
-    """从 CNBC ExtendedMktQuote 推北京/美东时间。"""
-    timedate = str(ext.get("last_timedate") or ext.get("last_time") or "").strip()
-    m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", timedate)
+    """从 CNBC ExtendedMktQuote 推北京/美东时间。
+
+    常见形态：
+    - last_timedate=\"09/24/26 EDT\" + 无 last_time
+    - last_timedate=\"7:59 PM EDT\" + last_time=\"2026-09-24\"  （当前）
+    """
+    clock_raw = str(ext.get("last_timedate") or "").strip()
+    date_raw = str(ext.get("last_time") or "").strip()
     et_date = None
-    if m:
-        mm, dd, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        if yy < 100:
-            yy += 2000
+
+    # 1) 优先 ISO 日期 last_time
+    m_iso = re.search(r"(\d{4})-(\d{2})-(\d{2})", date_raw) or re.search(
+        r"(\d{4})-(\d{2})-(\d{2})", clock_raw
+    )
+    if m_iso:
         try:
-            et_date = datetime(yy, mm, dd, tzinfo=_US_TZ).date()
+            et_date = datetime(
+                int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3)), tzinfo=_US_TZ
+            ).date()
+        except ValueError:
+            et_date = None
+
+    # 2) MM/DD/YY 写在 last_timedate 里
+    if et_date is None:
+        m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", clock_raw)
+        if m:
+            mm, dd, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if yy < 100:
+                yy += 2000
+            try:
+                et_date = datetime(yy, mm, dd, tzinfo=_US_TZ).date()
+            except ValueError:
+                et_date = None
+
+    if et_date is None:
+        return None, None
+
+    # 钟点：优先解析 "7:59 PM EDT"；否则按 PRE/POST 估一个整点
+    hour, minute = 16, 0
+    m_clk = re.search(r"(\d{1,2}):(\d{2})\s*(AM|PM)", clock_raw, re.I)
+    if m_clk:
+        hour = int(m_clk.group(1))
+        minute = int(m_clk.group(2))
+        ap = m_clk.group(3).upper()
+        if ap == "PM" and hour != 12:
+            hour += 12
+        if ap == "AM" and hour == 12:
+            hour = 0
+    else:
+        st = (status or str(ext.get("type") or "")).upper()
+        if "PRE" in st:
+            hour = 8
+        elif "POST" in st:
+            hour = 20
+        else:
+            hour = 16
+
+    dt_et = datetime(
+        et_date.year, et_date.month, et_date.day, hour, minute, 0, tzinfo=_US_TZ
+    )
+    # 过旧会话价不当作「实时」：超过 3 个自然日则丢弃时间戳
+    age_days = (datetime.now(_US_TZ).date() - et_date).days
+    if age_days > 3:
+        return None, None
+    return (
+        dt_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        dt_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
+    )
+
+
+def _cnbc_reg_close_times(q: dict[str, Any], ext: dict[str, Any]) -> tuple[str | None, str | None]:
+    """夜盘主会话(常规)收盘时间：美东 16:00。日期优先扩展时段同日，其次 row.last_time。"""
+    date_raw = str(ext.get("last_time") or q.get("last_time") or "").strip()
+    clock_raw = str(q.get("last_timedate") or "").strip()
+    et_date = None
+    m_iso = re.search(r"(\d{4})-(\d{2})-(\d{2})", date_raw)
+    if m_iso:
+        try:
+            et_date = datetime(
+                int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3)), tzinfo=_US_TZ
+            ).date()
         except ValueError:
             et_date = None
     if et_date is None:
-        m2 = re.search(r"(\d{4})-(\d{2})-(\d{2})", timedate)
-        if m2:
+        m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{2,4})", clock_raw)
+        if m:
+            mm, dd, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if yy < 100:
+                yy += 2000
             try:
-                et_date = datetime(
-                    int(m2.group(1)), int(m2.group(2)), int(m2.group(3)), tzinfo=_US_TZ
-                ).date()
+                et_date = datetime(yy, mm, dd, tzinfo=_US_TZ).date()
             except ValueError:
                 et_date = None
-    st = (status or str(ext.get("type") or "")).upper()
-    if "PRE" in st:
-        hour = 8
-    elif "POST" in st:
-        hour = 20
-    else:
-        hour = 16
     if et_date is None:
         return None, None
-    dt_et = datetime(
-        et_date.year, et_date.month, et_date.day, hour, 0, 0, tzinfo=_US_TZ
-    )
+    age_days = (datetime.now(_US_TZ).date() - et_date).days
+    if age_days > 3:
+        return None, None
+    dt_et = datetime(et_date.year, et_date.month, et_date.day, 16, 0, 0, tzinfo=_US_TZ)
     return (
         dt_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         dt_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -918,13 +1008,18 @@ def _cnbc_quote_times(ext: dict[str, Any], status: str) -> tuple[str | None, str
 
 
 def _parse_cnbc_formatted_quote(q: dict[str, Any], symbol: str) -> dict[str, Any] | None:
-    """解析 CNBC FormattedQuote；优先 ExtendedMktQuote（盘前/盘后）。"""
+    """解析 CNBC FormattedQuote。
+
+    CNBC 无 ATS 夜盘：PRE/POST(/PREV) 用扩展价；否则常规收盘。
+    夜盘窗无免费 ATS 源，POST(/PREV) 作盘后回退。
+    """
     ext = q.get("ExtendedMktQuote") or {}
-    status = str(q.get("curmktstatus") or ext.get("type") or "").upper()
+    status = str(q.get("curmktstatus") or "").upper()
+    ext_type = str(ext.get("type") or "").upper()
+    combined = f"{status} {ext_type}"
     reg_last = _cnbc_parse_price(q.get("last"))
     reg_chgp = _cnbc_parse_pct(q.get("change_pct"))
     ext_last = _cnbc_parse_price(ext.get("last") or ext.get("Last"))
-    # 昨收：用常规涨跌反推，避免 previous_day_closing 在收盘后被改成当日收盘
     prior = None
     if reg_last is not None and reg_chgp is not None and abs(reg_chgp + 100) > 1e-6:
         prior = reg_last / (1.0 + reg_chgp / 100.0)
@@ -934,7 +1029,7 @@ def _parse_cnbc_formatted_quote(q: dict[str, Any], symbol: str) -> dict[str, Any
     price = None
     change_pct = None
     use_ext = bool(ext_last) and (
-        "PRE" in status or "POST" in status or status in ("CLOSED", "")
+        "PRE" in combined or "POST" in combined or status in ("CLOSED", "")
     )
     if use_ext and ext_last and prior and prior > 0:
         price = ext_last
@@ -942,14 +1037,19 @@ def _parse_cnbc_formatted_quote(q: dict[str, Any], symbol: str) -> dict[str, Any
     elif reg_last is not None:
         price = reg_last
         change_pct = reg_chgp if reg_chgp is not None else 0.0
+        use_ext = False
     elif ext_last is not None and prior and prior > 0:
         price = ext_last
         change_pct = (ext_last - prior) / prior * 100.0
+        use_ext = True
     if price is None or change_pct is None:
         return None
 
     vol = _cnbc_parse_price(ext.get("volume") or q.get("volume")) or 0.0
-    bj, et = _cnbc_quote_times(ext if use_ext else {}, status)
+    if use_ext:
+        bj, et = _cnbc_quote_times(ext, combined)
+    else:
+        bj, et = _cnbc_reg_close_times(q, ext)
     name = str(q.get("name") or q.get("shortName") or symbol)
     return _quote_row(
         symbol,
@@ -1510,9 +1610,8 @@ async def get_quotes_session_aware(
     """扩展时段优先会话价：CNBC → Yahoo → Finnhub/常规轮动。
 
     说明：
-    - 东财/Finnhub 夜盘常停在常规收盘，不宜作主源。
-    - 本路径**忽略** HEATMAP_SKIP_YAHOO（扩展时段必须有会话源）。
-    - Yahoo 易 429 时 CNBC ExtendedMktQuote 作稳定兜底。
+    - 盘前/盘后：用扩展价；夜盘窗(20:00–04:00)无免费 ATS 源，回退最近盘后价。
+    - 本路径**忽略** HEATMAP_SKIP_YAHOO。
     """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     if not uniq:
@@ -1521,7 +1620,7 @@ async def get_quotes_session_aware(
     sources_used: list[str] = []
     merged: dict[str, dict[str, Any]] = {}
 
-    # 1) CNBC 扩展时段（本地 Yahoo 常 429，先走更稳的会话源）
+    # 1) CNBC 扩展时段（盘前/盘后；夜盘窗亦作盘后回退）
     try:
         cnbc = await asyncio.wait_for(_fetch_cnbc_session_quotes(uniq), timeout=28.0)
     except Exception as exc:

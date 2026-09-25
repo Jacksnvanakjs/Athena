@@ -213,9 +213,12 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _market_phase(now: datetime | None = None) -> str:
     """美东时段：pre_open / rth / settle / overnight / closed。
 
-    settle=收盘后约 2 小时，日 K 与主线快照必须赶上，不可长期吃旧缓存。
-    周日 20:00 ET 起常见股票隔夜盘（通往周一），标为 overnight 而非 closed。
+    - settle=盘后 16:00–20:00（日 K 须赶上）
+    - overnight=夜盘 ATS 20:00–次日 04:00（含周日晚通往周一）
+    - pre_open=盘前 04:00–09:30
     """
+    from datetime import timedelta
+
     from app.utils import is_us_trading_day
 
     now = now or datetime.now(ET)
@@ -224,18 +227,27 @@ def _market_phase(now: datetime | None = None) -> str:
     else:
         now = now.astimezone(ET)
     mins = now.hour * 60 + now.minute
-    # 周日晚隔夜：不少券商 20:00 ET 起可交易，通往周一盘前
-    if now.weekday() == 6 and mins >= 20 * 60:
-        return "overnight"
+    wd = now.weekday()
+
+    # 夜盘 ATS：20:00–04:00（跨午夜）
+    if mins >= 20 * 60:
+        if wd == 6 or is_us_trading_day(now.date()):
+            return "overnight"
+        return "closed"
+    if mins < 4 * 60:
+        yday = now.date() - timedelta(days=1)
+        # 交易日凌晨 / 周五夜盘延至周六凌晨 / 周日夜盘延至周一凌晨
+        if is_us_trading_day(now.date()) or is_us_trading_day(yday) or yday.weekday() == 6:
+            return "overnight"
+        return "closed"
+
     if not is_us_trading_day(now.date()):
         return "closed"
     if mins < 9 * 60 + 30:
         return "pre_open"
     if mins < 16 * 60:
         return "rth"
-    if mins < 18 * 60:
-        return "settle"
-    return "overnight"
+    return "settle"
 
 
 def _payload_trade_date(payload: dict[str, Any] | None) -> date | None:
@@ -326,7 +338,7 @@ def _session_tip(phase: str) -> str:
     if phase == "settle":
         return "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
     if phase == "overnight":
-        return "隔夜/周末夜盘已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
+        return "夜盘时段暂无免费 ATS 源，1D 回退盘后价；5D/20D 与主线判定沿用日线快照。"
     if phase == "rth":
         return "盘中已刷新 1D 报价；5D/20D 与主线判定沿用日线快照。"
     return "5D/20D 与主线判定沿用日线快照。"
@@ -420,8 +432,8 @@ async def _overlay_live_1d(
     out["as_of"] = _as_of_iso()
     out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
     qtimes = _quote_data_times(quotes)
-    # 扩展时段：丢掉「美东16:00/北京04:00」收盘印记，避免伪装成实时
-    if phase != "rth":
+    # 盘前/盘后/夜盘：丢掉常规收盘印记，避免把 16:00 当成扩展/夜盘实时
+    if phase in ("pre_open", "settle", "overnight"):
         from app.heatmap import _quote_looks_like_rth_close
 
         session_quotes = {
@@ -433,7 +445,6 @@ async def _overlay_live_1d(
             qtimes = {"data_time_1d_bj": None, "data_time_1d_et": None}
     out.update(qtimes)
     out.update(_daily_session_close_times(out.get("trade_date")))
-    # 有行情但源没给 quote_time 时，绝不能回落到「美东收盘→北京次日04:00」
     if not out.get("data_time_1d_bj") and not out.get("data_time_1d_et"):
         out["data_time_1d_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M:%S")
         out["data_time_1d_et"] = datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -441,7 +452,9 @@ async def _overlay_live_1d(
     else:
         out["data_time_1d_source"] = "live_quote"
     out["live_1d"] = True
-    if "rth_stamp_heavy" in str(src) and phase != "rth":
+    if phase == "overnight":
+        out["live_1d_note"] = "夜盘时段暂无免费 ATS 源，当前为盘后回退价"
+    elif "rth_stamp_heavy" in str(src) and phase in ("pre_open", "settle", "overnight"):
         out["live_1d_note"] = "扩展时段会话源偏弱，部分报价仍可能停在常规收盘"
     else:
         out.pop("live_1d_note", None)
@@ -460,6 +473,10 @@ async def _overlay_live_1d(
         "盘后已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "隔夜展示最近盘后/收盘 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
         "隔夜/周末夜盘已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "隔夜已刷新 1D 夜盘主会话（常规收盘相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "夜盘(ATS)已刷新 1D（相对昨收）；5D/20D 与主线判定沿用日线快照。",
+        "暂无 ATS 夜盘源，1D 回退盘后价；配置 TIINGO_API_KEY(BOATS) 后可拉真夜盘。5D/20D 沿用日线快照。",
+        "夜盘时段暂无免费 ATS 源，1D 回退盘后价；5D/20D 与主线判定沿用日线快照。",
         "1D 即时行情暂无返回，仍展示上一版",
     ):
         note = note.replace(old, "").strip()
