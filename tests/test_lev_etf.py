@@ -10,6 +10,21 @@ from app.lev_etf.aggregate import (
     to_daily_points,
 )
 from app.lev_etf.basket import all_tickers, load_basket
+from app.lev_etf.fetch_ohlcv import _parse_stooq_csv
+
+
+def test_parse_stooq_csv_with_volume():
+    text = (
+        "Date,Open,High,Low,Close,Volume\n"
+        "2026-06-02,49,51,48,50,10000000\n"
+        "2026-06-03,50,52,49,51,12000000\n"
+        "bad,x,x,x,x,x\n"
+    )
+    bars = _parse_stooq_csv(text)
+    assert bars == [
+        (date(2026, 6, 2), 50.0, 10_000_000.0),
+        (date(2026, 6, 3), 51.0, 12_000_000.0),
+    ]
 
 
 def test_basket_has_tech_tickers():
