@@ -882,6 +882,12 @@
     let mainlinePollTimer = null;
 
     function mainlinePollMs(data) {
+      // 1D 未就绪：快轮询，禁止长时间挂着陈旧「最新」印记
+      if (data && data['1d_pending']) return 4000;
+      if (data && data['1d_fresh'] === false && (data.session_phase === 'pre_open'
+          || data.session_phase === 'rth' || data.session_phase === 'settle')) {
+        return 4000;
+      }
       const phase = (data && data.session_phase) || '';
       // 前端配合后端：盘前/盘中更勤；切换窗口后端会 30s 重拉
       if (phase === 'pre_open' || phase === 'rth') return 45000;
@@ -1119,6 +1125,7 @@
       const asOf = data.trade_date || '';
       const src = data.data_time_1d_source || '';
       const live = !!data.live_1d;
+      const pending = !!data['1d_pending'] || data['1d_fresh'] === false;
       const phase = data.session_phase || '';
       const d1bj = data.data_time_1d_bj || '';
       const d1et = data.data_time_1d_et || '';
@@ -1133,6 +1140,14 @@
       const closeLike = !extLive && (
         src === 'session_close' || (!live && sameAsClose) || rthCloseStamp || /16:0\d/.test(String(d1et))
       );
+      // 未就绪：宁可「拉取中」，也不展示滞后印记当最新
+      if (pending && (phase === 'pre_open' || phase === 'rth' || phase === 'settle' || extPhase)) {
+        const note = (data.live_1d_note || '').trim();
+        return {
+          label: note ? `最新1D拉取中（${note}）` : '最新1D拉取中…',
+          tip: note || '自动检测：印记非最新，正在重拉会话价',
+        };
+      }
       // 有有效最新 1D 印记：只展示数据时刻，不强调盘前/盘后标签
       if (live && d1bj && !closeLike) {
         return {
@@ -1288,8 +1303,10 @@
       m.push(`AI基准5D ${bench.ret_5d != null ? (bench.ret_5d > 0 ? '+' : '') + Number(bench.ret_5d).toFixed(1) + '%' : '—'}`);
       const timeDisp = mainlineDataTimeDisplay(data);
       m.push(`<span title="${escapeAttr(timeDisp.tip)}">${timeDisp.label}</span>`);
-      if (data.live_1d) m.push('1D实时');
-      else if (data.live_1d_note) m.push(`<span title="${escapeAttr(data.live_1d_note)}">1D未刷新</span>`);
+      if (data.live_1d && data['1d_fresh'] !== false) m.push('1D实时');
+      else if (data['1d_pending'] || data.live_1d_note) {
+        m.push(`<span title="${escapeAttr(data.live_1d_note || '正在拉取最新1D')}">1D拉取中</span>`);
+      }
       if (data.stale) m.push('缓存快照');
       metrics.innerHTML = m.join(' ｜ ');
       summary.textContent = [

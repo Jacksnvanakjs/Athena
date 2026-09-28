@@ -107,6 +107,45 @@ def test_strip_clears_rth_stamp_in_pre():
     assert out.get("live_1d") is False
 
 
+def test_strip_clears_lagging_pre_open_stamp():
+    """盘前挂着数小时前的印记必须清掉，禁止当最新展示。"""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from app.ai_mainline.pipeline import (
+        _1d_lag_too_large,
+        _mark_1d_pending,
+        _strip_stale_1d_fields,
+    )
+
+    et = ZoneInfo("America/New_York")
+    now = datetime.now(et)
+    lag_et = now - timedelta(minutes=30)
+    bj = ZoneInfo("Asia/Shanghai")
+    lag_bj = lag_et.astimezone(bj)
+    payload = {
+        "success": True,
+        "enabled": True,
+        "status": "emerging",
+        "live_1d": True,
+        "session_phase": "pre_open",
+        "data_time_1d_bj": lag_bj.strftime("%Y-%m-%d %H:%M:%S"),
+        "data_time_1d_et": lag_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "themes": [],
+        "primary": None,
+    }
+    assert _1d_lag_too_large(payload, "pre_open") is True
+    stripped = _strip_stale_1d_fields(payload, phase="pre_open")
+    assert stripped.get("data_time_1d_bj") is None
+    assert stripped.get("live_1d") is False
+    assert stripped.get("1d_pending") is True
+    marked = _mark_1d_pending(payload, note="test")
+    assert marked.get("live_1d") is False
+    assert marked.get("1d_fresh") is False
+    assert marked.get("data_time_1d_bj") is None
+
+
+
 def test_quote_data_times_picks_latest_parsed():
     from app.ai_mainline.pipeline import _parse_member_quote_dt, _quote_data_times
 

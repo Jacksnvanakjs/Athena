@@ -225,7 +225,27 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         return payload
     out = dict(payload)
     # 出口时刻以当前时段为准，避免缓存仍挂 overnight 而页面已是盘前
-    out["session_phase"] = _market_phase()
+    phase = _market_phase()
+    out["session_phase"] = phase
+    # 安全网：任何路径都不得把滞后印记标成「最新1D」
+    if _live_1d_active(phase):
+        if out.get("live_1d") and _1d_lag_too_large(out, phase):
+            out = _mark_1d_pending(
+                _strip_stale_1d_fields(out, phase=phase),
+                note="1D 印记滞后，正在拉取最新…",
+            )
+        elif out.get("1d_pending"):
+            out["1d_fresh"] = False
+            out["live_1d"] = False
+        elif out.get("live_1d"):
+            out["1d_fresh"] = True
+            out["1d_pending"] = False
+        else:
+            out["1d_fresh"] = False
+            out["1d_pending"] = True
+    else:
+        out["1d_fresh"] = True
+        out["1d_pending"] = False
     _sync_primary_from_themes(out)
     out["pulse_1d"] = _compute_pulse_1d(out.get("themes") or [])
     out["pulse_1d_weak"] = _is_1d_weak(out.get("primary"))
@@ -499,11 +519,16 @@ def _strip_stale_1d_fields(
     # 盘前/盘后：常规收盘印记一律清掉（勿继续展示为当前 1D）
     if phase in ("pre_open", "settle") and _quote_looks_like_rth_close(stamp):
         clear = True
+    # 印记相对当前时段已滞后：禁止继续展示为「最新1D」
+    if phase and phase in ("pre_open", "rth", "settle") and _1d_lag_too_large(out, phase):
+        clear = True
     if clear:
         out["data_time_1d_bj"] = None
         out["data_time_1d_et"] = None
         out["data_time_1d_source"] = None
         out["live_1d"] = False
+        out["1d_fresh"] = False
+        out["1d_pending"] = True
     themes_out: list[dict[str, Any]] = []
     for theme in out.get("themes") or []:
         row = dict(theme)
@@ -578,8 +603,24 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
         return lag > 120
     if phase == "settle":
         return lag > 180
-    # overnight：允许挂昨盘后数小时，只拦极端过期
-    return lag > 60 * 60 * 48
+    # overnight：夜盘无连续成交时印记可停数小时，但仍拦「半日以上」陈旧缓存
+    return lag > 60 * 60 * 6
+
+
+def _mark_1d_pending(
+    payload: dict[str, Any], *, note: str | None = None
+) -> dict[str, Any]:
+    """出口态：不宣称 live，强制前端快轮询，绝不把滞后印记标成最新。"""
+    out = dict(payload)
+    out["live_1d"] = False
+    out["1d_fresh"] = False
+    out["1d_pending"] = True
+    out["data_time_1d_bj"] = None
+    out["data_time_1d_et"] = None
+    out["data_time_1d_source"] = None
+    msg = (note or out.get("live_1d_note") or "1D 正在拉取最新报价…").strip()
+    out["live_1d_note"] = msg
+    return out
 
 
 def _needs_1d_refresh(
@@ -596,6 +637,8 @@ def _needs_1d_refresh(
         return False, ""
     if not payload:
         return True, "no_payload"
+    if payload.get("1d_pending"):
+        return True, "pending"
     if not payload.get("live_1d"):
         return True, "no_live"
     prev = payload.get("session_phase")
@@ -632,6 +675,7 @@ async def _overlay_live_1d(
 
     返回 (payload, ok)。ok=False 时调用方不要推进 quote_ts，以便尽快重试。
     夜盘无 ATS 时用夜盘前最新盘后价；失败则清掉过期时间戳，不继续挂旧印记。
+    行情源若仍返回滞后印记，一律 ok=False，禁止把陈旧戳标成 live。
     """
     import asyncio
 
@@ -644,19 +688,19 @@ async def _overlay_live_1d(
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)
         out = _strip_stale_1d_fields(dict(payload), phase=phase)
-        out["live_1d"] = False
-        msg = f"1D 即时行情暂未刷新（{type(exc).__name__}）"
-        out["live_1d_note"] = msg
+        out = _mark_1d_pending(
+            out, note=f"1D 即时行情暂未刷新（{type(exc).__name__}）"
+        )
         base_note = (out.get("note") or "").strip()
+        msg = out["live_1d_note"]
         if msg not in base_note:
             out["note"] = f"{base_note} {msg}".strip() if base_note else msg
         return out, False
     if not quotes:
         out = _strip_stale_1d_fields(dict(payload), phase=phase)
-        out["live_1d"] = False
-        msg = "1D 即时行情暂无返回，仍展示上一版"
-        out["live_1d_note"] = msg
+        out = _mark_1d_pending(out, note="1D 即时行情暂无返回，正在重试")
         base_note = (out.get("note") or "").strip()
+        msg = out["live_1d_note"]
         if msg not in base_note:
             out["note"] = f"{base_note} {msg}".strip() if base_note else msg
         return out, False
@@ -664,14 +708,12 @@ async def _overlay_live_1d(
     use_quotes, qkind = _filter_quotes_for_1d(quotes, phase)
     if not use_quotes:
         out = _strip_stale_1d_fields(dict(payload), phase=phase)
-        out["live_1d"] = False
         msg = (
             "盘前/盘后暂无扩展价，已拒绝常规收盘印记，待下一轮刷新"
             if qkind == "no_ext"
             else "1D 行情印记过期，已丢弃，待下一轮刷新"
         )
-        out["live_1d_note"] = msg
-        return out, False
+        return _mark_1d_pending(out, note=msg), False
 
     out = dict(payload)
     themes_out: list[dict[str, Any]] = []
@@ -730,6 +772,20 @@ async def _overlay_live_1d(
     else:
         out["data_time_1d_source"] = "live_quote"
     out["live_1d"] = True
+    out["1d_fresh"] = True
+    out["1d_pending"] = False
+    # 源端印记仍滞后：不算成功，清掉假「最新」戳，留给重试
+    if phase in ("pre_open", "rth", "settle") and _1d_lag_too_large(out, phase):
+        logger.info(
+            "mainline 1d overlay lagging stamps phase=%s bj=%s et=%s",
+            phase,
+            out.get("data_time_1d_bj"),
+            out.get("data_time_1d_et"),
+        )
+        return (
+            _mark_1d_pending(out, note="行情源印记滞后，正在重拉最新1D…"),
+            False,
+        )
     if phase == "overnight":
         out["live_1d_note"] = (
             "夜盘无免费 ATS，已用夜盘前最新盘后价"
@@ -774,6 +830,31 @@ async def _overlay_live_1d(
     out["note"] = f"{note} {tip}".strip() if note else tip
     out["success"] = True
     return out, True
+
+
+async def _overlay_until_fresh(
+    payload: dict[str, Any],
+    *,
+    phase: str,
+    attempts: int = 2,
+) -> tuple[dict[str, Any], bool]:
+    """首屏前尽量拿到非滞后 1D；失败则 pending，绝不把旧戳当最新。"""
+    import asyncio
+
+    last = payload
+    ok = False
+    for i in range(max(1, attempts)):
+        last, ok = await _overlay_live_1d(last, phase=phase)
+        if ok:
+            return last, True
+        if i + 1 < attempts:
+            await asyncio.sleep(0.6)
+    if not last.get("1d_pending"):
+        last = _mark_1d_pending(
+            _strip_stale_1d_fields(dict(last), phase=phase),
+            note=last.get("live_1d_note") or "1D 正在拉取最新报价…",
+        )
+    return last, False
 
 
 def _theme_name_map() -> dict[str, str]:
@@ -1120,11 +1201,18 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                     reason,
                     quote_age,
                 )
-                overlaid, ok = await _overlay_live_1d(cached, phase=phase)
+                overlaid, ok = await _overlay_until_fresh(
+                    cached, phase=phase, attempts=2
+                )
                 _CACHE["data"] = overlaid
                 _CACHE["phase"] = phase
                 if ok:
                     _CACHE["quote_ts"] = now
+                else:
+                    # 失败不推进 quote_ts，下次请求立刻再拉
+                    _CACHE["quote_ts"] = min(
+                        float(_CACHE.get("quote_ts") or 0), now - 1e9
+                    )
                 return _finalize_payload(overlaid)
             return _finalize_payload(cached)
 
@@ -1138,9 +1226,11 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                         phase,
                         reason,
                     )
-                out, ok = await _overlay_live_1d(base, phase=phase)
+                out, ok = await _overlay_until_fresh(base, phase=phase, attempts=2)
                 if ok:
                     _CACHE["quote_ts"] = now
+                else:
+                    _CACHE["quote_ts"] = 0.0
             elif out is db_payload and out is not None:
                 out = dict(out)
                 out["note"] = (out.get("note") or "") or (
@@ -1228,9 +1318,11 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
 
     _CACHE["ts"] = now
     if _live_1d_active(phase):
-        payload, ok = await _overlay_live_1d(payload, phase=phase)
+        payload, ok = await _overlay_until_fresh(payload, phase=phase, attempts=2)
         if ok:
             _CACHE["quote_ts"] = now
+        else:
+            _CACHE["quote_ts"] = 0.0
     else:
         _CACHE["quote_ts"] = now
     _CACHE["data"] = payload
