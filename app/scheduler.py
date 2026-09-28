@@ -82,16 +82,27 @@ async def scheduled_period_daily_closes():
 
 
 async def scheduled_lev_etf_tech():
-    """美东收盘后更新科技杠杆 ETF 日度/月度名义成交额。"""
+    """美东收盘后/盘中更新科技杠杆 ETF 日度/月度名义成交额。
+
+    非交易日若数据已落后最近已收盘日，仍补跑（避免周五失败后周末一直停）。
+    """
     if not LEV_ETF_TECH_ENABLED:
         return
-    if not is_us_trading_day():
-        logger.info("非美股交易日，跳过杠杆ETF成交额更新")
-        return
-    from app.lev_etf.pipeline import run_lev_etf_update
+    from app.lev_etf.pipeline import (
+        _needs_lev_update,
+        _stored_daily_points,
+        _stored_monthly_points,
+        run_lev_etf_update,
+    )
 
-    logger.info("开始更新科技杠杆ETF成交额...")
-    result = await run_lev_etf_update(force_full=False)
+    need, force_full = _needs_lev_update(
+        _stored_daily_points(), _stored_monthly_points()
+    )
+    if not need and not is_us_trading_day():
+        logger.info("非美股交易日且杠杆ETF已新，跳过")
+        return
+    logger.info("开始更新科技杠杆ETF成交额 (need=%s force_full=%s)...", need, force_full)
+    result = await run_lev_etf_update(force_full=force_full)
     logger.info("科技杠杆ETF成交额更新完成: %s", result)
 
 
@@ -288,6 +299,16 @@ def start_scheduler():
                 max_instances=1,
                 coalesce=True,
             )
+        # 兜底：每小时检查一次，部署/限流漏跑后自动追上
+        scheduler.add_job(
+            scheduled_lev_etf_tech,
+            IntervalTrigger(hours=1),
+            id="lev_etf_tech_hourly",
+            replace_existing=True,
+            next_run_time=datetime.now() + timedelta(minutes=2),
+            max_instances=1,
+            coalesce=True,
+        )
     scheduler.add_job(
         scheduled_deal_poll,
         IntervalTrigger(minutes=DEAL_POLL_INTERVAL_MIN),
@@ -396,7 +417,7 @@ def start_scheduler():
         "开启" if NVDA_SIGNAL_ENABLED else "关闭",
         "开启" if EARNINGS_MONITOR_ENABLED else "关闭",
         "开启" if AI_MAINLINE_ENABLED else "关闭",
-        "美东12:30/15:45/16:20/17:45/19:30" if LEV_ETF_TECH_ENABLED else "关闭",
+        "美东多档+每小时兜底" if LEV_ETF_TECH_ENABLED else "关闭",
         f"每{SELF_HEAL_INTERVAL_MIN}分钟" if SELF_HEAL_ENABLED else "关闭",
     )
 

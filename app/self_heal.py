@@ -26,7 +26,7 @@ _MIN_GAP = {
     "deal_rescore": timedelta(hours=6),
     "earnings_calendar": timedelta(minutes=45),
     "deal_poll": timedelta(minutes=max(5, DEAL_POLL_INTERVAL_MIN)),
-    "lev_etf_tech": timedelta(hours=12),
+    "lev_etf_tech": timedelta(minutes=20),
 }
 
 

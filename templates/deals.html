@@ -2229,7 +2229,7 @@
         if (levChart) { levChart.destroy(); levChart = null; }
         canvas.style.display = 'none';
         empty.style.display = 'block';
-        empty.textContent = '回填未完成（行情源限流或抓取失败）。稍后刷新，或在本页点「立即扫描」；杠杆ETF已与主线并行更新。';
+        empty.textContent = '正在自动回填杠杆ETF成交额，稍后会自动刷新…';
         return;
       }
       empty.style.display = 'none';
@@ -2362,10 +2362,16 @@
           levMeta.as_of_date = dayData.as_of_date || monthData.as_of_date;
         }
         refreshLevView();
-        const loading = (dayData.loading && !levDailyPoints.length) ||
-          (monthData.loading && !levMonthlyPoints.length);
-        if (loading) {
-          setTimeout(() => { if (currentTab === 'mainline') loadLevEtf(); }, 12000);
+        const needsPoll = !!(dayData.loading || dayData.stale || monthData.loading || monthData.stale);
+        if (needsPoll) {
+          const note = dayData.note || monthData.note;
+          if (note && levDailyPoints.length) {
+            const el = document.getElementById('levStats');
+            if (el && !el.innerHTML.includes('自动补')) {
+              el.innerHTML += `<span class="hint">${note}</span>`;
+            }
+          }
+          setTimeout(() => { if (currentTab === 'mainline') loadLevEtf(); }, 8000);
         }
       } catch (e) {
         empty.style.display = 'block';
@@ -2387,7 +2393,7 @@
           ? (levDailyPoints.length ? levDailyPoints[levDailyPoints.length - 1].date : null)
           : (levMonthlyPoints.length ? levMonthlyPoints[levMonthlyPoints.length - 1].as_of_date : null),
         note: (!filterLevPoints().length)
-          ? '回填任务未完成或进行中，请稍后刷新。'
+          ? '正在自动回填，请稍候…'
           : null,
       };
       refreshLevView();

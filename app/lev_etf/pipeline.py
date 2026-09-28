@@ -138,7 +138,7 @@ def _empty_loading_payload(year_key: str, granularity: str) -> dict[str, Any]:
         "points": [],
         "stats": {"min": None, "max": None, "latest": None},
         "available_years": [],
-        "note": "回填任务未完成或进行中，请稍后刷新。",
+        "note": "正在自动回填历史成交额，请稍候自动刷新…",
         "ticker_count": len(all_tickers(basket)),
         "loading": True,
     }
@@ -384,50 +384,115 @@ def get_tech_meta() -> dict[str, Any]:
     }
 
 
+def _daily_last_date(points: list[dict] | None) -> date | None:
+    if not points:
+        return None
+    raw = (points[-1] or {}).get("date") or (points[-1] or {}).get("as_of_date")
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(str(raw)[:10])
+    except ValueError:
+        return None
+
+
+def _needs_lev_update(daily: list[dict] | None, monthly: list[dict] | None) -> tuple[bool, bool]:
+    """是否需要更新、是否全量。按美东已收盘交易日判定，落后一天也补。"""
+    from app.utils import is_us_trading_day, last_completed_us_session
+
+    if not daily and not monthly:
+        return True, True
+    if not daily:
+        return True, True
+    last = _daily_last_date(daily)
+    if last is None:
+        return True, True
+    expected = last_completed_us_session()
+    if last < expected:
+        return True, False
+    # 交易日盘中：已有昨收但尚无今日点 → 后台尽量写入盘中暂估
+    today = _today_et()
+    now = datetime.now(ET)
+    if (
+        is_us_trading_day(today)
+        and last < today
+        and (now.hour > 10 or (now.hour == 10 and now.minute >= 0))
+        and now.hour < 20
+    ):
+        return True, False
+    return False, False
+
+
 def _maybe_kick_background_update(*, prefer_full: bool = False) -> None:
-    """无数据或过旧时后台补数，不堵 API。"""
+    """无数据或落后美东已收盘日时后台补数；同步 API 线程也能启动。"""
     global _BG_STARTED
     monthly = _stored_monthly_points()
     daily = _stored_daily_points()
-    need = False
-    force_full = prefer_full or (bool(monthly) and not daily)
-    if not monthly and not daily:
-        need = True
+    need, force_full = _needs_lev_update(daily, monthly)
+    if prefer_full:
         force_full = True
-    elif not daily:
-        need = True
-        force_full = True
-    else:
-        as_of = daily[-1].get("date") or (
-            monthly[-1].get("as_of_date") if monthly else None
-        )
-        try:
-            last = date.fromisoformat(str(as_of)[:10]) if as_of else None
-        except ValueError:
-            last = None
-        if last is None or last < _today_et() - timedelta(days=5):
-            need = True
-    if not need:
+    if not need and not prefer_full:
         return
     with _BG_LOCK:
         if _BG_STARTED:
             return
         _BG_STARTED = True
 
-    async def _run() -> None:
+    async def _run_async() -> None:
         global _BG_STARTED
         try:
             await run_lev_etf_update(force_full=force_full)
+        except Exception:
+            logger.exception("lev-etf background update failed")
+        finally:
+            with _BG_LOCK:
+                _BG_STARTED = False
+
+    def _run_thread() -> None:
+        global _BG_STARTED
+        try:
+            asyncio.run(run_lev_etf_update(force_full=force_full))
+        except Exception:
+            logger.exception("lev-etf background thread update failed")
         finally:
             with _BG_LOCK:
                 _BG_STARTED = False
 
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_run())
+        loop.create_task(_run_async())
+        logger.info(
+            "lev-etf background task queued (async) force_full=%s", force_full
+        )
     except RuntimeError:
-        with _BG_LOCK:
-            _BG_STARTED = False
+        threading.Thread(
+            target=_run_thread, name="lev-etf-bg", daemon=True
+        ).start()
+        logger.info(
+            "lev-etf background task started (thread) force_full=%s", force_full
+        )
+
+
+def _annotate_stale(payload: dict[str, Any], stored: list[dict]) -> dict[str, Any]:
+    """旧数据照常返回，同时标记 stale 并触发后台补数。"""
+    from app.utils import last_completed_us_session
+
+    need, _ff = _needs_lev_update(stored, _stored_monthly_points())
+    if not need:
+        payload["stale"] = False
+        payload["loading"] = False
+        return payload
+    _maybe_kick_background_update(prefer_full=False)
+    expected = last_completed_us_session()
+    last = _daily_last_date(stored)
+    payload["stale"] = True
+    payload["loading"] = True
+    payload["expected_as_of"] = expected.isoformat()
+    payload["note"] = (
+        f"数据截至 {last.isoformat() if last else '—'}，"
+        f"正在自动补到 {expected.isoformat()}（美东已收盘日）…"
+    )
+    return payload
 
 
 def _get_series_payload(
@@ -449,7 +514,7 @@ def _get_series_payload(
         and now - float(mem.get("ts") or 0) < _MEM_TTL_SEC
         and cached.get("_all_points") is not None
     ):
-        return _payload_from_points(
+        out = _payload_from_points(
             cached["_all_points"],
             granularity=granularity,
             year_filter=year_key,
@@ -457,26 +522,25 @@ def _get_series_payload(
             updated_at=cached.get("updated_at"),
             note=cached.get("note"),
         )
+        return _annotate_stale(out, cached["_all_points"])
 
     if not stored:
         _maybe_kick_background_update(prefer_full=(granularity == "day"))
         return _empty_loading_payload(year_key, granularity)
 
-    _maybe_kick_background_update(
-        prefer_full=(granularity == "day" and len(stored) < 20)
-    )
     payload = _payload_from_points(stored, granularity=granularity, year_filter="all")
     mem_payload = dict(payload)
     mem_payload["_all_points"] = stored
     mem["payload"] = mem_payload
     mem["ts"] = now
-    return _payload_from_points(
+    out = _payload_from_points(
         stored,
         granularity=granularity,
         year_filter=year_key,
         as_of_date=payload.get("as_of_date"),
         updated_at=payload.get("updated_at"),
     )
+    return _annotate_stale(out, stored)
 
 
 def get_monthly_payload(*, year: str = "all") -> dict[str, Any]:
