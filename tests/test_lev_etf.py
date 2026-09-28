@@ -83,3 +83,14 @@ def test_daily_and_monthly_aggregate():
     assert stats["max"]["month"] in {"2026-06", "2026-09"}
     day_stats = build_stats(day_pts)
     assert day_stats["latest"]["date"] == "2026-09-02"
+
+
+def test_daily_partial_flag():
+    daily = {
+        date(2026, 9, 25): 1e9,
+        date(2026, 9, 28): 0.5e9,
+    }
+    pts = to_daily_points(daily, partial_date=date(2026, 9, 28))
+    assert pts[0]["is_partial"] is False
+    assert pts[1]["is_partial"] is True
+    assert pts[1]["date"] == "2026-09-28"

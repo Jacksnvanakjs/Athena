@@ -37,8 +37,12 @@ def to_daily_points(
     daily: dict[date, float],
     *,
     start_date: date | None = None,
+    partial_date: date | None = None,
 ) -> list[dict]:
-    """日度名义成交额序列（十亿美元）。"""
+    """日度名义成交额序列（十亿美元）。
+
+    ``partial_date``：将该日标为未完结（盘中/未收盘），供 UI 加 *。
+    """
     points: list[dict] = []
     for d, usd in sorted(daily.items()):
         if start_date and d < start_date:
@@ -51,6 +55,7 @@ def to_daily_points(
                 "date": d.isoformat(),
                 "notional_usd": round(usd_f, 2),
                 "notional_bn": round(usd_f / 1e9, 3),
+                "is_partial": bool(partial_date and d == partial_date),
             }
         )
     return points

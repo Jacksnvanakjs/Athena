@@ -378,11 +378,13 @@ async def run_self_heal(*, force: bool = False) -> dict:
                         if as_of:
                             from datetime import date as date_cls
 
+                            from app.utils import last_completed_us_session
+
                             try:
                                 last = date_cls.fromisoformat(str(as_of)[:10])
-                                stale = last < (
-                                    datetime.now(timezone.utc).date() - timedelta(days=5)
-                                )
+                                # 落后于「最近已收盘美东交易日」即视为过旧（不受中国假日影响）
+                                expected = last_completed_us_session()
+                                stale = last < expected
                             except ValueError:
                                 stale = True
                         else:
@@ -396,7 +398,8 @@ async def run_self_heal(*, force: bool = False) -> dict:
                         result = await run_lev_etf_update(
                             force_full=force_full or not d_pts
                         )
-                        _mark_ran("lev_etf_tech")
+                        if result.get("success"):
+                            _mark_ran("lev_etf_tech")
                         actions.append(
                             {
                                 "action": "lev_etf_tech",
@@ -409,6 +412,8 @@ async def run_self_heal(*, force: bool = False) -> dict:
                                         "as_of_date",
                                         "symbols_ok",
                                         "elapsed_sec",
+                                        "partial_date",
+                                        "fetched_days",
                                     )
                                 },
                             }

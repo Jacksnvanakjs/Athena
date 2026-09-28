@@ -272,14 +272,22 @@ def start_scheduler():
             replace_existing=True,
         )
     if LEV_ETF_TECH_ENABLED:
-        scheduler.add_job(
-            scheduled_lev_etf_tech,
-            CronTrigger(hour=17, minute=45, timezone="America/New_York"),
-            id="lev_etf_tech_et_1745",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-        )
+        # 盘中补数 + 收盘后多档重试（按美东交易日，不受中国节假日影响）
+        for hh, mm, jid in (
+            (12, 30, "lev_etf_tech_et_1230"),
+            (15, 45, "lev_etf_tech_et_1545"),
+            (16, 20, "lev_etf_tech_et_1620"),
+            (17, 45, "lev_etf_tech_et_1745"),
+            (19, 30, "lev_etf_tech_et_1930"),
+        ):
+            scheduler.add_job(
+                scheduled_lev_etf_tech,
+                CronTrigger(hour=hh, minute=mm, timezone="America/New_York"),
+                id=jid,
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+            )
     scheduler.add_job(
         scheduled_deal_poll,
         IntervalTrigger(minutes=DEAL_POLL_INTERVAL_MIN),
@@ -388,7 +396,7 @@ def start_scheduler():
         "开启" if NVDA_SIGNAL_ENABLED else "关闭",
         "开启" if EARNINGS_MONITOR_ENABLED else "关闭",
         "开启" if AI_MAINLINE_ENABLED else "关闭",
-        "美东17:45" if LEV_ETF_TECH_ENABLED else "关闭",
+        "美东12:30/15:45/16:20/17:45/19:30" if LEV_ETF_TECH_ENABLED else "关闭",
         f"每{SELF_HEAL_INTERVAL_MIN}分钟" if SELF_HEAL_ENABLED else "关闭",
     )
 

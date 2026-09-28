@@ -498,7 +498,11 @@ def get_daily_payload(*, year: str = "all") -> dict[str, Any]:
 
 
 async def run_lev_etf_update(*, force_full: bool = False) -> dict[str, Any]:
-    """回填或增量更新日度 + 月度序列。"""
+    """回填或增量更新日度 + 月度序列。
+
+    增量时以已有序列为底、新抓取覆盖同日，避免行情失败时把近窗数据冲掉。
+    美东未收盘时若源返回「今日」K 线，会写入并标 is_partial。
+    """
     async with _UPDATE_LOCK:
         basket = load_basket()
         tickers = all_tickers(basket)
@@ -515,14 +519,39 @@ async def run_lev_etf_update(*, force_full: bool = False) -> dict[str, Any]:
         t0 = time.perf_counter()
         bars = await fetch_basket_ohlcv(tickers, start=lookback_start, end=today)
         daily_map = daily_basket_notional(bars)
-        fresh_daily = to_daily_points(daily_map, start_date=start)
+
+        # 盘中：今日未收盘则标 partial（有今日 bar 才标）
+        now_et = datetime.now(ET)
+        partial_date = None
+        if today in daily_map and (
+            now_et.hour < 16 or (now_et.hour == 16 and now_et.minute < 15)
+        ):
+            partial_date = today
+
+        fresh_daily = to_daily_points(
+            daily_map, start_date=start, partial_date=partial_date
+        )
+
+        if not fresh_daily and not existing_daily:
+            return {
+                "success": False,
+                "error": "no bars fetched",
+                "symbols_ok": len(bars),
+                "symbols_total": len(tickers),
+                "elapsed_sec": round(time.perf_counter() - t0, 1),
+            }
 
         if existing_daily and not need_full:
-            keep_before = lookback_start.isoformat()
-            kept = [p for p in existing_daily if str(p.get("date") or "") < keep_before]
-            daily_points = _merge_by_key(kept, fresh_daily, "date")
+            # 保留 lookback 窗内旧点，再用新抓取覆盖（失败时不丢近几日）
+            daily_points = _merge_by_key(existing_daily, fresh_daily, "date")
+            if start:
+                daily_points = [
+                    p
+                    for p in daily_points
+                    if str(p.get("date") or "") >= start.isoformat()
+                ]
         else:
-            daily_points = fresh_daily
+            daily_points = fresh_daily or existing_daily
 
         if not daily_points:
             return {
@@ -532,6 +561,14 @@ async def run_lev_etf_update(*, force_full: bool = False) -> dict[str, Any]:
                 "symbols_total": len(tickers),
                 "elapsed_sec": round(time.perf_counter() - t0, 1),
             }
+
+        if fresh_daily:
+            # 新抓取成功时：非 partial_date 的旧 is_partial 清掉
+            for p in daily_points:
+                if partial_date and p.get("date") == partial_date.isoformat():
+                    p["is_partial"] = True
+                elif p.get("date") != (partial_date.isoformat() if partial_date else None):
+                    p["is_partial"] = False
 
         full_daily_map = daily_points_to_map(daily_points)
         start_month = str(basket.get("start_month") or "2023-01")
@@ -571,6 +608,8 @@ async def run_lev_etf_update(*, force_full: bool = False) -> dict[str, Any]:
             "days": len(daily_points),
             "months": len(monthly_points),
             "as_of_date": daily_payload.get("as_of_date"),
+            "partial_date": partial_date.isoformat() if partial_date else None,
+            "fetched_days": len(fresh_daily),
             "db_upserted_daily": db_daily_n,
             "db_upserted": db_monthly_n,
             "elapsed_sec": round(time.perf_counter() - t0, 1),
