@@ -1125,12 +1125,13 @@
       const asOf = data.trade_date || '';
       const src = data.data_time_1d_source || '';
       const live = !!data.live_1d;
-      const pending = !!data['1d_pending'] || data['1d_fresh'] === false;
+      const pending = !!data['1d_pending'];
       const phase = data.session_phase || '';
       const d1bj = data.data_time_1d_bj || '';
       const d1et = data.data_time_1d_et || '';
       const dDbj = data.data_time_daily_bj || '';
       const dDet = data.data_time_daily_et || '';
+      const updatedBj = data.updated_bj || '';
       const sameAsClose = d1bj && dDbj && d1bj === dDbj;
       const extPhase = phase === 'pre_open' || phase === 'settle' || phase === 'overnight';
       // 北京次日 04:00 / 美东 16:00 = 常规收盘印记，扩展时段绝不当最新
@@ -1140,39 +1141,58 @@
       const closeLike = !extLive && (
         src === 'session_close' || (!live && sameAsClose) || rthCloseStamp || /16:0\d/.test(String(d1et))
       );
-      // 未就绪：宁可「拉取中」，也不展示滞后印记当最新
-      if (pending && (phase === 'pre_open' || phase === 'rth' || phase === 'settle' || extPhase)) {
-        const note = (data.live_1d_note || '').trim();
-        return {
-          label: note ? `最新1D拉取中（${note}）` : '最新1D拉取中…',
-          tip: note || '自动检测：印记非最新，正在重拉会话价',
-        };
+
+      function dailySnapshotLabel() {
+        const bj = dDbj || ((!live || closeLike) ? d1bj : '');
+        const et = dDet || ((!live || closeLike) ? d1et : '');
+        if (asOf) {
+          return {
+            label: `收盘快照：美东 ${asOf} 16:00${bj ? '（北京 ' + bj + '）' : ''}`,
+            tip: dataTimeTip(bj, et || (asOf + ' 16:00 ET'), '1d', 'session_close'),
+          };
+        }
+        if (bj || et) {
+          return {
+            label: `收盘快照${et ? '：' + et : ''}${bj ? '（北京 ' + bj + '）' : ''}`,
+            tip: dataTimeTip(bj, et, '1d', 'session_close'),
+          };
+        }
+        if (updatedBj) {
+          return {
+            label: `更新：北京 ${updatedBj}`,
+            tip: '页面/快照刷新时刻（北京）',
+          };
+        }
+        return null;
       }
-      // 有有效最新 1D 印记：只展示数据时刻，不强调盘前/盘后标签
-      if (live && d1bj && !closeLike) {
+
+      // 有效最新 1D：有 live 且非收盘假戳、非 pending
+      if (live && d1bj && !closeLike && !pending) {
         return {
           label: `最新1D：北京 ${d1bj}${d1et ? ' · ' + d1et : ''}`,
           tip: dataTimeTip(d1bj, d1et, '1d', src || 'live_quote'),
         };
       }
-      // 扩展时段：不要把日线收盘 BJ 04:00 当成当前 1D
-      if (extPhase && (!live || rthCloseStamp || closeLike)) {
+
+      const daily = dailySnapshotLabel();
+      // 1D 拉取中：仍展示日线/更新时刻，禁止只剩「—」
+      if (pending || (extPhase && (!live || rthCloseStamp || closeLike))) {
         const note = (data.live_1d_note || '').trim();
+        if (daily) {
+          return {
+            label: note
+              ? `最新1D拉取中 · ${daily.label}`
+              : `最新1D拉取中 · ${daily.label}`,
+            tip: [note || '正在重拉会话价', daily.tip].filter(Boolean).join('\n'),
+          };
+        }
         return {
           label: note ? `最新1D拉取中（${note}）` : '最新1D拉取中…',
           tip: note || '自动检测：印记非最新，正在重拉会话价',
         };
       }
-      const bj = d1bj || dDbj;
-      const et = d1et || dDet;
-      if (asOf || bj || et) {
-        return {
-          label: asOf
-            ? `收盘快照：美东 ${asOf} 16:00${bj ? '（北京换算 ' + bj + '）' : ''}`
-            : `收盘快照${et ? '：' + et : ''}${bj ? '（北京换算 ' + bj + '）' : ''}`,
-          tip: dataTimeTip(bj, et || (asOf ? asOf + ' 16:00 ET' : ''), '1d', 'session_close'),
-        };
-      }
+
+      if (daily) return daily;
       return { label: '数据时间：—', tip: '暂无数据时间' };
     }
 

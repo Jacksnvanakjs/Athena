@@ -227,6 +227,11 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     # 出口时刻以当前时段为准，避免缓存仍挂 overnight 而页面已是盘前
     phase = _market_phase()
     out["session_phase"] = phase
+    # 日线收盘时刻兜底：页面「数据更新时间」绝不能空白
+    if not out.get("data_time_daily_bj") and out.get("trade_date"):
+        out.update(_daily_session_close_times(out.get("trade_date")))
+    if not out.get("updated_bj"):
+        out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
     # 安全网：任何路径都不得把滞后印记标成「最新1D」
     if _live_1d_active(phase):
         if out.get("live_1d") and _1d_lag_too_large(out, phase):
@@ -243,6 +248,8 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             out["1d_fresh"] = False
             out["1d_pending"] = True
+            if not out.get("live_1d_note"):
+                out["live_1d_note"] = "1D 正在拉取最新报价…"
     else:
         out["1d_fresh"] = True
         out["1d_pending"] = False
@@ -529,6 +536,11 @@ def _strip_stale_1d_fields(
         out["live_1d"] = False
         out["1d_fresh"] = False
         out["1d_pending"] = True
+        # 清 1D 戳后补日线时刻，避免页面只剩「—」
+        if not out.get("data_time_daily_bj") and out.get("trade_date"):
+            out.update(_daily_session_close_times(out.get("trade_date")))
+        if not out.get("updated_bj"):
+            out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
     themes_out: list[dict[str, Any]] = []
     for theme in out.get("themes") or []:
         row = dict(theme)
@@ -610,14 +622,20 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
 def _mark_1d_pending(
     payload: dict[str, Any], *, note: str | None = None
 ) -> dict[str, Any]:
-    """出口态：不宣称 live，强制前端快轮询，绝不把滞后印记标成最新。"""
+    """出口态：不宣称 live，强制前端快轮询。
+
+    注意：不清空日线/已有印记字段——页面必须仍能展示「数据更新时间」；
+    仅把 live 关掉，由前端避免把滞后戳标成「最新1D」。
+    """
     out = dict(payload)
     out["live_1d"] = False
     out["1d_fresh"] = False
     out["1d_pending"] = True
-    out["data_time_1d_bj"] = None
-    out["data_time_1d_et"] = None
-    out["data_time_1d_source"] = None
+    # 确保日线收盘时刻可展示（1D 未就绪时的兜底）
+    if not out.get("data_time_daily_bj") and out.get("trade_date"):
+        out.update(_daily_session_close_times(out.get("trade_date")))
+    if not out.get("updated_bj"):
+        out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
     msg = (note or out.get("live_1d_note") or "1D 正在拉取最新报价…").strip()
     out["live_1d_note"] = msg
     return out

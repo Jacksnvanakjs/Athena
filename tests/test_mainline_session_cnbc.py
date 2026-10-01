@@ -139,10 +139,20 @@ def test_strip_clears_lagging_pre_open_stamp():
     assert stripped.get("data_time_1d_bj") is None
     assert stripped.get("live_1d") is False
     assert stripped.get("1d_pending") is True
-    marked = _mark_1d_pending(payload, note="test")
+    marked = _mark_1d_pending(
+        {
+            **payload,
+            "trade_date": "2026-09-30",
+            "data_time_daily_bj": None,
+        },
+        note="test",
+    )
     assert marked.get("live_1d") is False
     assert marked.get("1d_fresh") is False
-    assert marked.get("data_time_1d_bj") is None
+    assert marked.get("1d_pending") is True
+    # pending 时保留/补全日线时刻，页面不致只剩「—」
+    assert marked.get("data_time_daily_bj")
+    assert marked.get("updated_bj")
 
 
 
