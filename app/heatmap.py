@@ -2,10 +2,10 @@
 
 行情源（轮动补缺，宁缺勿错）：
   1. 东财 ulist 批量 ∥ Finnhub /quote
-  2. 轮动：TradingView / Finviz / Alpha Vantage（有 Key）
+  2. 轮动：TradingView / Finviz / Binance(加密货币) / Alpha Vantage（有 Key）
   3. Yahoo Finance（本地可设 HEATMAP_SKIP_YAHOO=1）
   4. AKShare 其余 / Tushare
-区间 5/20 日：Turso 日 K → 多源轮动（Nasdaq/东财/付费/Yahoo…）。
+区间 5/20 日：Turso 日 K → 多源轮动（Binance加密/Nasdaq/东财/付费/Yahoo…）。
 资金流入 = 涨跌幅 × 成交额 / 10亿；排行占比为样本内比重。
 """
 
@@ -231,7 +231,11 @@ THEMES: list[dict[str, Any]] = [
     {"key": "fintech", "name": "金融科技", "etf": "FINX",
      "tickers": [("V", "Visa"), ("MA", "万事达"), ("SQ", "Block"), ("PYPL", "PayPal"), ("AXP", "美国运通")]},
     {"key": "crypto", "name": "加密货币/区块链", "etf": "BITO",
-     "tickers": [("COIN", "Coinbase"), ("RIOT", "Riot"), ("MARA", "Marathon"), ("HUT", "Hut 8"), ("CLSK", "CleanSpark")]},
+     "tickers": [
+         ("BTC", "比特币"), ("ETH", "以太坊"), ("SOL", "Solana"),
+         ("COIN", "Coinbase"), ("RIOT", "Riot"), ("MARA", "Marathon"),
+         ("HUT", "Hut 8"), ("CLSK", "CleanSpark"),
+     ]},
     {"key": "ev", "name": "新能源车", "etf": "DRIV",
      "tickers": [("TSLA", "特斯拉"), ("NIO", "蔚来"), ("XPEV", "小鹏"), ("LI", "理想"), ("RIVN", "Rivian"), ("LCID", "Lucid")]},
     {"key": "ev_charging", "name": "充电桩",
@@ -1789,6 +1793,28 @@ async def get_quotes_session_aware(
                     added += 1
             if added:
                 sources_used.append(f"Finnhub:{added}")
+
+    missing = [s for s in uniq if s not in merged]
+    # 币安：加密货币 24/7，扩展时段补 BTC/ETH 等（美股无对则自动跳过）
+    if missing:
+        try:
+            from app.market_data.binance import binance_enabled, fetch_binance_quotes
+
+            if binance_enabled():
+                bn = await asyncio.wait_for(fetch_binance_quotes(missing), timeout=12.0)
+            else:
+                bn = {}
+        except Exception as exc:
+            logger.warning("session-aware Binance failed: %s", exc)
+            bn = {}
+        if bn:
+            added = 0
+            for sym, row in bn.items():
+                if sym not in merged:
+                    merged[sym] = row
+                    added += 1
+            if added:
+                sources_used.append(f"Binance:{added}")
 
     missing = [s for s in uniq if s not in merged]
     if missing:

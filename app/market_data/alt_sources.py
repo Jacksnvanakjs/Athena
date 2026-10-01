@@ -1,9 +1,9 @@
-"""备用行情源：TradingView / Finviz / Alpha Vantage / Twelve / Tiingo / Polygon / Marketstack。
+"""备用行情源：TradingView / Finviz / Binance / Alpha Vantage / Twelve / Tiingo / Polygon / Marketstack。
 
 口径：
 - 报价涨跌幅优先用 (price - prev_close) / prev_close；TV 的 change 已是百分比。
 - 日线只返回真实收盘序列，缺数不编造。
-- 无 API Key 时跳过对应源；TV/Finviz 无需 Key。
+- 无 API Key 时跳过对应源；TV/Finviz/Binance（加密货币）无需 Key。
 """
 
 from __future__ import annotations
@@ -421,6 +421,11 @@ async def fill_quotes_rotating(
         ("TradingView", lambda syms: fetch_tradingview_quotes(syms)),
         ("Finviz", lambda syms: fetch_finviz_quotes(syms, limit=min(15, len(syms)))),
     ]
+    # 币安：仅加密货币可映射符号；无 Key，优先补 BTC/ETH 等
+    from app.market_data.binance import binance_enabled, binance_mappable, fetch_binance_quotes
+
+    if binance_enabled() and binance_mappable(missing):
+        candidates.append(("Binance", lambda syms: fetch_binance_quotes(syms)))
     if (ALPHA_VANTAGE_API_KEY or "").strip():
 
         async def _av(syms: list[str]) -> dict[str, dict[str, Any]]:

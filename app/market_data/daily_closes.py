@@ -900,6 +900,21 @@ def _daily_close_sources(
         ("nasdaq", lambda: _from_nasdaq(t, lookback_days)),
         ("eastmoney", lambda: _from_eastmoney(t, lookback_days)),
     ]
+    # 币安现货日 K：仅 BTC/ETH 等可映射符号；免 Key，加密货币优先走这里
+    from app.market_data.binance import (
+        binance_enabled,
+        fetch_binance_daily_closes,
+        to_binance_symbol,
+    )
+
+    if binance_enabled() and to_binance_symbol(t):
+        sources.insert(
+            0,
+            (
+                "binance",
+                lambda: fetch_binance_daily_closes(t, lookback_days=lookback_days),
+            ),
+        )
     # 付费源：无 Key 不进轮动，避免空转拖预算
     from app.config import (
         ALPHA_VANTAGE_API_KEY,

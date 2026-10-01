@@ -10,7 +10,7 @@ async def fetch_quotes(
     *,
     allow_slow_fill: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """东财∥Finnhub → 轮动补缺(TV/Finviz/AV) → Yahoo。"""
+    """东财∥Finnhub → 轮动补缺(TV/Finviz/Binance加密/AV) → Yahoo。"""
     from app.heatmap import get_quotes_for_symbols
 
     return await get_quotes_for_symbols(symbols, allow_slow_fill=allow_slow_fill)
