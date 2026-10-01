@@ -1180,9 +1180,7 @@
         const note = (data.live_1d_note || '').trim();
         if (daily) {
           return {
-            label: note
-              ? `最新1D拉取中 · ${daily.label}`
-              : `最新1D拉取中 · ${daily.label}`,
+            label: `最新1D拉取中 · ${daily.label}`,
             tip: [note || '正在重拉会话价', daily.tip].filter(Boolean).join('\n'),
           };
         }
