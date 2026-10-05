@@ -138,3 +138,14 @@ def test_soxl_daily_and_monthly_returns():
     assert mb["2026-06"]["soxl_ret_pct"] == 5.0  # 21 vs 20
     assert mb["2026-07"]["soxl_ret_pct"] == 0.0
 
+
+def test_merge_soxl_fields_keeps_notional():
+    from app.lev_etf.pipeline import _merge_soxl_fields
+
+    base = [{"date": "2026-10-01", "notional_bn": 1.2, "soxl_ret_pct": None}]
+    extra = [{"date": "2026-10-01", "soxl_ret_pct": 3.5, "soxl_close": 40.0}]
+    out = _merge_soxl_fields(base, extra, "date")
+    assert out[0]["notional_bn"] == 1.2
+    assert out[0]["soxl_ret_pct"] == 3.5
+    assert out[0]["soxl_close"] == 40.0
+

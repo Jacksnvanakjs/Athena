@@ -2361,9 +2361,16 @@
       const n = points.length;
       const showLabels = n <= 40;
       const baseR = n <= 40 ? 4 : (n <= 90 ? 3 : 2);
-      const pointRadius = points.map(p => p.is_partial ? baseR + 1 : baseR);
-      const pointBg = points.map(levSoxlColor);
-      const pointBd = points.map(p => p.is_partial ? '#fff' : levSoxlColor(p));
+      const pointRadius = (ctx) => {
+        const p = points[ctx.dataIndex] || {};
+        return p.is_partial ? baseR + 1 : baseR;
+      };
+      const pointColor = (ctx) => levSoxlColor(points[ctx.dataIndex] || {});
+      const pointBorder = (ctx) => {
+        const p = points[ctx.dataIndex] || {};
+        return p.is_partial ? '#fff' : levSoxlColor(p);
+      };
+      const pointBorderW = (ctx) => ((points[ctx.dataIndex] || {}).is_partial ? 2 : 1);
       const tickLimit = isDay ? Math.min(12, Math.max(5, n)) : 14;
       const decimals = isDay ? 2 : 1;
       const tooltipLabel = function(ctx) {
@@ -2394,9 +2401,9 @@
             borderWidth: 2,
             pointRadius,
             pointHoverRadius: baseR + 2,
-            pointBackgroundColor: pointBg,
-            pointBorderColor: pointBd,
-            pointBorderWidth: points.map(p => p.is_partial ? 2 : 1),
+            pointBackgroundColor: pointColor,
+            pointBorderColor: pointBorder,
+            pointBorderWidth: pointBorderW,
           }],
         },
         options: {

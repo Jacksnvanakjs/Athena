@@ -358,24 +358,186 @@ def _merge_by_key(base: list[dict], newer: list[dict], key: str) -> list[dict]:
     return [by[k] for k in sorted(by)]
 
 
+def _merge_soxl_fields(base: list[dict], extra: list[dict], key: str) -> list[dict]:
+    """把缓存里的 SOXL 涨跌补到库内成交额点上（不覆盖已有）。"""
+    by = {p[key]: p for p in extra if p.get(key)}
+    out: list[dict] = []
+    for p in base:
+        row = dict(p)
+        src = by.get(row.get(key)) or {}
+        if row.get("soxl_ret_pct") is None and src.get("soxl_ret_pct") is not None:
+            row["soxl_ret_pct"] = src.get("soxl_ret_pct")
+            if src.get("soxl_close") is not None:
+                row["soxl_close"] = src.get("soxl_close")
+        elif row.get("soxl_close") is None and src.get("soxl_close") is not None:
+            row["soxl_close"] = src.get("soxl_close")
+        out.append(row)
+    return out
+
+
+def _soxl_coverage_ok(points: list[dict], *, tail: int = 24) -> bool:
+    sample = points[-tail:] if points else []
+    if not sample:
+        return False
+    hit = sum(1 for p in sample if p.get("soxl_ret_pct") is not None)
+    return hit >= max(3, (len(sample) + 1) // 2)
+
+
+def _run_async(coro):
+    """在同步 API 线程里跑一段协程。"""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    holder: dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            holder["value"] = asyncio.run(coro)
+        except Exception as exc:
+            holder["error"] = exc
+
+    th = threading.Thread(target=_worker, name="lev-soxl-fetch", daemon=True)
+    th.start()
+    th.join(timeout=28.0)
+    if "error" in holder:
+        raise holder["error"]
+    if "value" not in holder:
+        raise TimeoutError("SOXL 拉取超时")
+    return holder["value"]
+
+
+async def _fetch_soxl_closes(start: date, end: date) -> dict[date, float]:
+    """SOXL 收盘价：东财日 K 优先（Yahoo 易 429），再走日线多源 / OHLCV。"""
+    out: dict[date, float] = {}
+    lookback = max(60, (end - start).days + 20)
+    pad = start - timedelta(days=14)
+
+    def _absorb(rows: list) -> None:
+        for d, c in rows or []:
+            try:
+                fv = float(c)
+            except (TypeError, ValueError):
+                continue
+            if fv > 0 and pad <= d <= end:
+                out[d] = fv
+
+    try:
+        from app.market_data.daily_closes import _from_eastmoney
+
+        _absorb(await asyncio.wait_for(_from_eastmoney("SOXL", lookback), timeout=14))
+    except Exception as exc:
+        logger.warning("SOXL eastmoney failed: %s", exc)
+    if len(out) >= 3:
+        return out
+    try:
+        from app.market_data.daily_closes import fetch_daily_closes
+
+        _absorb(
+            await fetch_daily_closes(
+                "SOXL", lookback_days=lookback, skip_yahoo=True, rotate=False
+            )
+        )
+    except Exception as exc:
+        logger.warning("SOXL daily_closes failed: %s", exc)
+    if len(out) >= 3:
+        return out
+    try:
+        from app.lev_etf.fetch_ohlcv import fetch_ohlcv
+
+        bars = await fetch_ohlcv("SOXL", start=start - timedelta(days=10), end=end)
+        for d, c, _v in bars:
+            if c and float(c) > 0:
+                out[d] = float(c)
+    except Exception as exc:
+        logger.warning("SOXL ohlcv fallback failed: %s", exc)
+    return out
+
+
+_SOXL_HYDRATE_LOCK = threading.Lock()
+_SOXL_HYDRATE_TS = 0.0
+
+
+def _hydrate_soxl_returns(
+    daily_points: list[dict],
+    monthly_points: list[dict] | None = None,
+    *,
+    persist: bool = True,
+) -> tuple[list[dict], list[dict] | None]:
+    """缺 SOXL 涨跌时单独拉 SOXL 日线（不重拉整篮），挂到日/月点上。"""
+    global _SOXL_HYDRATE_TS
+    with _SOXL_HYDRATE_LOCK:
+        daily = [dict(p) for p in daily_points]
+        monthly = [dict(p) for p in monthly_points] if monthly_points is not None else None
+        cached = _read_json_cache(daily_cache_path())
+        if cached and isinstance(cached.get("points"), list):
+            daily = _merge_soxl_fields(daily, cached["points"], "date")
+        if monthly is not None:
+            mcache = _read_json_cache(monthly_cache_path())
+            if mcache and isinstance(mcache.get("points"), list):
+                monthly = _merge_soxl_fields(monthly, mcache["points"], "month")
+        closes = soxl_closes_from_points(daily)
+        need_fetch = not _soxl_coverage_ok(daily)
+        if need_fetch and daily:
+            now = time.time()
+            if now - _SOXL_HYDRATE_TS >= 8:
+                try:
+                    first = date.fromisoformat(str(daily[0].get("date") or "")[:10])
+                    last = date.fromisoformat(str(daily[-1].get("date") or "")[:10])
+                    fetch_start = first - timedelta(days=10)
+                    fetched = _run_async(_fetch_soxl_closes(fetch_start, last))
+                    if fetched:
+                        closes.update(fetched)
+                        _SOXL_HYDRATE_TS = now
+                except Exception as exc:
+                    logger.warning("hydrate SOXL closes failed: %s", exc)
+        if closes:
+            daily = attach_soxl_daily_returns(daily, closes)
+            if monthly is not None:
+                monthly = attach_soxl_monthly_returns(monthly, closes)
+            if persist and _soxl_coverage_ok(daily):
+                try:
+                    daily_payload = _payload_from_points(
+                        daily, granularity="day", year_filter="all"
+                    )
+                    _write_json_cache(daily_cache_path(), daily_payload)
+                    _upsert_daily_db(daily)
+                    if monthly is not None:
+                        monthly_payload = _payload_from_points(
+                            monthly, granularity="month", year_filter="all"
+                        )
+                        _write_json_cache(monthly_cache_path(), monthly_payload)
+                        _upsert_monthly_db(monthly)
+                except Exception as exc:
+                    logger.warning("persist SOXL overlay failed: %s", exc)
+        return daily, monthly
+
+
 def _stored_monthly_points() -> list[dict]:
     db_points = _load_monthly_from_db()
-    if db_points:
-        return db_points
     cached = _read_json_cache(monthly_cache_path())
-    if cached and isinstance(cached.get("points"), list):
-        return list(cached["points"])
-    return []
+    cache_pts = (
+        list(cached["points"])
+        if cached and isinstance(cached.get("points"), list)
+        else []
+    )
+    if db_points:
+        return _merge_soxl_fields(db_points, cache_pts, "month") if cache_pts else db_points
+    return cache_pts
 
 
 def _stored_daily_points() -> list[dict]:
     db_points = _load_daily_from_db()
-    if db_points:
-        return db_points
     cached = _read_json_cache(daily_cache_path())
-    if cached and isinstance(cached.get("points"), list):
-        return list(cached["points"])
-    return []
+    cache_pts = (
+        list(cached["points"])
+        if cached and isinstance(cached.get("points"), list)
+        else []
+    )
+    if db_points:
+        return _merge_soxl_fields(db_points, cache_pts, "date") if cache_pts else db_points
+    return cache_pts
 
 
 def get_tech_meta() -> dict[str, Any]:
@@ -540,6 +702,10 @@ def _get_series_payload(
         cached
         and now - float(mem.get("ts") or 0) < _MEM_TTL_SEC
         and cached.get("_all_points") is not None
+        and (
+            granularity != "day"
+            or _soxl_coverage_ok(cached["_all_points"])
+        )
     ):
         out = _payload_from_points(
             cached["_all_points"],
@@ -554,6 +720,23 @@ def _get_series_payload(
     if not stored:
         _maybe_kick_background_update(prefer_full=(granularity == "day"))
         return _empty_loading_payload(year_key, granularity)
+
+    daily_src = stored if granularity == "day" else _stored_daily_points()
+    monthly_src = stored if granularity == "month" else _stored_monthly_points()
+    daily_h, monthly_h = _hydrate_soxl_returns(daily_src, monthly_src, persist=True)
+    stored = daily_h if granularity == "day" else (monthly_h or stored)
+    if granularity == "day" and monthly_h:
+        mem_m = dict(
+            _payload_from_points(monthly_h, granularity="month", year_filter="all")
+        )
+        mem_m["_all_points"] = monthly_h
+        _MEM_M["payload"] = mem_m
+        _MEM_M["ts"] = now
+    if granularity == "month" and daily_h:
+        mem_d = dict(_payload_from_points(daily_h, granularity="day", year_filter="all"))
+        mem_d["_all_points"] = daily_h
+        _MEM_D["payload"] = mem_d
+        _MEM_D["ts"] = now
 
     payload = _payload_from_points(stored, granularity=granularity, year_filter="all")
     mem_payload = dict(payload)
@@ -663,6 +846,13 @@ async def run_lev_etf_update(*, force_full: bool = False) -> dict[str, Any]:
 
         soxl_closes = soxl_closes_from_points(daily_points)
         soxl_closes.update(soxl_closes_from_bars(bars))
+        try:
+            first = date.fromisoformat(str(daily_points[0]["date"])[:10])
+            last = date.fromisoformat(str(daily_points[-1]["date"])[:10])
+            extra = await _fetch_soxl_closes(first - timedelta(days=10), last)
+            soxl_closes.update(extra)
+        except Exception as exc:
+            logger.warning("lev-etf dedicated SOXL fetch failed: %s", exc)
         daily_points = attach_soxl_daily_returns(daily_points, soxl_closes)
 
         full_daily_map = daily_points_to_map(daily_points)
