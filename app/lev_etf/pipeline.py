@@ -375,12 +375,32 @@ def _merge_soxl_fields(base: list[dict], extra: list[dict], key: str) -> list[di
     return out
 
 
-def _soxl_coverage_ok(points: list[dict], *, tail: int = 24) -> bool:
-    sample = points[-tail:] if points else []
-    if not sample:
+def _soxl_coverage_ok(points: list[dict], *, tail: int | None = None) -> bool:
+    """整段序列都要有 SOXL 涨跌（首点可无前收）。不能只看最近几周。"""
+    if not points:
         return False
-    hit = sum(1 for p in sample if p.get("soxl_ret_pct") is not None)
-    return hit >= max(3, (len(sample) + 1) // 2)
+    if tail is not None:
+        sample = points[-tail:]
+        if not sample:
+            return False
+        hit = sum(1 for p in sample if p.get("soxl_ret_pct") is not None)
+        return hit >= max(1, (len(sample) + 1) // 2)
+    rest = points[1:] if len(points) > 1 else points
+    hit = sum(1 for p in rest if p.get("soxl_ret_pct") is not None)
+    if not rest:
+        return False
+    if len(rest) < 4:
+        return hit >= max(1, len(rest) - (1 if len(points) > 1 else 0))
+    return hit >= max(3, int(len(rest) * 0.8))
+
+
+def _soxl_closes_cover_range(closes: dict[date, float], start: date, end: date) -> bool:
+    if not closes:
+        return False
+    days = [d for d in closes if start - timedelta(days=7) <= d <= end]
+    if len(days) < 5:
+        return False
+    return min(days) <= start + timedelta(days=14)
 
 
 def _run_async(coro):
@@ -409,9 +429,9 @@ def _run_async(coro):
 
 
 async def _fetch_soxl_closes(start: date, end: date) -> dict[date, float]:
-    """SOXL 收盘价：东财日 K 优先（Yahoo 易 429），再走日线多源 / OHLCV。"""
+    """SOXL 收盘价：东财日 K 优先（Yahoo 易 429），覆盖不足再 Stooq / 日线多源。"""
     out: dict[date, float] = {}
-    lookback = max(60, (end - start).days + 20)
+    lookback = max(120, (end - start).days + 40)
     pad = start - timedelta(days=14)
 
     def _absorb(rows: list) -> None:
@@ -426,11 +446,29 @@ async def _fetch_soxl_closes(start: date, end: date) -> dict[date, float]:
     try:
         from app.market_data.daily_closes import _from_eastmoney
 
-        _absorb(await asyncio.wait_for(_from_eastmoney("SOXL", lookback), timeout=14))
+        _absorb(await asyncio.wait_for(_from_eastmoney("SOXL", lookback), timeout=18))
     except Exception as exc:
         logger.warning("SOXL eastmoney failed: %s", exc)
-    if len(out) >= 3:
+    if _soxl_closes_cover_range(out, start, end):
         return out
+    try:
+        from app.market_data.daily_closes import _from_stooq
+
+        _absorb(await asyncio.wait_for(_from_stooq("SOXL", lookback), timeout=12))
+    except Exception as exc:
+        logger.warning("SOXL stooq failed: %s", exc)
+    if _soxl_closes_cover_range(out, start, end):
+        return out
+    try:
+        from app.market_data.daily_closes import fetch_daily_closes
+
+        rows = await asyncio.wait_for(
+            fetch_daily_closes("SOXL", lookback_days=lookback),
+            timeout=20,
+        )
+        _absorb(rows)
+    except Exception as exc:
+        logger.warning("SOXL daily_closes fallback failed: %s", exc)
     return out
 
 
@@ -460,6 +498,8 @@ def _hydrate_soxl_returns(
                 monthly = _merge_soxl_fields(monthly, mcache["points"], "month")
         closes = soxl_closes_from_points(daily)
         need_fetch = not _soxl_coverage_ok(daily)
+        if monthly is not None and not _soxl_coverage_ok(monthly):
+            need_fetch = True
         if need_fetch and daily:
             now = time.time()
             if now - _SOXL_HYDRATE_TS >= 8:
@@ -477,7 +517,10 @@ def _hydrate_soxl_returns(
             daily = attach_soxl_daily_returns(daily, closes)
             if monthly is not None:
                 monthly = attach_soxl_monthly_returns(monthly, closes)
-            if persist and _soxl_coverage_ok(daily):
+            improved = _soxl_coverage_ok(daily) or (
+                monthly is not None and _soxl_coverage_ok(monthly)
+            )
+            if persist and (improved or soxl_closes_from_points(daily)):
                 try:
                     daily_payload = _payload_from_points(
                         daily, granularity="day", year_filter="all"
@@ -490,6 +533,10 @@ def _hydrate_soxl_returns(
                         )
                         _write_json_cache(monthly_cache_path(), monthly_payload)
                         _upsert_monthly_db(monthly)
+                    _MEM_D["ts"] = 0.0
+                    _MEM_D["payload"] = None
+                    _MEM_M["ts"] = 0.0
+                    _MEM_M["payload"] = None
                 except Exception as exc:
                     logger.warning("persist SOXL overlay failed: %s", exc)
         return daily, monthly
@@ -501,7 +548,11 @@ _SOXL_BG_STARTED = False
 def _kick_soxl_hydrate_bg(daily: list[dict], monthly: list[dict] | None) -> None:
     """SOXL 着色不挡成交额接口。"""
     global _SOXL_BG_STARTED
-    if not daily or _soxl_coverage_ok(daily):
+    if not daily:
+        return
+    if _soxl_coverage_ok(daily) and (
+        monthly is None or _soxl_coverage_ok(monthly)
+    ):
         return
     with _SOXL_BG_LOCK:
         if _SOXL_BG_STARTED:
@@ -708,8 +759,9 @@ def _get_series_payload(
         and cached.get("_all_points") is not None
     ):
         pts = cached["_all_points"]
-        if granularity == "day" and not _soxl_coverage_ok(pts):
-            _kick_soxl_hydrate_bg(pts, _stored_monthly_points())
+        daily_src = pts if granularity == "day" else _stored_daily_points()
+        monthly_src = pts if granularity == "month" else _stored_monthly_points()
+        _kick_soxl_hydrate_bg(daily_src, monthly_src)
         out = _payload_from_points(
             pts,
             granularity=granularity,

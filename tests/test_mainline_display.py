@@ -117,5 +117,9 @@ def test_finalize_sets_basis_without_db_crash(monkeypatch):
         }
     )
     assert out["mainline_basis"] == "rel_5d"
-    assert out["pulse_1d_weak"] is True
     assert out["rotation_14d"][0]["name"] == "AI安全/身份"
+    if out.get("1d_pending") or out.get("live_1d") is False:
+        # 盘中未叠加上今日报价时，不能沿用快照 1D
+        assert out["themes"][0]["ret_1d"] is None
+    else:
+        assert out["pulse_1d_weak"] is True

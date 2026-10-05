@@ -185,6 +185,7 @@ def _row_from_24hr(app_symbol: str, row: dict[str, Any]) -> dict[str, Any] | Non
         volume=vol,
         quote_time=bj,
         quote_time_et=et,
+        quote_source="binance",
     )
 
 

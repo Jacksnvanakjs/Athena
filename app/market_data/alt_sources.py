@@ -57,6 +57,7 @@ def _quote_dict(
         price=price,
         change_pct=change_pct,
         volume=volume,
+        quote_source="alt",
     )
 
 

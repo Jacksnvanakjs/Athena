@@ -112,3 +112,91 @@ def test_live_1d_active_phases():
     )
     assert need
     assert reason.startswith("phase_switch") or reason == "stamp_mismatch"
+
+
+def test_rth_rejects_prior_close_quotes_and_clears_snapshot_1d():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app.ai_mainline.pipeline import (
+        _clear_intraday_1d_metrics,
+        _filter_quotes_for_1d,
+        _quote_dt_in_current_session,
+    )
+
+    et = ZoneInfo("America/New_York")
+    now = datetime.now(et)
+    prior = {
+        "change_pct": 4.2,
+        "quote_time_et": "2026-10-02 16:00:00 EDT",
+        "quote_time": "2026-10-03 04:00:00",
+    }
+    assert _quote_dt_in_current_session(prior, "rth", now=now) is False
+    live = {
+        "change_pct": -1.5,
+        "quote_time_et": now.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "quote_time": now.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    # 若当前已是盘中，今日 9:30 后印记应通过
+    if now.hour > 9 or (now.hour == 9 and now.minute >= 30):
+        assert _quote_dt_in_current_session(live, "rth", now=now) is True
+
+    use, kind = _filter_quotes_for_1d({"MU": prior}, "rth")
+    assert use == {}
+    assert kind == "no_rth"
+
+    cleared = _clear_intraday_1d_metrics(
+        {
+            "themes": [
+                {
+                    "key": "memory",
+                    "name": "存储/HBM链",
+                    "ret_1d": 3.8,
+                    "n_up": 4,
+                    "n_valid": 4,
+                    "members": [{"symbol": "MU", "ret_1d": 5.0}],
+                }
+            ],
+            "bench": {"ret_1d": 1.2, "ret_5d": 2.0},
+        }
+    )
+    assert cleared["themes"][0]["ret_1d"] is None
+    assert cleared["themes"][0]["members"][0]["ret_1d"] is None
+    assert cleared["bench"]["ret_1d"] is None
+    assert cleared["bench"]["ret_5d"] == 2.0
+    assert cleared.get("prior_session_1d", {}).get("memory") == 3.8
+
+    em_live = dict(live)
+    em_live["quote_source"] = "eastmoney"
+    em_live["change_pct"] = 4.2
+    dropped, kind_em = _filter_quotes_for_1d({"MU": em_live}, "rth")
+    assert dropped == {}
+    assert kind_em in ("em_stale", "no_rth")
+
+    fh_live = dict(live)
+    fh_live["quote_source"] = "finnhub"
+    kept, kind_fh = _filter_quotes_for_1d({"MU": fh_live}, "rth")
+    if now.hour > 9 or (now.hour == 9 and now.minute >= 30):
+        assert kept.get("MU") is fh_live
+        assert kind_fh == "rth"
+
+    from app.ai_mainline.pipeline import _is_prior_session_1d_replay
+
+    replay = _is_prior_session_1d_replay(
+        {"memory": 3.8, "power": 2.1, "ai_security": -0.4},
+        [
+            {"key": "memory", "ret_1d": 3.8},
+            {"key": "power", "ret_1d": 2.11},
+            {"key": "ai_security", "ret_1d": -0.4},
+        ],
+    )
+    assert replay is True
+    moved = _is_prior_session_1d_replay(
+        {"memory": 3.8, "power": 2.1, "ai_security": -0.4},
+        [
+            {"key": "memory", "ret_1d": -1.2},
+            {"key": "power", "ret_1d": -0.8},
+            {"key": "ai_security", "ret_1d": 2.5},
+        ],
+    )
+    assert moved is False

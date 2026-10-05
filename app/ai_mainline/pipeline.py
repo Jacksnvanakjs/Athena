@@ -244,12 +244,14 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         elif out.get("1d_pending"):
             out["1d_fresh"] = False
             out["live_1d"] = False
+            out = _clear_intraday_1d_metrics(out)
         elif out.get("live_1d"):
             out["1d_fresh"] = True
             out["1d_pending"] = False
         else:
             out["1d_fresh"] = False
             out["1d_pending"] = True
+            out = _clear_intraday_1d_metrics(out)
             if not out.get("live_1d_note"):
                 out["live_1d_note"] = "1D 正在拉取最新报价…"
     else:
@@ -482,12 +484,60 @@ def _quote_stamp_too_old(row: dict[str, Any] | None, *, now: datetime | None = N
     return (now - dt).total_seconds() > 60 * 60 * 60  # 60h
 
 
+# 盘中 1D 不可信：东财/日线源常把昨收涨跌配上「当前心跳」时间戳
+_RTH_UNTRUSTED_1D_SOURCES = frozenset({"eastmoney", "tushare", "akshare"})
+
+
+def _rth_quote_trusted(row: dict[str, Any] | None) -> bool:
+    if not row:
+        return False
+    src = str(row.get("quote_source") or "").strip().lower()
+    if src in _RTH_UNTRUSTED_1D_SOURCES:
+        return False
+    return True
+
+
+def _theme_1d_fingerprint(payload: dict[str, Any] | None) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for t in (payload or {}).get("themes") or []:
+        key = t.get("key")
+        if not key or t.get("ret_1d") is None:
+            continue
+        try:
+            out[str(key)] = round(float(t["ret_1d"]), 2)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _is_prior_session_1d_replay(
+    prior: dict[str, float] | None, themes: list[dict[str, Any]]
+) -> bool:
+    """盘中叠加结果若几乎等于昨收快照 1D，视为源把昨涨跌当成今日。"""
+    if not prior or len(prior) < 3:
+        return False
+    compared = 0
+    matched = 0
+    for t in themes:
+        key = str(t.get("key") or "")
+        if key not in prior or t.get("ret_1d") is None:
+            continue
+        compared += 1
+        try:
+            if abs(float(t["ret_1d"]) - float(prior[key])) <= 0.05:
+                matched += 1
+        except (TypeError, ValueError):
+            continue
+    return compared >= 3 and matched / compared >= 0.8
+
+
 def _filter_quotes_for_1d(
     quotes: dict[str, dict[str, Any]], phase: str
 ) -> tuple[dict[str, dict[str, Any]], str]:
     """夜盘/盘前/盘后：只用非收盘印记；盘前/盘后绝不把 RTH 收盘当 live。
 
     夜盘无扩展价时才允许 rth_fallback（夜盘前最后一档）。
+    盘中：必须是今日 9:30 后印记，且不能是东财昨收涨跌。
     """
     from app.heatmap import _quote_looks_like_rth_close
 
@@ -499,6 +549,18 @@ def _filter_quotes_for_1d(
     }
     if not fresh:
         fresh = {k: v for k, v in quotes.items() if v and v.get("change_pct") is not None}
+    if phase == "rth":
+        live = {
+            k: v
+            for k, v in fresh.items()
+            if v and _quote_dt_in_current_session(v, "rth")
+        }
+        trusted = {k: v for k, v in live.items() if _rth_quote_trusted(v)}
+        if trusted:
+            return trusted, "rth"
+        if live:
+            return {}, "em_stale"
+        return {}, "no_rth"
     if phase not in ("pre_open", "settle", "overnight"):
         return fresh, "rth"
     non_rth = {
@@ -510,6 +572,27 @@ def _filter_quotes_for_1d(
     if phase in ("pre_open", "settle"):
         return {}, "no_ext"
     return fresh, "rth_fallback"
+
+
+def _quote_dt_in_current_session(
+    row: dict[str, Any] | None, phase: str, *, now: datetime | None = None
+) -> bool:
+    """报价印记是否属于当前时段（盘中必须是今日 9:30 之后）。"""
+    dt = _parse_member_quote_dt(row)
+    if dt is None:
+        return False
+    now = now or datetime.now(ET)
+    today = now.date()
+    if phase == "rth":
+        rth_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        return dt.date() == today and dt >= rth_open
+    if phase == "pre_open":
+        start = now.replace(hour=4, minute=0, second=0, microsecond=0)
+        return dt.date() == today and dt >= start
+    if phase == "settle":
+        start = now.replace(hour=16, minute=0, second=0, microsecond=0)
+        return dt.date() == today and dt >= start
+    return True
 
 
 def _strip_stale_1d_fields(
@@ -585,8 +668,11 @@ def _1d_stamp_mismatch_phase(payload: dict[str, Any] | None, phase: str) -> bool
         pre_start = datetime.now(ET).replace(hour=4, minute=0, second=0, microsecond=0)
         return dt < pre_start
     if phase == "rth":
-        # 盘中：还停在盘前/盘后扩展印记也可以，但不应是「无 live」
-        return False
+        dt = _parse_member_quote_dt(row)
+        if dt is None:
+            return True
+        rth_open = datetime.now(ET).replace(hour=9, minute=30, second=0, microsecond=0)
+        return dt < rth_open
     if phase == "settle":
         # 盘后：不应还停在常规收盘 16:00
         return _quote_looks_like_rth_close(row)
@@ -607,6 +693,9 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
         }
     )
     if dt is None:
+        # 盘中/盘前/盘后无印记：不能当 live（东财昨涨跌常无戳）
+        if phase in ("pre_open", "rth", "settle"):
+            return True
         return not bool(payload.get("live_1d"))
     lag = (datetime.now(ET) - dt).total_seconds()
     if lag < 0:
@@ -621,19 +710,56 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
     return lag > 60 * 60 * 6
 
 
+def _clear_intraday_1d_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+    """去掉昨收/快照上的 1D，避免盘中把上一日涨跌当成今日脉搏。"""
+    out = dict(payload)
+    if not out.get("prior_session_1d") and not payload.get("live_1d"):
+        prior = _theme_1d_fingerprint(payload)
+        if prior:
+            out["prior_session_1d"] = prior
+    themes_out: list[dict[str, Any]] = []
+    for theme in out.get("themes") or []:
+        row = dict(theme)
+        row["ret_1d"] = None
+        row["rel_1d"] = None
+        row["n_up"] = None
+        row["breadth"] = None
+        members = []
+        for m in row.get("members") or []:
+            mem = dict(m)
+            mem["ret_1d"] = None
+            mem.pop("quote_time", None)
+            mem.pop("quote_time_et", None)
+            members.append(mem)
+        row["members"] = members
+        themes_out.append(row)
+    out["themes"] = themes_out
+    if isinstance(out.get("bench"), dict):
+        bench = dict(out["bench"])
+        bench["ret_1d"] = None
+        out["bench"] = bench
+    out["pulse_1d"] = None
+    return out
+
+
 def _mark_1d_pending(
     payload: dict[str, Any], *, note: str | None = None
 ) -> dict[str, Any]:
     """出口态：不宣称 live，强制前端快轮询。
 
-    注意：不清空日线/已有印记字段——页面必须仍能展示「数据更新时间」；
-    仅把 live 关掉，由前端避免把滞后戳标成「最新1D」。
+    扩展/盘中时段清掉快照 1D 涨跌，只保留 5D/20D；数据时刻用日线收盘兜底。
     """
     out = dict(payload)
+    if not out.get("prior_session_1d") and not payload.get("live_1d"):
+        prior = _theme_1d_fingerprint(payload)
+        if prior:
+            out["prior_session_1d"] = prior
     out["live_1d"] = False
     out["1d_fresh"] = False
     out["1d_pending"] = True
-    # 确保日线收盘时刻可展示（1D 未就绪时的兜底）
+    phase = _market_phase()
+    if _live_1d_active(phase):
+        out = _clear_intraday_1d_metrics(out)
     if not out.get("data_time_daily_bj") and out.get("trade_date"):
         out.update(_daily_session_close_times(out.get("trade_date")))
     if not out.get("updated_bj"):
@@ -731,6 +857,10 @@ async def _overlay_live_1d(
         msg = (
             "盘前/盘后暂无扩展价，已拒绝常规收盘印记，待下一轮刷新"
             if qkind == "no_ext"
+            else "盘中暂无今日常规交易报价，已拒绝昨收 1D，待下一轮刷新"
+            if qkind == "no_rth"
+            else "盘中已拒绝东财昨收涨跌，待会话源刷新 1D"
+            if qkind == "em_stale"
             else "1D 行情印记过期，已丢弃，待下一轮刷新"
         )
         return _mark_1d_pending(out, note=msg), False
@@ -760,6 +890,10 @@ async def _overlay_live_1d(
                 ret_1d_list.append(chg)
                 if chg > 0:
                     up += 1
+            else:
+                mem["ret_1d"] = None
+                mem.pop("quote_time", None)
+                mem.pop("quote_time_et", None)
             members.append(mem)
         row["members"] = members
         if ret_1d_list:
@@ -767,7 +901,24 @@ async def _overlay_live_1d(
             row["n_up"] = up
             row["n_valid"] = len(ret_1d_list)
             row["breadth"] = round(up / len(ret_1d_list), 4)
+        else:
+            row["ret_1d"] = None
+            row["n_up"] = None
+            row["n_valid"] = 0
+            row["breadth"] = None
         themes_out.append(row)
+    prior = payload.get("prior_session_1d") or _theme_1d_fingerprint(payload)
+    if phase == "rth" and _is_prior_session_1d_replay(prior, themes_out):
+        stripped = _strip_stale_1d_fields(dict(payload), phase=phase)
+        if prior and not stripped.get("prior_session_1d"):
+            stripped["prior_session_1d"] = prior
+        return (
+            _mark_1d_pending(
+                stripped,
+                note="盘中 1D 与昨收快照相同，已拒绝陈旧涨跌，待会话源刷新",
+            ),
+            False,
+        )
     out["themes"] = themes_out
 
     bench = dict(payload.get("bench") or {})

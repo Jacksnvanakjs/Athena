@@ -414,6 +414,7 @@ def _quote_row(
     market_cap: float | None = None,
     quote_time: str | None = None,
     quote_time_et: str | None = None,
+    quote_source: str | None = None,
 ) -> dict[str, Any]:
     dollar_volume = price * volume
     row = {
@@ -430,6 +431,8 @@ def _quote_row(
         row["quote_time"] = quote_time
     if quote_time_et:
         row["quote_time_et"] = quote_time_et
+    if quote_source:
+        row["quote_source"] = quote_source
     return row
 
 
@@ -569,6 +572,7 @@ def _parse_sina_row(
         volume=volume,
         quote_time=quote_time,
         quote_time_et=et_raw or None,
+        quote_source="sina",
     )
 
 
@@ -759,6 +763,7 @@ def _parse_yahoo_meta(
         volume=volume,
         quote_time=quote_time,
         quote_time_et=quote_time_et,
+        quote_source="yahoo",
     )
 
 
@@ -1077,6 +1082,7 @@ def _parse_cnbc_formatted_quote(q: dict[str, Any], symbol: str) -> dict[str, Any
         volume=float(vol),
         quote_time=bj,
         quote_time_et=et,
+        quote_source="cnbc",
     )
 
 
@@ -1257,6 +1263,7 @@ def _parse_akshare_row(row: Any, symbol: str) -> dict[str, Any] | None:
         price=price,
         change_pct=change_pct,
         volume=volume,
+        quote_source="eastmoney",
     )
 
 
@@ -1284,7 +1291,7 @@ async def _fetch_akshare_em_direct(symbols: list[str]) -> dict[str, dict[str, An
                         params={
                             "fltt": "2",
                             "secids": secids,
-                            "fields": "f12,f14,f2,f3,f5,f6",
+                            "fields": "f12,f14,f2,f3,f5,f6,f124",
                         },
                     )
                     resp.raise_for_status()
@@ -1305,12 +1312,29 @@ async def _fetch_akshare_em_direct(symbols: list[str]) -> dict[str, dict[str, An
                         volume = _to_float(item.get("f5")) or 0.0
                         if volume <= 0 and dollar and price:
                             volume = dollar / price
+                        quote_time = None
+                        quote_time_et = None
+                        ts = item.get("f124")
+                        if ts:
+                            try:
+                                dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+                                quote_time_et = dt.astimezone(_US_TZ).strftime(
+                                    "%Y-%m-%d %H:%M:%S %Z"
+                                )
+                                quote_time = dt.astimezone(_BJ_TZ).strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                )
+                            except (TypeError, ValueError, OSError, OverflowError):
+                                pass
                         out[sym] = _quote_row(
                             sym,
                             name=str(item.get("f14") or sym),
                             price=price,
                             change_pct=change_pct,
                             volume=volume,
+                            quote_time=quote_time,
+                            quote_time_et=quote_time_et,
+                            quote_source="eastmoney",
                         )
                         market_hits[sym] = mkt
                 except Exception as exc:
@@ -1366,6 +1390,7 @@ def _parse_akshare_sina_row(row: Any, symbol: str) -> dict[str, Any] | None:
         price=price,
         change_pct=change_pct,
         volume=volume,
+        quote_source="akshare",
     )
 
 
@@ -1390,7 +1415,14 @@ def _akshare_sina_daily_one(symbol: str) -> dict[str, Any] | None:
         prev = _to_float(df.iloc[-2].get("close"))
         if prev and prev > 0:
             change_pct = round((price - prev) / prev * 100, 2)
-    return _quote_row(symbol, name=symbol, price=price, change_pct=change_pct, volume=volume)
+    return _quote_row(
+        symbol,
+        name=symbol,
+        price=price,
+        change_pct=change_pct,
+        volume=volume,
+        quote_source="akshare",
+    )
 
 
 def _fetch_akshare_sina_daily_sync(symbols: list[str]) -> dict[str, dict[str, Any]]:
@@ -1498,6 +1530,7 @@ def _fetch_tushare_sync(symbols: list[str]) -> dict[str, dict[str, Any]]:
                 price=price,
                 change_pct=_to_float(row.get("pct_change")) or 0.0,
                 volume=_to_float(row.get("vol")) or 0.0,
+                quote_source="tushare",
             )
         if out:
             break
@@ -1545,6 +1578,7 @@ def _parse_finnhub_quote(data: dict[str, Any], symbol: str) -> dict[str, Any] | 
         volume=0.0,
         quote_time=quote_time,
         quote_time_et=quote_time_et,
+        quote_source="finnhub",
     )
 
 

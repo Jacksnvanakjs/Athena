@@ -149,3 +149,24 @@ def test_merge_soxl_fields_keeps_notional():
     assert out[0]["soxl_ret_pct"] == 3.5
     assert out[0]["soxl_close"] == 40.0
 
+
+def test_soxl_coverage_requires_full_series_not_just_tail():
+    from app.lev_etf.pipeline import _soxl_coverage_ok, _soxl_closes_cover_range
+
+    old = [{"date": f"2026-01-{i:02d}", "soxl_ret_pct": None} for i in range(2, 20)]
+    recent = [
+        {"date": f"2026-09-{i:02d}", "soxl_ret_pct": 1.0} for i in range(2, 22)
+    ]
+    mixed = [{"date": "2026-01-01", "soxl_ret_pct": None}] + old + recent
+    assert _soxl_coverage_ok(mixed) is False
+    assert _soxl_coverage_ok(mixed, tail=20) is True
+    filled = [{"date": "2026-01-01", "soxl_ret_pct": None}] + [
+        {"date": f"2026-02-{i:02d}", "soxl_ret_pct": 0.5} for i in range(1, 21)
+    ]
+    assert _soxl_coverage_ok(filled) is True
+
+    closes = {date(2026, 9, i): 40.0 for i in range(2, 22)}
+    assert _soxl_closes_cover_range(closes, date(2026, 1, 2), date(2026, 9, 21)) is False
+    closes[date(2026, 1, 5)] = 30.0
+    assert _soxl_closes_cover_range(closes, date(2026, 1, 2), date(2026, 9, 21)) is True
+
