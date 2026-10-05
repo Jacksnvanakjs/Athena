@@ -431,32 +431,13 @@ async def _fetch_soxl_closes(start: date, end: date) -> dict[date, float]:
         logger.warning("SOXL eastmoney failed: %s", exc)
     if len(out) >= 3:
         return out
-    try:
-        from app.market_data.daily_closes import fetch_daily_closes
-
-        _absorb(
-            await fetch_daily_closes(
-                "SOXL", lookback_days=lookback, skip_yahoo=True, rotate=False
-            )
-        )
-    except Exception as exc:
-        logger.warning("SOXL daily_closes failed: %s", exc)
-    if len(out) >= 3:
-        return out
-    try:
-        from app.lev_etf.fetch_ohlcv import fetch_ohlcv
-
-        bars = await fetch_ohlcv("SOXL", start=start - timedelta(days=10), end=end)
-        for d, c, _v in bars:
-            if c and float(c) > 0:
-                out[d] = float(c)
-    except Exception as exc:
-        logger.warning("SOXL ohlcv fallback failed: %s", exc)
     return out
 
 
 _SOXL_HYDRATE_LOCK = threading.Lock()
 _SOXL_HYDRATE_TS = 0.0
+_SOXL_BG_LOCK = threading.Lock()
+_SOXL_BG_STARTED = False
 
 
 def _hydrate_soxl_returns(
@@ -512,6 +493,32 @@ def _hydrate_soxl_returns(
                 except Exception as exc:
                     logger.warning("persist SOXL overlay failed: %s", exc)
         return daily, monthly
+
+
+_SOXL_BG_STARTED = False
+
+
+def _kick_soxl_hydrate_bg(daily: list[dict], monthly: list[dict] | None) -> None:
+    """SOXL 着色不挡成交额接口。"""
+    global _SOXL_BG_STARTED
+    if not daily or _soxl_coverage_ok(daily):
+        return
+    with _SOXL_BG_LOCK:
+        if _SOXL_BG_STARTED:
+            return
+        _SOXL_BG_STARTED = True
+
+    def _run() -> None:
+        global _SOXL_BG_STARTED
+        try:
+            _hydrate_soxl_returns(daily, monthly, persist=True)
+        except Exception:
+            logger.exception("SOXL hydrate background failed")
+        finally:
+            with _SOXL_BG_LOCK:
+                _SOXL_BG_STARTED = False
+
+    threading.Thread(target=_run, name="lev-soxl-hydrate", daemon=True).start()
 
 
 def _stored_monthly_points() -> list[dict]:
@@ -593,9 +600,6 @@ def _needs_lev_update(daily: list[dict] | None, monthly: list[dict] | None) -> t
     last = _daily_last_date(daily)
     if last is None:
         return True, True
-    # 已有成交额但缺 SOXL 涨跌：增量补近窗即可给日/月点着色
-    if daily and all(p.get("soxl_ret_pct") is None for p in daily[-8:]):
-        return True, False
     expected = last_completed_us_session()
     if last < expected:
         return True, False
@@ -702,20 +706,19 @@ def _get_series_payload(
         cached
         and now - float(mem.get("ts") or 0) < _MEM_TTL_SEC
         and cached.get("_all_points") is not None
-        and (
-            granularity != "day"
-            or _soxl_coverage_ok(cached["_all_points"])
-        )
     ):
+        pts = cached["_all_points"]
+        if granularity == "day" and not _soxl_coverage_ok(pts):
+            _kick_soxl_hydrate_bg(pts, _stored_monthly_points())
         out = _payload_from_points(
-            cached["_all_points"],
+            pts,
             granularity=granularity,
             year_filter=year_key,
             as_of_date=cached.get("as_of_date"),
             updated_at=cached.get("updated_at"),
             note=cached.get("note"),
         )
-        return _annotate_stale(out, cached["_all_points"])
+        return _annotate_stale(out, pts)
 
     if not stored:
         _maybe_kick_background_update(prefer_full=(granularity == "day"))
@@ -723,20 +726,7 @@ def _get_series_payload(
 
     daily_src = stored if granularity == "day" else _stored_daily_points()
     monthly_src = stored if granularity == "month" else _stored_monthly_points()
-    daily_h, monthly_h = _hydrate_soxl_returns(daily_src, monthly_src, persist=True)
-    stored = daily_h if granularity == "day" else (monthly_h or stored)
-    if granularity == "day" and monthly_h:
-        mem_m = dict(
-            _payload_from_points(monthly_h, granularity="month", year_filter="all")
-        )
-        mem_m["_all_points"] = monthly_h
-        _MEM_M["payload"] = mem_m
-        _MEM_M["ts"] = now
-    if granularity == "month" and daily_h:
-        mem_d = dict(_payload_from_points(daily_h, granularity="day", year_filter="all"))
-        mem_d["_all_points"] = daily_h
-        _MEM_D["payload"] = mem_d
-        _MEM_D["ts"] = now
+    _kick_soxl_hydrate_bg(daily_src, monthly_src)
 
     payload = _payload_from_points(stored, granularity=granularity, year_filter="all")
     mem_payload = dict(payload)

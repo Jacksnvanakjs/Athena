@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "quote_ts": 0.0, "data": None, "phase": None}
+_OVERLAY_BG = False
+_FULL_BG = False
 _COMPUTE_BUDGET_SEC = 110.0  # 报价 + 日K 软截止；超时回退库内快照（不编造）
 _PERIOD_BUDGET_SEC = 75.0
 _PERIOD_BUDGET_SETTLE_SEC = 180.0  # 收盘结算窗给足时间写全日 K
@@ -701,7 +703,7 @@ async def _overlay_live_1d(
     try:
         quotes, src = await asyncio.wait_for(
             _quotes_for_1d_overlay(phase),
-            timeout=28.0 if phase != "rth" else 18.0,
+            timeout=10.0 if phase != "rth" else 8.0,
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)
@@ -866,13 +868,67 @@ async def _overlay_until_fresh(
         if ok:
             return last, True
         if i + 1 < attempts:
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(0.4)
     if not last.get("1d_pending"):
         last = _mark_1d_pending(
             _strip_stale_1d_fields(dict(last), phase=phase),
             note=last.get("live_1d_note") or "1D 正在拉取最新报价…",
         )
     return last, False
+
+
+def _schedule_overlay_bg(base: dict[str, Any], phase: str) -> None:
+    """1D 叠加放到后台，避免 /api/ai-mainline 卡在慢源上。"""
+    import asyncio
+
+    global _OVERLAY_BG
+    if _OVERLAY_BG or not base:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _run() -> None:
+        global _OVERLAY_BG
+        try:
+            overlaid, ok = await _overlay_until_fresh(base, phase=phase, attempts=1)
+            _CACHE["data"] = overlaid
+            _CACHE["phase"] = phase
+            if ok:
+                _CACHE["quote_ts"] = time.time()
+        except Exception:
+            logger.exception("ai_mainline overlay background failed")
+        finally:
+            _OVERLAY_BG = False
+
+    _OVERLAY_BG = True
+    loop.create_task(_run())
+
+
+def _schedule_full_refresh_bg() -> None:
+    """日K全量刷新放到后台，页面先用库内/缓存快照。"""
+    import asyncio
+
+    global _FULL_BG
+    if _FULL_BG:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _run() -> None:
+        global _FULL_BG
+        try:
+            await compute_mainline(force=True)
+        except Exception:
+            logger.exception("ai_mainline full refresh background failed")
+        finally:
+            _FULL_BG = False
+
+    _FULL_BG = True
+    loop.create_task(_run())
 
 
 def _theme_name_map() -> dict[str, str]:
@@ -1214,24 +1270,12 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
             )
             if need_overlay:
                 logger.info(
-                    "ai_mainline 1d refresh phase=%s reason=%s quote_age=%.0fs",
+                    "ai_mainline 1d refresh bg phase=%s reason=%s quote_age=%.0fs",
                     phase,
                     reason,
                     quote_age,
                 )
-                overlaid, ok = await _overlay_until_fresh(
-                    cached, phase=phase, attempts=2
-                )
-                _CACHE["data"] = overlaid
-                _CACHE["phase"] = phase
-                if ok:
-                    _CACHE["quote_ts"] = now
-                else:
-                    # 失败不推进 quote_ts，下次请求立刻再拉
-                    _CACHE["quote_ts"] = min(
-                        float(_CACHE.get("quote_ts") or 0), now - 1e9
-                    )
-                return _finalize_payload(overlaid)
+                _schedule_overlay_bg(cached, phase)
             return _finalize_payload(cached)
 
         if not needs_full and base is not None:
@@ -1240,15 +1284,11 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                 need, reason = _needs_1d_refresh(base, phase, quote_age=1e9)
                 if need:
                     logger.info(
-                        "ai_mainline 1d refresh from base phase=%s reason=%s",
+                        "ai_mainline 1d refresh from base bg phase=%s reason=%s",
                         phase,
                         reason,
                     )
-                out, ok = await _overlay_until_fresh(base, phase=phase, attempts=2)
-                if ok:
-                    _CACHE["quote_ts"] = now
-                else:
-                    _CACHE["quote_ts"] = 0.0
+                    _schedule_overlay_bg(base, phase)
             elif out is db_payload and out is not None:
                 out = dict(out)
                 out["note"] = (out.get("note") or "") or (
@@ -1264,6 +1304,15 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
             _payload_trade_date(base),
             _period_coverage(base),
         )
+        if not force and base and _period_coverage(base) >= _COV_OK:
+            _schedule_full_refresh_bg()
+            if _live_1d_active(phase):
+                _schedule_overlay_bg(base, phase)
+            if not _CACHE.get("data"):
+                _CACHE["data"] = base
+            _CACHE["ts"] = now
+            _CACHE["phase"] = phase
+            return _finalize_payload(base)
 
     period_budget = (
         _PERIOD_BUDGET_SETTLE_SEC

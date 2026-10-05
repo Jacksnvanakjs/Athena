@@ -1239,7 +1239,7 @@
     async function loadMainline() {
       const { ctrl, isLatest, shouldPaint } = beginTabLoad('mainline');
       if (!mainlineHasData && shouldPaint()) showLoading('mlEmpty', '主线加载中…');
-      const timer = setTimeout(() => ctrl.abort(), 110000);
+      const timer = setTimeout(() => ctrl.abort(), 20000);
       try {
         for (let attempt = 0; attempt < 2; attempt++) {
           try {
@@ -1250,7 +1250,7 @@
             if (!isLatest()) return;
             if (data.success === false && !(data.themes || []).length) {
               if (!mainlineHasData && attempt === 0) {
-                await new Promise(r => setTimeout(r, 600));
+                await new Promise(r => setTimeout(r, 400));
                 continue;
               }
               if (mainlineHasData) {
@@ -1271,9 +1271,14 @@
             return;
           } catch (e) {
             if (!isLatest()) return;
-            if (e && e.name === 'AbortError') return;
+            if (e && e.name === 'AbortError') {
+              if (!mainlineHasData && shouldPaint()) {
+                showMainlineHardError('主线加载超时', '已改为先展示快照、后台补行情；请刷新重试。');
+              }
+              return;
+            }
             if (attempt === 0) {
-              await new Promise(r => setTimeout(r, 600));
+              await new Promise(r => setTimeout(r, 400));
               continue;
             }
             if (mainlineHasData) {
@@ -2464,12 +2469,16 @@
 
     async function loadLevEtf() {
       const empty = document.getElementById('levEmpty');
-      empty.style.display = 'block';
-      empty.textContent = '加载中…';
+      if (!levDailyPoints.length && !levMonthlyPoints.length) {
+        empty.style.display = 'block';
+        empty.textContent = '加载中…';
+      }
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
       try {
         const [dayRes, monthRes] = await Promise.all([
-          fetch('/api/lev-etf/tech/daily?year=all'),
-          fetch('/api/lev-etf/tech/monthly?year=all'),
+          fetch('/api/lev-etf/tech/daily?year=all', { signal: ctrl.signal }),
+          fetch('/api/lev-etf/tech/monthly?year=all', { signal: ctrl.signal }),
         ]);
         if (!dayRes.ok && !monthRes.ok) throw new Error('HTTP');
         const dayData = dayRes.ok ? await dayRes.json() : { points: [], available_years: [] };
@@ -2485,7 +2494,9 @@
           levMeta.as_of_date = dayData.as_of_date || monthData.as_of_date;
         }
         refreshLevView();
-        const needsPoll = !!(dayData.loading || dayData.stale || monthData.loading || monthData.stale);
+        const srcPts = levMode === 'day' ? levDailyPoints : levMonthlyPoints;
+        const soxlMissing = srcPts.length > 0 && srcPts.slice(-8).every(p => p.soxl_ret_pct == null);
+        const needsPoll = !!(dayData.loading || dayData.stale || monthData.loading || monthData.stale || soxlMissing);
         if (needsPoll) {
           const note = dayData.note || monthData.note;
           if (note && levDailyPoints.length) {
@@ -2494,11 +2505,20 @@
               el.innerHTML += `<span class="hint">${note}</span>`;
             }
           }
-          setTimeout(() => { if (currentTab === 'mainline') loadLevEtf(); }, 8000);
+          setTimeout(() => { if (currentTab === 'mainline') loadLevEtf(); }, soxlMissing ? 4000 : 8000);
         }
       } catch (e) {
+        if (levDailyPoints.length || levMonthlyPoints.length) {
+          refreshLevView();
+          return;
+        }
         empty.style.display = 'block';
-        empty.textContent = '加载失败，请稍后刷新。';
+        empty.textContent = (e && e.name === 'AbortError')
+          ? '加载超时，正在重试…'
+          : '加载失败，请稍后刷新。';
+        setTimeout(() => { if (currentTab === 'mainline') loadLevEtf(); }, 5000);
+      } finally {
+        clearTimeout(timer);
       }
     }
 
