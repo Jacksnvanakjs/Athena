@@ -94,3 +94,47 @@ def test_daily_partial_flag():
     assert pts[0]["is_partial"] is False
     assert pts[1]["is_partial"] is True
     assert pts[1]["date"] == "2026-09-28"
+
+
+def test_soxl_daily_and_monthly_returns():
+    from app.lev_etf.aggregate import (
+        attach_soxl_daily_returns,
+        attach_soxl_monthly_returns,
+        soxl_closes_from_bars,
+    )
+
+    bars = {
+        "SOXL": [
+            (date(2026, 5, 29), 20.0, 1_000_000),
+            (date(2026, 6, 2), 22.0, 1_000_000),
+            (date(2026, 6, 3), 21.0, 1_000_000),
+            (date(2026, 7, 1), 21.0, 1_000_000),
+        ]
+    }
+    closes = soxl_closes_from_bars(bars)
+    daily = attach_soxl_daily_returns(
+        [
+            {"date": "2026-05-29", "notional_bn": 1},
+            {"date": "2026-06-02", "notional_bn": 1},
+            {"date": "2026-06-03", "notional_bn": 1},
+            {"date": "2026-07-01", "notional_bn": 1},
+        ],
+        closes,
+    )
+    by = {p["date"]: p for p in daily}
+    assert by["2026-05-29"]["soxl_ret_pct"] is None
+    assert by["2026-06-02"]["soxl_ret_pct"] == 10.0
+    assert by["2026-06-03"]["soxl_ret_pct"] == -4.55
+    monthly = attach_soxl_monthly_returns(
+        [
+            {"month": "2026-05", "notional_bn": 1},
+            {"month": "2026-06", "notional_bn": 1},
+            {"month": "2026-07", "notional_bn": 1},
+        ],
+        closes,
+    )
+    mb = {p["month"]: p for p in monthly}
+    assert mb["2026-05"]["soxl_ret_pct"] is None
+    assert mb["2026-06"]["soxl_ret_pct"] == 5.0  # 21 vs 20
+    assert mb["2026-07"]["soxl_ret_pct"] == 0.0
+

@@ -33,6 +33,104 @@ def month_end(year: int, month: int) -> date:
     return date(year, month, calendar.monthrange(year, month)[1])
 
 
+def soxl_closes_from_bars(
+    bars_by_symbol: dict[str, list[OhlcvBar]],
+) -> dict[date, float]:
+    """从篮子 OHLCV 抽出 SOXL 收盘价。"""
+    out: dict[date, float] = {}
+    for d, close, _vol in bars_by_symbol.get("SOXL") or []:
+        try:
+            c = float(close)
+        except (TypeError, ValueError):
+            continue
+        if c > 0:
+            out[d] = c
+    return out
+
+
+def soxl_closes_from_points(points: Iterable[dict]) -> dict[date, float]:
+    out: dict[date, float] = {}
+    for p in points:
+        raw = str(p.get("date") or "")[:10]
+        if not raw:
+            continue
+        try:
+            d = date.fromisoformat(raw)
+            c = float(p.get("soxl_close"))
+        except (TypeError, ValueError):
+            continue
+        if c > 0:
+            out[d] = c
+    return out
+
+
+def _pct_change(prev: float, curr: float) -> float | None:
+    if prev is None or curr is None or prev <= 0 or curr <= 0:
+        return None
+    return round((curr / prev - 1.0) * 100.0, 2)
+
+
+def attach_soxl_daily_returns(
+    points: list[dict],
+    closes: dict[date, float],
+) -> list[dict]:
+    """给日度点挂 SOXL 收盘与相对前一交易日涨跌幅（%）。"""
+    if not points:
+        return points
+    by_date = dict(sorted(closes.items()))
+    dates = list(by_date)
+    ret_by: dict[date, float | None] = {}
+    for i, d in enumerate(dates):
+        if i == 0:
+            ret_by[d] = None
+            continue
+        ret_by[d] = _pct_change(by_date[dates[i - 1]], by_date[d])
+    out: list[dict] = []
+    for p in points:
+        row = dict(p)
+        try:
+            d = date.fromisoformat(str(p.get("date") or "")[:10])
+        except ValueError:
+            out.append(row)
+            continue
+        if d in by_date:
+            row["soxl_close"] = round(float(by_date[d]), 4)
+        if d in ret_by:
+            row["soxl_ret_pct"] = ret_by[d]
+        out.append(row)
+    return out
+
+
+def attach_soxl_monthly_returns(
+    points: list[dict],
+    closes: dict[date, float],
+) -> list[dict]:
+    """月度点：SOXL 该月末收 vs 上月末收 的涨跌幅（%）。"""
+    if not points:
+        return points
+    last_by_month: dict[str, float] = {}
+    for d, c in sorted(closes.items()):
+        if c and c > 0:
+            last_by_month[month_key(d)] = float(c)
+    months = list(sorted(last_by_month))
+    ret_by: dict[str, float | None] = {}
+    for i, mk in enumerate(months):
+        if i == 0:
+            ret_by[mk] = None
+            continue
+        ret_by[mk] = _pct_change(last_by_month[months[i - 1]], last_by_month[mk])
+    out: list[dict] = []
+    for p in points:
+        row = dict(p)
+        mk = str(p.get("month") or "")
+        if mk in last_by_month:
+            row["soxl_close"] = round(float(last_by_month[mk]), 4)
+        if mk in ret_by:
+            row["soxl_ret_pct"] = ret_by[mk]
+        out.append(row)
+    return out
+
+
 def to_daily_points(
     daily: dict[date, float],
     *,

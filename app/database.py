@@ -376,6 +376,8 @@ class LevEtfMonthly(Base):
     trading_days = Column(Integer, nullable=False, default=0)
     is_partial = Column(Boolean, nullable=False, default=False)
     as_of_date = Column(Date, nullable=True)
+    soxl_close = Column(Float, nullable=True)
+    soxl_ret_pct = Column(Float, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=now_beijing)
 
 
@@ -394,6 +396,8 @@ class LevEtfDaily(Base):
     trade_date = Column(Date, nullable=False, index=True)
     notional_usd = Column(Float, nullable=False, default=0.0)
     notional_bn = Column(Float, nullable=False, default=0.0)
+    soxl_close = Column(Float, nullable=True)
+    soxl_ret_pct = Column(Float, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=now_beijing)
 
 
@@ -733,6 +737,10 @@ def _ensure_sqlite_columns() -> None:
         ("nvda_signal_events", "push_bt_px_t1_close", "FLOAT"),
         ("nvda_signal_events", "push_bt_note", "VARCHAR(500)"),
         ("nvda_signal_events", "push_bt_checked_at", "DATETIME"),
+        ("lev_etf_daily", "soxl_close", "FLOAT"),
+        ("lev_etf_daily", "soxl_ret_pct", "FLOAT"),
+        ("lev_etf_monthly", "soxl_close", "FLOAT"),
+        ("lev_etf_monthly", "soxl_ret_pct", "FLOAT"),
     )
 
     def _column_names(conn, table: str) -> set[str]:

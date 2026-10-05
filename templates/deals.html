@@ -395,7 +395,7 @@
     .lev-stats strong { color: var(--text); font-weight: 600; }
     .lev-chart-wrap {
       position: relative;
-      height: 260px;
+      height: 300px;
       width: 100%;
     }
     .lev-foot {
@@ -404,6 +404,26 @@
       color: var(--text-muted);
       line-height: 1.55;
     }
+    .lev-legend {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px 16px;
+      margin-top: 8px;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .lev-legend i {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 5px;
+      vertical-align: 1px;
+    }
+    .lev-legend .up { background: #059669; }
+    .lev-legend .down { background: #dc2626; }
+    .lev-legend .flat { background: #94a3b8; }
     .lev-empty {
       padding: 28px 12px;
       text-align: center;
@@ -625,6 +645,12 @@
         </div>
         <div class="lev-foot" id="levFoot">
           名义成交额 = 科技杠杆/反向 ETF 篮子当日收盘价×成交量之和。按美东交易日（不受中国节假日影响）；可切换为月度合计。公开行情代理，非 Apex 专有数据。单股杠杆按上市后自然纳入；未完结日/月以 * 标注。
+        </div>
+        <div class="lev-legend" id="levLegend">
+          <span><i class="up"></i>绿点：SOXL 收涨</span>
+          <span><i class="down"></i>红点：SOXL 收跌</span>
+          <span><i class="flat"></i>灰点：平盘或暂无涨跌</span>
+          <span>点旁数字为该日/该月 SOXL 涨跌幅</span>
         </div>
       </div>
     </div>
@@ -2214,15 +2240,70 @@
       return levMode === 'day' ? (p.date || '—') : (p.month || '—');
     }
 
+    function levSoxlColor(p) {
+      const r = Number(p && p.soxl_ret_pct);
+      if (p == null || p.soxl_ret_pct == null || p.soxl_ret_pct === '' || Number.isNaN(r)) {
+        return '#94a3b8';
+      }
+      if (r > 0) return '#059669';
+      if (r < 0) return '#dc2626';
+      return '#94a3b8';
+    }
+
+    function levSoxlRetText(p) {
+      if (!p || p.soxl_ret_pct == null || p.soxl_ret_pct === '') return '';
+      const r = Number(p.soxl_ret_pct);
+      if (Number.isNaN(r)) return '';
+      const sign = r > 0 ? '+' : '';
+      return sign + r.toFixed(1) + '%';
+    }
+
+    function levSoxlPlugin() {
+      return {
+        id: 'levSoxlLabels',
+        afterDatasetsDraw(chart) {
+          const pts = chart.$levPoints || [];
+          if (!pts.length || !chart.$levShowSoxlLabels) return;
+          const meta = chart.getDatasetMeta(0);
+          if (!meta || !meta.data) return;
+          const ctx = chart.ctx;
+          ctx.save();
+          ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          let lastX = -999;
+          meta.data.forEach((el, i) => {
+            const p = pts[i];
+            const text = levSoxlRetText(p);
+            if (!text || !el) return;
+            const { x, y } = el.getProps(['x', 'y'], true);
+            if (x - lastX < 22 && i !== pts.length - 1) return;
+            lastX = x;
+            ctx.fillStyle = levSoxlColor(p);
+            ctx.fillText(text, x, y - 6);
+          });
+          ctx.restore();
+        },
+      };
+    }
+
     function syncLevChrome() {
       const title = document.getElementById('levTitle');
       const foot = document.getElementById('levFoot');
+      const legend = document.getElementById('levLegend');
       if (levMode === 'day') {
         title.textContent = '科技杠杆 ETF 名义成交额（日）';
         foot.textContent = '名义成交额 = 科技杠杆/反向 ETF 篮子当日收盘价×成交量之和（按美东交易日，不受中国节假日影响）。日视图按近几周筛选；当日未收盘有数据时标 *（盘中暂估）。公开行情代理，非 Apex 专有数据。可切换为按月合计。';
       } else {
         title.textContent = '科技杠杆 ETF 名义成交额（月）';
         foot.textContent = '名义成交额 = 科技杠杆/反向 ETF 篮子当日收盘价×成交量之和的月度合计（按美东交易日）。公开行情代理，非 Apex 专有数据。单股杠杆按上市后自然纳入；当月未完以 * 标注。';
+      }
+      if (legend) {
+        legend.innerHTML =
+          '<span><i class="up"></i>绿点：SOXL ' + (levMode === 'day' ? '当日' : '当月') + '收涨</span>' +
+          '<span><i class="down"></i>红点：SOXL ' + (levMode === 'day' ? '当日' : '当月') + '收跌</span>' +
+          '<span><i class="flat"></i>灰点：平盘或暂无涨跌</span>' +
+          '<span>点旁数字为该' + (levMode === 'day' ? '日' : '月') + ' SOXL 涨跌幅（相对前一' + (levMode === 'day' ? '交易日' : '月末') + '收盘）</span>';
       }
     }
 
@@ -2247,10 +2328,15 @@
       const rangeHint = (levMode === 'day' && points.length > 1)
         ? `<span>区间 ${points[0].date || ''}～${latest.date || ''}</span>`
         : '';
+      const soxlTxt = levSoxlRetText(latest);
+      const soxlSpan = soxlTxt
+        ? `<span>SOXL ${levMode === 'day' ? '当日' : '当月'} <strong class="${Number(latest.soxl_ret_pct) < 0 ? 'pct-neg' : 'pct-pos'}">${soxlTxt}</strong></span>`
+        : '';
       el.innerHTML =
         `<span>最新 <strong>${latestKey}${star}</strong>：` +
         `<strong>${Number(latest.notional_bn).toFixed(levMode === 'day' ? 2 : 1)}</strong> 十亿美元${partial}</span>` +
         `<span>峰值 <strong>${mxKey}</strong>：<strong>${Number(mx.notional_bn).toFixed(levMode === 'day' ? 2 : 1)}</strong></span>` +
+        soxlSpan +
         rangeHint +
         (data && data.as_of_date
           ? `<span>数据截至 ${data.as_of_date}（美东交易日）</span>`
@@ -2272,29 +2358,30 @@
       const labels = points.map(levPointLabel);
       const values = points.map(p => Number(p.notional_bn));
       const isDay = levMode === 'day';
-      const pointRadius = points.map(p => p.is_partial ? 4 : (isDay ? (points.length <= 12 ? 3 : 0) : 2));
-      const pointBg = points.map(p => p.is_partial ? '#fff' : '#2563eb');
-      const tickLimit = isDay ? Math.min(12, Math.max(5, points.length)) : 14;
+      const n = points.length;
+      const showLabels = n <= 40;
+      const baseR = n <= 40 ? 4 : (n <= 90 ? 3 : 2);
+      const pointRadius = points.map(p => p.is_partial ? baseR + 1 : baseR);
+      const pointBg = points.map(levSoxlColor);
+      const pointBd = points.map(p => p.is_partial ? '#fff' : levSoxlColor(p));
+      const tickLimit = isDay ? Math.min(12, Math.max(5, n)) : 14;
       const decimals = isDay ? 2 : 1;
+      const tooltipLabel = function(ctx) {
+        const p = points[ctx.dataIndex] || {};
+        const star = p.is_partial ? (isDay ? '（盘中暂估）' : '（当月未完）') : '';
+        const when = isDay ? (p.date || '') : (p.month || '');
+        const soxl = levSoxlRetText(p);
+        const soxlBit = soxl ? ` · SOXL ${soxl}` : '';
+        const prefix = when ? ` ${when}` : '';
+        return `${prefix} ${Number(ctx.parsed.y).toFixed(decimals)} 十亿美元${star}${soxlBit}`;
+      };
       if (levChart) {
-        levChart.data.labels = labels;
-        levChart.data.datasets[0].data = values;
-        levChart.data.datasets[0].pointRadius = pointRadius;
-        levChart.data.datasets[0].pointBackgroundColor = pointBg;
-        levChart.data.datasets[0].pointHoverRadius = isDay ? 3 : 4;
-        levChart.options.scales.x.ticks.maxTicksLimit = tickLimit;
-        levChart.options.plugins.tooltip.callbacks.label = function(ctx) {
-          const p = points[ctx.dataIndex] || {};
-          const star = p.is_partial ? (isDay ? '（盘中暂估）' : '（当月未完）') : '';
-          const when = isDay ? (p.date || '') : '';
-          const prefix = when ? ` ${when}` : '';
-          return `${prefix} ${Number(ctx.parsed.y).toFixed(decimals)} 十亿美元${star}`;
-        };
-        levChart.update('none');
-        return;
+        levChart.destroy();
+        levChart = null;
       }
       levChart = new Chart(canvas, {
         type: 'line',
+        plugins: [levSoxlPlugin()],
         data: {
           labels,
           datasets: [{
@@ -2306,28 +2393,20 @@
             tension: isDay ? 0.15 : 0.25,
             borderWidth: 2,
             pointRadius,
-            pointHoverRadius: isDay ? 3 : 4,
+            pointHoverRadius: baseR + 2,
             pointBackgroundColor: pointBg,
-            pointBorderColor: '#2563eb',
+            pointBorderColor: pointBd,
+            pointBorderWidth: points.map(p => p.is_partial ? 2 : 1),
           }],
         },
         options: {
           responsive: true,
           maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
+          layout: { padding: { top: showLabels ? 18 : 8, right: 12 } },
           plugins: {
             legend: { display: false },
-            tooltip: {
-              callbacks: {
-                label(ctx) {
-                  const p = points[ctx.dataIndex] || {};
-                  const star = p.is_partial ? (isDay ? '（盘中暂估）' : '（当月未完）') : '';
-                  const when = isDay ? (p.date || '') : '';
-                  const prefix = when ? ` ${when}` : '';
-                  return `${prefix} ${Number(ctx.parsed.y).toFixed(decimals)} 十亿美元${star}`;
-                },
-              },
-            },
+            tooltip: { callbacks: { label: tooltipLabel } },
           },
           scales: {
             x: {
@@ -2342,6 +2421,8 @@
           },
         },
       });
+      levChart.$levPoints = points;
+      levChart.$levShowSoxlLabels = showLabels;
     }
 
     function syncLevFilterControl() {

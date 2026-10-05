@@ -14,11 +14,15 @@ from zoneinfo import ZoneInfo
 
 from app.lev_etf.aggregate import (
     aggregate_monthly,
+    attach_soxl_daily_returns,
+    attach_soxl_monthly_returns,
     build_stats,
     daily_basket_notional,
     daily_points_to_map,
     filter_year,
     month_key,
+    soxl_closes_from_bars,
+    soxl_closes_from_points,
     to_daily_points,
 )
 from app.lev_etf.basket import (
@@ -193,6 +197,12 @@ def _load_monthly_from_db() -> list[dict] | None:
                 "trading_days": int(r.trading_days or 0),
                 "is_partial": bool(r.is_partial),
                 "as_of_date": r.as_of_date.isoformat() if r.as_of_date else None,
+                "soxl_close": (
+                    float(r.soxl_close) if getattr(r, "soxl_close", None) is not None else None
+                ),
+                "soxl_ret_pct": (
+                    float(r.soxl_ret_pct) if getattr(r, "soxl_ret_pct", None) is not None else None
+                ),
             }
             for r in rows
         ]
@@ -223,6 +233,12 @@ def _load_daily_from_db() -> list[dict] | None:
                 "date": r.trade_date.isoformat(),
                 "notional_usd": float(r.notional_usd or 0),
                 "notional_bn": float(r.notional_bn or 0),
+                "soxl_close": (
+                    float(r.soxl_close) if getattr(r, "soxl_close", None) is not None else None
+                ),
+                "soxl_ret_pct": (
+                    float(r.soxl_ret_pct) if getattr(r, "soxl_ret_pct", None) is not None else None
+                ),
             }
             for r in rows
         ]
@@ -266,6 +282,8 @@ def _upsert_monthly_db(points: list[dict]) -> int:
                         trading_days=int(p["trading_days"]),
                         is_partial=bool(p.get("is_partial")),
                         as_of_date=as_of,
+                        soxl_close=p.get("soxl_close"),
+                        soxl_ret_pct=p.get("soxl_ret_pct"),
                         updated_at=now,
                     )
                     db.add(row)
@@ -275,6 +293,8 @@ def _upsert_monthly_db(points: list[dict]) -> int:
                     row.trading_days = int(p["trading_days"])
                     row.is_partial = bool(p.get("is_partial"))
                     row.as_of_date = as_of
+                    row.soxl_close = p.get("soxl_close")
+                    row.soxl_ret_pct = p.get("soxl_ret_pct")
                     row.updated_at = now
                 n += 1
             db.commit()
@@ -313,12 +333,16 @@ def _upsert_daily_db(points: list[dict]) -> int:
                         trade_date=td,
                         notional_usd=float(p["notional_usd"]),
                         notional_bn=float(p["notional_bn"]),
+                        soxl_close=p.get("soxl_close"),
+                        soxl_ret_pct=p.get("soxl_ret_pct"),
                         updated_at=now,
                     )
                     db.add(row)
                 else:
                     row.notional_usd = float(p["notional_usd"])
                     row.notional_bn = float(p["notional_bn"])
+                    row.soxl_close = p.get("soxl_close")
+                    row.soxl_ret_pct = p.get("soxl_ret_pct")
                     row.updated_at = now
                 n += 1
             db.commit()
@@ -407,6 +431,9 @@ def _needs_lev_update(daily: list[dict] | None, monthly: list[dict] | None) -> t
     last = _daily_last_date(daily)
     if last is None:
         return True, True
+    # 已有成交额但缺 SOXL 涨跌：增量补近窗即可给日/月点着色
+    if daily and all(p.get("soxl_ret_pct") is None for p in daily[-8:]):
+        return True, False
     expected = last_completed_us_session()
     if last < expected:
         return True, False
@@ -634,6 +661,10 @@ async def run_lev_etf_update(*, force_full: bool = False) -> dict[str, Any]:
                 elif p.get("date") != (partial_date.isoformat() if partial_date else None):
                     p["is_partial"] = False
 
+        soxl_closes = soxl_closes_from_points(daily_points)
+        soxl_closes.update(soxl_closes_from_bars(bars))
+        daily_points = attach_soxl_daily_returns(daily_points, soxl_closes)
+
         full_daily_map = daily_points_to_map(daily_points)
         start_month = str(basket.get("start_month") or "2023-01")
         monthly_points = aggregate_monthly(
@@ -642,6 +673,7 @@ async def run_lev_etf_update(*, force_full: bool = False) -> dict[str, Any]:
             as_of=max(full_daily_map) if full_daily_map else today,
             current_et_month=month_key(today),
         )
+        monthly_points = attach_soxl_monthly_returns(monthly_points, soxl_closes)
 
         daily_payload = _payload_from_points(
             daily_points, granularity="day", year_filter="all"
