@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI 合作快讯</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
   <script src="/static/js/auto_refresh.js"></script>
   <style>
     :root {
@@ -397,7 +399,26 @@
       position: relative;
       height: 300px;
       width: 100%;
+      cursor: grab;
+      touch-action: none;
+      user-select: none;
     }
+    .lev-chart-wrap:active { cursor: grabbing; }
+    .lev-zoom-hint {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      margin-left: 4px;
+    }
+    .btn-lev-reset {
+      padding: 5px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.78rem;
+    }
+    .btn-lev-reset:hover { background: #f8fafc; }
     .lev-foot {
       margin-top: 10px;
       font-size: 0.75rem;
@@ -637,6 +658,7 @@
               <option value="13w">近13周</option>
               <option value="all">全部</option>
             </select>
+            <button type="button" class="btn-lev-reset" id="levResetZoom" title="还原缩放与平移">还原视图</button>
           </div>
         </div>
         <div class="lev-stats" id="levStats"></div>
@@ -2278,42 +2300,22 @@
           if (!pts.length || !chart.$levShowSoxlLabels) return;
           const meta = chart.getDatasetMeta(0);
           if (!meta || !meta.data) return;
-          const items = [];
+          const ctx = chart.ctx;
+          ctx.save();
+          ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          let lastX = -999;
+          const minGap = Number(chart.$levLabelGap) > 0 ? Number(chart.$levLabelGap) : 22;
           meta.data.forEach((el, i) => {
             const p = pts[i];
             const text = levSoxlRetText(p);
             if (!text || !el) return;
             const { x, y } = el.getProps(['x', 'y'], true);
-            items.push({ x, y, text, p, last: i === pts.length - 1 });
-          });
-          if (!items.length) return;
-          let minDx = 9999;
-          for (let i = 1; i < items.length; i++) {
-            minDx = Math.min(minDx, items[i].x - items[i - 1].x);
-          }
-          const vertical = items.length >= 2 && minDx < 26;
-          const minGap = vertical ? 11 : (Number(chart.$levLabelGap) > 0 ? Number(chart.$levLabelGap) : 22);
-          const ctx = chart.ctx;
-          ctx.save();
-          ctx.font = (vertical ? '9px' : '10px') + ' -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-          let lastX = -999;
-          items.forEach((it) => {
-            if (it.x - lastX < minGap && !it.last) return;
-            lastX = it.x;
-            ctx.fillStyle = levSoxlColor(it.p);
-            if (vertical) {
-              ctx.save();
-              ctx.translate(it.x, it.y - 8);
-              ctx.rotate(-Math.PI / 2);
-              ctx.textAlign = 'left';
-              ctx.textBaseline = 'middle';
-              ctx.fillText(it.text, 0, 0);
-              ctx.restore();
-            } else {
-              ctx.textAlign = 'center';
-              ctx.textBaseline = 'bottom';
-              ctx.fillText(it.text, it.x, it.y - 6);
-            }
+            if (x - lastX < minGap && i !== pts.length - 1) return;
+            lastX = x;
+            ctx.fillStyle = levSoxlColor(p);
+            ctx.fillText(text, x, y - 6);
           });
           ctx.restore();
         },
@@ -2336,7 +2338,8 @@
           '<span><i class="up"></i>绿点：SOXL ' + (levMode === 'day' ? '当日' : '当月') + '收涨</span>' +
           '<span><i class="down"></i>红点：SOXL ' + (levMode === 'day' ? '当日' : '当月') + '收跌</span>' +
           '<span><i class="flat"></i>灰点：平盘或暂无涨跌</span>' +
-          '<span>点旁数字为该' + (levMode === 'day' ? '日' : '月') + ' SOXL 涨跌幅（相对前一' + (levMode === 'day' ? '交易日' : '月末') + '收盘）</span>';
+          '<span>点旁数字为该' + (levMode === 'day' ? '日' : '月') + ' SOXL 涨跌幅（相对前一' + (levMode === 'day' ? '交易日' : '月末') + '收盘）</span>' +
+          '<span>滚轮/捏合缩放 · 拖动平移 · 双击或「还原视图」复位</span>';
       }
     }
 
@@ -2376,6 +2379,42 @@
           : '');
     }
 
+    function levFitYAxis(chart) {
+      const pts = chart && chart.$levPoints;
+      if (!chart || !pts || !pts.length || !chart.scales || !chart.scales.x) return;
+      const x = chart.scales.x;
+      let minI = Math.floor(Number(x.min));
+      let maxI = Math.ceil(Number(x.max));
+      if (!Number.isFinite(minI)) minI = 0;
+      if (!Number.isFinite(maxI)) maxI = pts.length - 1;
+      minI = Math.max(0, minI);
+      maxI = Math.min(pts.length - 1, maxI);
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = minI; i <= maxI; i++) {
+        const v = Number((pts[i] || {}).notional_bn);
+        if (!Number.isFinite(v)) continue;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+      if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+      const pad = (hi - lo) * 0.12 || Math.abs(hi) * 0.08 || 0.1;
+      chart.options.scales.y.min = Math.max(0, lo - pad);
+      chart.options.scales.y.max = hi + pad;
+    }
+
+    function levResetZoom() {
+      if (!levChart) return;
+      try {
+        if (typeof levChart.resetZoom === 'function') levChart.resetZoom('none');
+      } catch (_) {}
+      if (levChart.options && levChart.options.scales && levChart.options.scales.y) {
+        delete levChart.options.scales.y.min;
+        delete levChart.options.scales.y.max;
+      }
+      try { levChart.update('none'); } catch (_) {}
+    }
+
     function renderLevChart(points) {
       const empty = document.getElementById('levEmpty');
       const canvas = document.getElementById('levChart');
@@ -2406,7 +2445,7 @@
       const pointBorderW = (ctx) => ((points[ctx.dataIndex] || {}).is_partial ? 2 : 1);
       const tickLimit = isDay ? Math.min(12, Math.max(5, n)) : 14;
       const decimals = isDay ? 2 : 1;
-      const minLabelGap = n > 80 ? 28 : (n > 40 ? 22 : 16);
+      const minLabelGap = 22;
       const tooltipLabel = function(ctx) {
         const p = points[ctx.dataIndex] || {};
         const star = p.is_partial ? (isDay ? '（盘中暂估）' : '（当月未完）') : '';
@@ -2420,6 +2459,7 @@
         levChart.destroy();
         levChart = null;
       }
+      const minRange = Math.max(4, Math.min(12, Math.floor(n / 4) || 4));
       levChart = new Chart(canvas, {
         type: 'line',
         plugins: [levSoxlPlugin()],
@@ -2444,10 +2484,28 @@
           responsive: true,
           maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
-          layout: { padding: { top: showLabels ? (n >= 16 ? 40 : 18) : 8, right: 12 } },
+          layout: { padding: { top: 18, right: 12 } },
           plugins: {
             legend: { display: false },
             tooltip: { callbacks: { label: tooltipLabel } },
+            zoom: {
+              limits: {
+                x: { min: 'original', max: 'original', minRange: minRange },
+              },
+              pan: {
+                enabled: true,
+                mode: 'x',
+                modifierKey: null,
+                onPanComplete({ chart }) { levFitYAxis(chart); chart.update('none'); },
+              },
+              zoom: {
+                wheel: { enabled: true, speed: 0.12 },
+                pinch: { enabled: true },
+                drag: { enabled: false },
+                mode: 'x',
+                onZoomComplete({ chart }) { levFitYAxis(chart); chart.update('none'); },
+              },
+            },
           },
           scales: {
             x: {
@@ -2465,6 +2523,10 @@
       levChart.$levPoints = points;
       levChart.$levShowSoxlLabels = showLabels;
       levChart.$levLabelGap = minLabelGap;
+      canvas.ondblclick = (ev) => {
+        ev.preventDefault();
+        levResetZoom();
+      };
       try { levChart.update('none'); } catch (_) {}
     }
 
@@ -2566,6 +2628,8 @@
       else levYearFilter = v;
       refreshLevView();
     });
+    const levResetBtn = document.getElementById('levResetZoom');
+    if (levResetBtn) levResetBtn.addEventListener('click', () => levResetZoom());
     document.getElementById('levGranularity').addEventListener('change', () => {
       levMode = document.getElementById('levGranularity').value === 'month' ? 'month' : 'day';
       levMeta = {
