@@ -53,6 +53,31 @@ def test_sina_hq_code_adr():
     assert _sina_hq_code("TSM") == "gb_tsm"
     assert _sina_hq_code("ASML") == "gb_asml"
     assert _sina_hq_code("BRK.B") == "gb_brkb"
+    assert _sina_hq_code("S") == "gb_s"
+    assert _sina_hq_code("AI") == "gb_ai"
+
+
+def test_unstamped_eastmoney_still_counts_as_hole():
+    from app.heatmap import _quote_lacks_session_stamp
+
+    assert _quote_lacks_session_stamp(None)
+    assert _quote_lacks_session_stamp({"change_pct": 1.2, "quote_source": "eastmoney"})
+    assert not _quote_lacks_session_stamp(
+        {
+            "change_pct": 1.2,
+            "quote_source": "eastmoney",
+            "quote_time_et": "2026-10-06 10:00:00 EDT",
+        }
+    )
+
+
+def test_alt_quote_carries_session_stamp():
+    from app.market_data.alt_sources import _quote_dict
+
+    q = _quote_dict("CRWD", price=100.0, change_pct=1.5, volume=1e6)
+    assert q["quote_source"] == "alt"
+    assert q.get("quote_time")
+    assert q.get("quote_time_et")
 
 
 def test_premarket_uses_extended_price():

@@ -967,7 +967,7 @@ async def _overlay_live_1d(
     try:
         quotes, src = await asyncio.wait_for(
             _quotes_for_1d_overlay(phase),
-            timeout=12.0 if phase != "rth" else 16.0,
+            timeout=22.0 if phase != "rth" else 32.0,
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)

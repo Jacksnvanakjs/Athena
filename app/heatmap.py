@@ -440,6 +440,15 @@ def _quote_row(
     return row
 
 
+def _quote_lacks_session_stamp(row: dict[str, Any] | None) -> bool:
+    """无成交印记：盘中会被主线丢掉，补洞时仍当缺口。"""
+    if not row:
+        return True
+    if row.get("change_pct") is None:
+        return True
+    return not row.get("quote_time") and not row.get("quote_time_et")
+
+
 _US_TZ = ZoneInfo("America/New_York")
 _BJ_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -1160,9 +1169,9 @@ async def _fill_quote_holes(
     *,
     timeout: float = 10.0,
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """覆盖率够时仍补缺口：TSM/ASML 等 ADR 常被东财/Finnhub 漏掉。
+    """覆盖率够时仍补缺口：TSM/ASML、短代码 S/AI，以及无成交印记的东财票。
 
-    快路径：新浪 hq（国内）→ Yahoo。不做全表慢补。
+    快路径：新浪 hq → Yahoo → CNBC。不做全表慢补。
     """
     have = existing or {}
     missing = [
@@ -1170,10 +1179,7 @@ async def _fill_quote_holes(
         for s in symbols
         if s
         and str(s).strip()
-        and (
-            s.upper().strip() not in have
-            or (have.get(s.upper().strip()) or {}).get("change_pct") is None
-        )
+        and _quote_lacks_session_stamp(have.get(s.upper().strip()))
     ]
     if not missing:
         return {}, "none"
@@ -1206,6 +1212,19 @@ async def _fill_quote_holes(
         if yahoo:
             added.update(yahoo)
             used.append(f"Yahoo:{len(yahoo)}")
+    still = [s for s in missing if s not in added]
+    if still:
+        try:
+            cnbc = await asyncio.wait_for(
+                _fetch_cnbc_session_quotes(still),
+                timeout=min(12.0, max(5.0, timeout)),
+            )
+        except Exception as exc:
+            logger.warning("hole fill cnbc failed: %s", exc)
+            cnbc = {}
+        if cnbc:
+            added.update(cnbc)
+            used.append(f"CNBC:{len(cnbc)}")
     return added, "+".join(used) if used else "none"
 
 
@@ -1404,16 +1423,14 @@ async def _fetch_akshare_em_direct(symbols: list[str]) -> dict[str, dict[str, An
                     logger.warning("AKShare EM direct batch failed: %s", exc)
                 if fail_streak >= 3:
                     logger.warning(
-                        "AKShare EM direct abort after %s consecutive failures (%s/%s)",
+                        "AKShare EM direct skip market %s after %s failures (%s/%s)",
+                        mkt,
                         fail_streak,
                         len(out),
                         len(symbols),
                     )
-                    if market_hits:
-                        from app.market_data.daily_closes import seed_eastmoney_markets
-
-                        seed_eastmoney_markets(market_hits)
-                    return out
+                    fail_streak = 0
+                    break
     if market_hits:
         from app.market_data.daily_closes import seed_eastmoney_markets
 
@@ -1706,7 +1723,7 @@ async def _fetch_finnhub_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]
                     await asyncio.sleep(0.25)
 
     try:
-        await asyncio.wait_for(_run(), timeout=10)
+        await asyncio.wait_for(_run(), timeout=16 if len(uniq) <= 24 else 10)
     except asyncio.TimeoutError:
         stop.set()
         logger.warning("Finnhub quote budget 10s，已得 %s/%s", len(out), len(uniq))
@@ -1939,25 +1956,25 @@ async def _fetch_quotes(
     *,
     allow_slow_fill: bool = True,
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """东财 ulist ∥ Finnhub → 轮动补缺 → Yahoo →（可选）AKShare 慢补 → Tushare。
+    """东财 ulist → Finnhub 只补缺口 → 轮动补缺 → Yahoo →（可选）AKShare 慢补 → Tushare。
 
-    东财与 Finnhub 并行：Finnhub 价/涨跌（昨收重算）优先；东财补成交量与缺票。
+    Finnhub 免费档额度紧，先等东财，只对仍缺/无印记的票打 Finnhub，避免排在后面的子线被 429 截掉。
     """
     from app.config import FINNHUB_API_KEY
 
     sources_used: list[str] = []
     merged: dict[str, dict[str, Any]] = {}
 
-    em_task = asyncio.create_task(_fetch_akshare_em_direct(symbols))
-    fh_task = None
-    if (FINNHUB_API_KEY or "").strip():
-        fh_task = asyncio.create_task(_fetch_finnhub_quotes(symbols))
+    em = await _fetch_akshare_em_direct(symbols)
+    if em:
+        merged.update(em)
+        sources_used.append(f"EastMoney:{len(em)}")
 
-    em = await em_task
+    fh_need = [s for s in symbols if _quote_lacks_session_stamp(merged.get(s))]
     fh: dict[str, dict[str, Any]] = {}
-    if fh_task is not None:
+    if fh_need and (FINNHUB_API_KEY or "").strip():
         try:
-            fh = await fh_task
+            fh = await _fetch_finnhub_quotes(fh_need)
         except Exception as exc:
             logger.warning("Finnhub quotes task failed: %s", exc)
             fh = {}
@@ -1984,7 +2001,7 @@ async def _fetch_quotes(
                 merged[sym] = row
         sources_used.append(f"Finnhub:{len(fh)}")
 
-    missing = [s for s in symbols if s not in merged]
+    missing = [s for s in symbols if _quote_lacks_session_stamp(merged.get(s))]
     # 轮动补缺：TradingView / Finviz / Alpha Vantage（有 key 才启用）
     if missing:
         try:
@@ -1997,7 +2014,7 @@ async def _fetch_quotes(
         except Exception as exc:
             logger.warning("rotating quote fill failed: %s", exc)
 
-    missing = [s for s in symbols if s not in merged]
+    missing = [s for s in symbols if _quote_lacks_session_stamp(merged.get(s))]
     # 覆盖率够也要补洞：TSM 等常不在东财 ulist / Finnhub 批次里
     if missing:
         try:
@@ -2008,14 +2025,14 @@ async def _fetch_quotes(
         except Exception as exc:
             logger.warning("quote hole fill failed: %s", exc)
 
-    missing = [s for s in symbols if s not in merged]
+    missing = [s for s in symbols if _quote_lacks_session_stamp(merged.get(s))]
     skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in ("1", "true", "yes")
     if missing and not skip_yahoo:
         yahoo = await _fetch_yahoo(missing)
         if yahoo:
             merged.update(yahoo)
             sources_used.append(f"Yahoo:{len(yahoo)}")
-        missing = [s for s in symbols if s not in merged]
+        missing = [s for s in symbols if _quote_lacks_session_stamp(merged.get(s))]
 
     # 覆盖够，或主线禁止慢补：直接返回（缺票在指标侧剔除）
     if (not missing) or _is_quality_ok(len(merged), len(symbols)) or not allow_slow_fill:

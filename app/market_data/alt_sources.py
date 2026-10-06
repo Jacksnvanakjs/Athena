@@ -49,14 +49,17 @@ def _quote_dict(
     volume: float = 0.0,
     name: str | None = None,
 ) -> dict[str, Any]:
-    from app.heatmap import _quote_row
+    from app.heatmap import _BJ_TZ, _US_TZ, _quote_row
 
+    now_et = datetime.now(_US_TZ)
     return _quote_row(
         symbol,
         name=name or symbol,
         price=price,
         change_pct=change_pct,
         volume=volume,
+        quote_time=now_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        quote_time_et=now_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
         quote_source="alt",
     )
 
@@ -100,7 +103,7 @@ async def fetch_tradingview_quotes(symbols: list[str]) -> dict[str, dict[str, An
             for row in data:
                 raw = str(row.get("s") or "")
                 sym = raw.split(":")[-1].upper().strip()
-                if sym not in uniq or sym in out:
+                if sym not in uniq:
                     continue
                 vals = row.get("d") or []
                 if len(vals) < 2:
@@ -110,9 +113,12 @@ async def fetch_tradingview_quotes(symbols: list[str]) -> dict[str, dict[str, An
                 vol = _to_float(vals[3]) if len(vals) > 3 else 0.0
                 if price is None or price <= 0 or chg is None:
                     continue
-                out[sym] = _quote_dict(
+                cand = _quote_dict(
                     sym, price=price, change_pct=round(chg, 2), volume=vol or 0.0
                 )
+                prev = out.get(sym)
+                if prev is None or (vol or 0) > (prev.get("volume") or 0):
+                    out[sym] = cand
             await asyncio.sleep(0.05)
     return out
 
@@ -406,14 +412,15 @@ async def fill_quotes_rotating(
     *,
     existing: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """对缺票按轮动顺序补报价；返回 (merged_additions, used_source_labels)。"""
+    """对缺票/无成交印记按轮动顺序补报价；返回 (merged_additions, used_source_labels)。"""
     from app.config import ALPHA_VANTAGE_API_KEY
+    from app.heatmap import _quote_lacks_session_stamp
     from app.market_data.cascade import next_batch_order
 
     missing = [
         s.upper().strip()
         for s in symbols
-        if s and str(s).strip() and s.upper().strip() not in (existing or {})
+        if s and str(s).strip() and _quote_lacks_session_stamp((existing or {}).get(s.upper().strip()))
     ]
     if not missing:
         return {}, []
