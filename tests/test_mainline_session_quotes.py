@@ -169,9 +169,15 @@ def test_rth_rejects_prior_close_quotes_and_clears_snapshot_1d():
     em_live = dict(live)
     em_live["quote_source"] = "eastmoney"
     em_live["change_pct"] = 4.2
-    dropped, kind_em = _filter_quotes_for_1d({"MU": em_live}, "rth")
+    # 有今日盘中印记的东财应可用（Finnhub 限流时的主备源）
+    kept_em, kind_em = _filter_quotes_for_1d({"MU": em_live}, "rth")
+    if now.hour > 9 or (now.hour == 9 and now.minute >= 30):
+        assert kept_em.get("MU") is em_live
+        assert kind_em == "rth"
+    em_nostamp = {"change_pct": 4.2, "quote_source": "eastmoney"}
+    dropped, kind_drop = _filter_quotes_for_1d({"MU": em_nostamp}, "rth")
     assert dropped == {}
-    assert kind_em in ("em_stale", "no_rth")
+    assert kind_drop in ("em_stale", "no_rth")
 
     fh_live = dict(live)
     fh_live["quote_source"] = "finnhub"

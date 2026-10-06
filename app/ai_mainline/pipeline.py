@@ -337,11 +337,26 @@ def _period_coverage(payload: dict[str, Any] | None) -> int:
     return n5 * 2 + n20
 
 
+def _basket_keys_mismatch(base: dict[str, Any] | None) -> bool:
+    """篮子增删主题后，旧快照缺行 → 强制全量重算。"""
+    if not base:
+        return True
+    have = {
+        str(t.get("key"))
+        for t in (base.get("themes") or [])
+        if t.get("key")
+    }
+    want = {str(t.get("key")) for t in enabled_themes() if t.get("key")}
+    return have != want
+
+
 def _needs_full_refresh(base: dict[str, Any] | None) -> bool:
     """主线以日线相对强弱为主；仅在缺数或落后于「已收盘交易日」时全量重算。"""
     from app.utils import last_completed_us_session
 
     if not base or _period_coverage(base) < _COV_OK:
+        return True
+    if _basket_keys_mismatch(base):
         return True
     snap_d = _payload_trade_date(base)
     if snap_d is None:
@@ -484,16 +499,21 @@ def _quote_stamp_too_old(row: dict[str, Any] | None, *, now: datetime | None = N
     return (now - dt).total_seconds() > 60 * 60 * 60  # 60h
 
 
-# 盘中 1D 不可信：东财/日线源常把昨收涨跌配上「当前心跳」时间戳
-_RTH_UNTRUSTED_1D_SOURCES = frozenset({"eastmoney", "tushare", "akshare"})
+# 盘中 1D：日线收盘源不可用；东财仅在无成交印记时不可信
+# （Finnhub 常限流，有今日 9:30+ 印记的东财涨跌应可用）
+_RTH_DAILY_BAR_SOURCES = frozenset({"tushare", "akshare"})
 
 
 def _rth_quote_trusted(row: dict[str, Any] | None) -> bool:
-    if not row:
+    """盘中可信报价：会话印记已在外层过滤；此处拦日线源与无戳东财。"""
+    if not row or row.get("change_pct") is None:
         return False
     src = str(row.get("quote_source") or "").strip().lower()
-    if src in _RTH_UNTRUSTED_1D_SOURCES:
+    if src in _RTH_DAILY_BAR_SOURCES:
         return False
+    if src == "eastmoney":
+        # 必须有解析得到的成交印记（f124）；无戳的昨收涨跌不要
+        return _parse_member_quote_dt(row) is not None
     return True
 
 
@@ -537,7 +557,7 @@ def _filter_quotes_for_1d(
     """夜盘/盘前/盘后：只用非收盘印记；盘前/盘后绝不把 RTH 收盘当 live。
 
     夜盘无扩展价时才允许 rth_fallback（夜盘前最后一档）。
-    盘中：必须是今日 9:30 后印记，且不能是东财昨收涨跌。
+    盘中：必须是今日 9:30 后印记；日线源/无戳东财剔除。
     """
     from app.heatmap import _quote_looks_like_rth_close
 
@@ -559,6 +579,7 @@ def _filter_quotes_for_1d(
         if trusted:
             return trusted, "rth"
         if live:
+            # 有今日印记但全是日线源/无戳 → 仍待可靠源
             return {}, "em_stale"
         return {}, "no_rth"
     if phase not in ("pre_open", "settle", "overnight"):
@@ -805,13 +826,59 @@ def _needs_1d_refresh(
 
 
 async def _quotes_for_1d_overlay(phase: str) -> tuple[dict[str, Any], str]:
-    """盘中用多源快路；扩展时段优先会话价，避免东财停在常规收盘涨跌。"""
+    """盘中用多源快路；扩展时段优先会话价，避免东财停在常规收盘涨跌。
+
+    盘中若 Finnhub 限流、东财缺票，再短超时补会话源，保证 1D 覆盖。
+    """
     from app.heatmap import get_quotes_for_symbols, get_quotes_session_aware
 
     symbols = all_symbols()
-    if phase == "rth":
-        return await get_quotes_for_symbols(symbols, allow_slow_fill=False)
-    return await get_quotes_session_aware(symbols)
+    if phase != "rth":
+        return await get_quotes_session_aware(symbols)
+
+    import asyncio
+
+    quotes, src = await get_quotes_for_symbols(symbols, allow_slow_fill=False)
+    holes = [
+        s
+        for s in symbols
+        if not (
+            quotes.get(s)
+            and quotes[s].get("change_pct") is not None
+            and _rth_quote_trusted(quotes[s])
+            and _quote_dt_in_current_session(quotes[s], "rth")
+        )
+    ]
+    if not holes:
+        return quotes, src
+    try:
+        from app.heatmap import _fill_quote_holes
+
+        more, src2 = await asyncio.wait_for(
+            _fill_quote_holes(holes, quotes, timeout=9.0), timeout=10.0
+        )
+    except Exception as exc:
+        logger.info("rth 1d hole fill skipped: %s", exc)
+        return quotes, src
+    if not more:
+        return quotes, src
+    merged = dict(quotes)
+    added = 0
+    for sym, row in more.items():
+        prev = merged.get(sym)
+        if prev is None:
+            merged[sym] = row
+            added += 1
+            continue
+        prev_ok = _rth_quote_trusted(prev) and _quote_dt_in_current_session(
+            prev, "rth"
+        )
+        new_ok = _rth_quote_trusted(row) and _quote_dt_in_current_session(row, "rth")
+        if new_ok and not prev_ok:
+            merged[sym] = row
+            added += 1
+    label = f"{src}+holes({src2}+a{added})" if added else src
+    return merged, label
 
 
 async def _overlay_live_1d(
@@ -829,7 +896,7 @@ async def _overlay_live_1d(
     try:
         quotes, src = await asyncio.wait_for(
             _quotes_for_1d_overlay(phase),
-            timeout=10.0 if phase != "rth" else 8.0,
+            timeout=12.0 if phase != "rth" else 16.0,
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)

@@ -43,6 +43,16 @@ def test_regular_session_uses_latest_price_not_stale_premarket():
     assert q is not None
     assert q["price"] == 340.0
     assert q["change_pct"] == round((340 - 348.75) / 348.75 * 100, 2)
+    assert q.get("quote_source") == "sina"
+    assert "2026-09-01 10:00" in (q.get("quote_time_et") or "")
+
+
+def test_sina_hq_code_adr():
+    from app.heatmap import _sina_hq_code
+
+    assert _sina_hq_code("TSM") == "gb_tsm"
+    assert _sina_hq_code("ASML") == "gb_asml"
+    assert _sina_hq_code("BRK.B") == "gb_brkb"
 
 
 def test_premarket_uses_extended_price():

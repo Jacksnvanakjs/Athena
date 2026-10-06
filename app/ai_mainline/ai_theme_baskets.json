@@ -84,7 +84,7 @@
     },
     {
       "key": "grid_cooling",
-      "name": "电网/电气/液冷",
+      "name": "电网/电气",
       "heatmap_theme_key": "grid",
       "enabled": true,
       "tickers": [
@@ -92,7 +92,22 @@
         {"symbol": "PWR", "name": "Quanta", "weight": 1.0},
         {"symbol": "EMR", "name": "艾默生", "weight": 1.0},
         {"symbol": "GNRC", "name": "Generac", "weight": 1.0},
-        {"symbol": "VRT", "name": "Vertiv", "weight": 1.0}
+        {"symbol": "HUBB", "name": "Hubbell", "weight": 1.0}
+      ]
+    },
+    {
+      "key": "ai_cooling",
+      "name": "AI散热/液冷",
+      "heatmap_theme_key": "ai_cooling",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "VRT", "name": "Vertiv", "weight": 1.0},
+        {"symbol": "MOD", "name": "Modine", "weight": 1.0},
+        {"symbol": "NVT", "name": "nVent", "weight": 1.0},
+        {"symbol": "TT", "name": "Trane", "weight": 1.0},
+        {"symbol": "CARR", "name": "Carrier", "weight": 1.0},
+        {"symbol": "JCI", "name": "江森自控", "weight": 1.0},
+        {"symbol": "FIX", "name": "Comfort Systems", "weight": 1.0}
       ]
     },
     {
@@ -111,6 +126,22 @@
       ]
     },
     {
+      "key": "software",
+      "name": "软件",
+      "heatmap_theme_key": "software",
+      "enabled": true,
+      "tickers": [
+        {"symbol": "INTU", "name": "Intuit", "weight": 1.0},
+        {"symbol": "WDAY", "name": "Workday", "weight": 1.0},
+        {"symbol": "TEAM", "name": "Atlassian", "weight": 1.0},
+        {"symbol": "HUBS", "name": "HubSpot", "weight": 1.0},
+        {"symbol": "APP", "name": "AppLovin", "weight": 1.0},
+        {"symbol": "SHOP", "name": "Shopify", "weight": 1.0},
+        {"symbol": "ADBE", "name": "Adobe", "weight": 1.0},
+        {"symbol": "ADSK", "name": "Autodesk", "weight": 1.0}
+      ]
+    },
+    {
       "key": "ai_app",
       "name": "AI应用/数据",
       "heatmap_theme_key": "ai_software",
@@ -121,7 +152,7 @@
         {"symbol": "MDB", "name": "MongoDB", "weight": 1.0},
         {"symbol": "PATH", "name": "UiPath", "weight": 1.0},
         {"symbol": "AI", "name": "C3.ai", "weight": 1.0},
-        {"symbol": "ADBE", "name": "Adobe", "weight": 1.0}
+        {"symbol": "SNOW", "name": "Snowflake", "weight": 1.0}
       ]
     },
     {

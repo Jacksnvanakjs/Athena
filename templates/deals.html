@@ -475,6 +475,7 @@
     }
     .ml-members .ok { color: var(--text); font-weight: 500; }
     .ml-members .miss { color: #94a3b8; }
+    .ml-theme-full { color: #059669; font-weight: 700; }
     .ml-badge-weak { background: #fef3c7; color: #92400e; }
     .ml-rotation {
       margin: 12px 0 16px;
@@ -1405,9 +1406,15 @@
         const rankCell = row.rank_5d != null
           ? String(row.rank_5d)
           : `<span class="pct-zero" title="${row.n_valid != null && row.n_valid < 3 ? '有效成分不足3只，不参与主线排名' : (row.rel_5d == null ? '暂无相对5D，不参与排名' : '不参与排名')}">—</span>`;
+        const fullBreadth = (row.n_up != null && row.n_valid > 0 && Number(row.n_up) === Number(row.n_valid))
+          || Number(row.breadth) >= 1;
+        const themeName = row.name || row.key || '';
+        const themeCell = fullBreadth
+          ? `<span class="ml-theme-full" title="当日1D广度 全上涨">${themeName}</span>`
+          : themeName;
         tr.innerHTML = `
           <td>${rankCell}</td>
-          <td>${row.name || row.key}</td>
+          <td>${themeCell}</td>
           <td>${fmtPctWithDataTime(row.ret_1d, d1bj, d1et, '1d', oneSrc)}</td>
           <td>${fmtPctWithDataTime(row.ret_5d, dDbj, dDet, '5d', closeSrc)}</td>
           <td>${fmtPctWithDataTime(row.ret_20d, dDbj, dDet, '20d', closeSrc)}</td>
@@ -2271,22 +2278,42 @@
           if (!pts.length || !chart.$levShowSoxlLabels) return;
           const meta = chart.getDatasetMeta(0);
           if (!meta || !meta.data) return;
-          const ctx = chart.ctx;
-          ctx.save();
-          ctx.font = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'bottom';
-          let lastX = -999;
-          const minGap = Number(chart.$levLabelGap) > 0 ? Number(chart.$levLabelGap) : 22;
+          const items = [];
           meta.data.forEach((el, i) => {
             const p = pts[i];
             const text = levSoxlRetText(p);
             if (!text || !el) return;
             const { x, y } = el.getProps(['x', 'y'], true);
-            if (x - lastX < minGap && i !== pts.length - 1) return;
-            lastX = x;
-            ctx.fillStyle = levSoxlColor(p);
-            ctx.fillText(text, x, y - 6);
+            items.push({ x, y, text, p, last: i === pts.length - 1 });
+          });
+          if (!items.length) return;
+          let minDx = 9999;
+          for (let i = 1; i < items.length; i++) {
+            minDx = Math.min(minDx, items[i].x - items[i - 1].x);
+          }
+          const vertical = items.length >= 2 && minDx < 26;
+          const minGap = vertical ? 11 : (Number(chart.$levLabelGap) > 0 ? Number(chart.$levLabelGap) : 22);
+          const ctx = chart.ctx;
+          ctx.save();
+          ctx.font = (vertical ? '9px' : '10px') + ' -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+          let lastX = -999;
+          items.forEach((it) => {
+            if (it.x - lastX < minGap && !it.last) return;
+            lastX = it.x;
+            ctx.fillStyle = levSoxlColor(it.p);
+            if (vertical) {
+              ctx.save();
+              ctx.translate(it.x, it.y - 8);
+              ctx.rotate(-Math.PI / 2);
+              ctx.textAlign = 'left';
+              ctx.textBaseline = 'middle';
+              ctx.fillText(it.text, 0, 0);
+              ctx.restore();
+            } else {
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'bottom';
+              ctx.fillText(it.text, it.x, it.y - 6);
+            }
           });
           ctx.restore();
         },
@@ -2417,7 +2444,7 @@
           responsive: true,
           maintainAspectRatio: false,
           interaction: { mode: 'index', intersect: false },
-          layout: { padding: { top: showLabels ? 18 : 8, right: 12 } },
+          layout: { padding: { top: showLabels ? (n >= 16 ? 40 : 18) : 8, right: 12 } },
           plugins: {
             legend: { display: false },
             tooltip: { callbacks: { label: tooltipLabel } },

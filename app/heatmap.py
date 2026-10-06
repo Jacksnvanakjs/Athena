@@ -222,8 +222,12 @@ THEMES: list[dict[str, Any]] = [
      "tickers": [("EQIX", "Equinix"), ("DLR", "Digital Realty"), ("AMT", "美国电塔"), ("VRT", "Vertiv"), ("ANET", "Arista"), ("CRWV", "CoreWeave")]},
     {"key": "cloud_saas", "name": "云计算/SaaS", "etf": "SKYY",
      "tickers": [("MSFT", "微软"), ("AMZN", "亚马逊"), ("GOOGL", "谷歌"), ("CRM", "Salesforce"), ("NOW", "ServiceNow"), ("SNOW", "Snowflake"), ("ORCL", "甲骨文")]},
+    {"key": "software", "name": "软件", "etf": "IGV",
+     "tickers": [("INTU", "Intuit"), ("WDAY", "Workday"), ("TEAM", "Atlassian"), ("HUBS", "HubSpot"), ("APP", "AppLovin"), ("SHOP", "Shopify"), ("ADBE", "Adobe"), ("ADSK", "Autodesk")]},
     {"key": "ai_software", "name": "AI应用/软件",
-     "tickers": [("PLTR", "Palantir"), ("ADBE", "Adobe"), ("DDOG", "Datadog"), ("MDB", "MongoDB"), ("PATH", "UiPath"), ("AI", "C3.ai")]},
+     "tickers": [("PLTR", "Palantir"), ("DDOG", "Datadog"), ("MDB", "MongoDB"), ("PATH", "UiPath"), ("AI", "C3.ai"), ("SNOW", "Snowflake")]},
+    {"key": "ai_cooling", "name": "AI散热/液冷",
+     "tickers": [("VRT", "Vertiv"), ("MOD", "Modine"), ("NVT", "nVent"), ("TT", "Trane"), ("CARR", "Carrier"), ("JCI", "江森自控"), ("FIX", "Comfort Systems")]},
     {"key": "cybersecurity", "name": "网络安全", "etf": "HACK",
      "tickers": [("CRWD", "CrowdStrike"), ("PANW", "Palo Alto"), ("FTNT", "Fortinet"), ("ZS", "Zscaler"), ("OKTA", "Okta"), ("S", "SentinelOne")]},
     {"key": "network", "name": "网络设备",
@@ -544,9 +548,12 @@ def _parse_sina_row(
     session = _us_market_session(now_et or datetime.now(_US_TZ)).get("session", "closed")
 
     if session == "regular":
-        # 盘中：字段 [1] 为最新成交，[21] 可能仍是滞后盘前价
+        # 盘中：字段 [1] 为最新成交，[21]/[24] 可能仍是滞后盘前
         if price and prev_close and prev_close > 0:
             change_pct = round((price - prev_close) / prev_close * 100, 2)
+        now = now_et or datetime.now(_US_TZ)
+        et_dt = now
+        et_raw = now.strftime("%Y-%m-%d %H:%M:%S %Z")
     elif session in ("pre", "post", "overnight"):
         # 盘前/盘后/夜盘窗：公共源通常只有扩展(盘后)价
         if ext_price and ext_price > 0 and prev_close and prev_close > 0:
@@ -1145,6 +1152,61 @@ async def _fetch_sina_hq_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]
                 if row and row.get("change_pct") is not None:
                     out[sym] = row
     return out
+
+
+async def _fill_quote_holes(
+    symbols: list[str],
+    existing: dict[str, dict[str, Any]] | None = None,
+    *,
+    timeout: float = 10.0,
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """覆盖率够时仍补缺口：TSM/ASML 等 ADR 常被东财/Finnhub 漏掉。
+
+    快路径：新浪 hq（国内）→ Yahoo。不做全表慢补。
+    """
+    have = existing or {}
+    missing = [
+        s.upper().strip()
+        for s in symbols
+        if s
+        and str(s).strip()
+        and (
+            s.upper().strip() not in have
+            or (have.get(s.upper().strip()) or {}).get("change_pct") is None
+        )
+    ]
+    if not missing:
+        return {}, "none"
+    added: dict[str, dict[str, Any]] = {}
+    used: list[str] = []
+    try:
+        sina = await asyncio.wait_for(
+            _fetch_sina_hq_quotes(missing), timeout=min(10.0, max(4.0, timeout))
+        )
+    except Exception as exc:
+        logger.warning("hole fill sina failed: %s", exc)
+        sina = {}
+    if sina:
+        added.update(sina)
+        used.append(f"SinaHQ:{len(sina)}")
+    still = [s for s in missing if s not in added]
+    skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if still and not skip_yahoo and time.time() >= _YAHOO_COOL_UNTIL:
+        try:
+            yahoo = await asyncio.wait_for(
+                _fetch_yahoo(still), timeout=min(8.0, max(4.0, timeout - 2.0))
+            )
+        except Exception as exc:
+            logger.warning("hole fill yahoo failed: %s", exc)
+            yahoo = {}
+        if yahoo:
+            added.update(yahoo)
+            used.append(f"Yahoo:{len(yahoo)}")
+    return added, "+".join(used) if used else "none"
 
 
 async def _fetch_cnbc_session_quotes(symbols: list[str]) -> dict[str, dict[str, Any]]:
@@ -1934,6 +1996,17 @@ async def _fetch_quotes(
                 sources_used.extend(used)
         except Exception as exc:
             logger.warning("rotating quote fill failed: %s", exc)
+
+    missing = [s for s in symbols if s not in merged]
+    # 覆盖率够也要补洞：TSM 等常不在东财 ulist / Finnhub 批次里
+    if missing:
+        try:
+            holes, hole_src = await _fill_quote_holes(missing, merged, timeout=10.0)
+            if holes:
+                merged.update(holes)
+                sources_used.append(hole_src)
+        except Exception as exc:
+            logger.warning("quote hole fill failed: %s", exc)
 
     missing = [s for s in symbols if s not in merged]
     skip_yahoo = os.environ.get("HEATMAP_SKIP_YAHOO", "").strip().lower() in ("1", "true", "yes")
