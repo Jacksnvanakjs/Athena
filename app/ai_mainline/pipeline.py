@@ -36,6 +36,8 @@ _QUOTE_OVERLAY_RTH_SEC = 45.0  # 盘中更勤快刷 1D，避免卡在收盘快�
 # 美东时段切换点（分钟）：盘前开 / 开盘 / 收盘进盘后 / 进夜盘
 _PHASE_SWITCH_MINUTES = (4 * 60, 9 * 60 + 30, 16 * 60, 20 * 60)
 _PHASE_SWITCH_WINDOW_MIN = 10  # 切换点前后 N 分钟加紧检测
+_SHORT_ROT_MIN_RET_1D = 2.0
+_SHORT_ROT_MIN_BREADTH = 1.0
 
 
 def _near_phase_switch(now: datetime | None = None, *, window_min: int = _PHASE_SWITCH_WINDOW_MIN) -> bool:
@@ -106,6 +108,31 @@ def _sync_primary_from_themes(payload: dict[str, Any]) -> None:
             if t.get(k) is not None:
                 secondary[k] = t[k]
         payload["secondary"] = secondary
+
+
+def _short_rotation_eligible(row: dict[str, Any] | None) -> bool:
+    """短线轮动：有效成分≥3、广度=1（全上涨）、1D≥2%。"""
+    if not row or row.get("ret_1d") is None:
+        return False
+    n_valid = int(row.get("n_valid") or 0)
+    if n_valid < 3:
+        return False
+    if float(row["ret_1d"]) < _SHORT_ROT_MIN_RET_1D:
+        return False
+    n_up = row.get("n_up")
+    if n_up is not None:
+        return int(n_up) == n_valid
+    breadth = row.get("breadth")
+    return breadth is not None and float(breadth) >= _SHORT_ROT_MIN_BREADTH - 1e-9
+
+
+def _empty_short_rotation_day(trade_date: str) -> dict[str, Any]:
+    return {
+        "trade_date": trade_date,
+        "primary_key": None,
+        "primary_name": "暂无明确短线",
+        "status": "pulse",
+    }
 
 
 def _compute_pulse_1d(themes: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -196,7 +223,7 @@ def _rotation_runs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
         name = item.get("primary_name") or key or "暂无明确主线"
         if not key:
             key = None
-            name = "暂无明确主线"
+            name = item.get("primary_name") or "暂无明确主线"
         td = item.get("trade_date") or ""
         if runs and runs[-1].get("key") == key:
             runs[-1]["end"] = td
@@ -204,6 +231,14 @@ def _rotation_runs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
             runs[-1]["days"] = int(runs[-1].get("days") or 0) + 1
             if item.get("streak_days") is not None:
                 runs[-1]["streak_days"] = item.get("streak_days")
+            if item.get("ret_1d") is not None:
+                runs[-1]["ret_1d"] = item.get("ret_1d")
+            if item.get("breadth") is not None:
+                runs[-1]["breadth"] = item.get("breadth")
+            if item.get("n_valid") is not None:
+                runs[-1]["n_valid"] = item.get("n_valid")
+            if item.get("n_up") is not None:
+                runs[-1]["n_up"] = item.get("n_up")
         else:
             runs.append(
                 {
@@ -214,6 +249,10 @@ def _rotation_runs(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     "status": item.get("status"),
                     "days": 1,
                     "streak_days": item.get("streak_days"),
+                    "ret_1d": item.get("ret_1d"),
+                    "breadth": item.get("breadth"),
+                    "n_valid": item.get("n_valid"),
+                    "n_up": item.get("n_up"),
                 }
             )
     return runs
@@ -267,6 +306,11 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         logger.exception("ai_mainline rotation_14d failed")
         out.setdefault("rotation_14d", [])
+    try:
+        out["rotation_1d"] = _rotation_runs(_pulse_history_with_today(out, days=10))
+    except Exception:
+        logger.exception("ai_mainline rotation_1d failed")
+        out.setdefault("rotation_1d", [])
     return out
 
 
@@ -1895,3 +1939,81 @@ def history_primary(days: int = 30) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def history_pulse_1d(days: int = 10) -> list[dict[str, Any]]:
+    """逐日短线：广度=1 且 1D≥2% 中取最强（有效成分≥3）。"""
+    from app.database import AiMainlineDailySnapshot, SessionLocal
+
+    names = _theme_name_map()
+    since = _today_et() - timedelta(days=days)
+    with SessionLocal() as db:
+        rows = (
+            db.query(AiMainlineDailySnapshot)
+            .filter(
+                AiMainlineDailySnapshot.theme_key != META_KEY,
+                AiMainlineDailySnapshot.trade_date >= since,
+            )
+            .order_by(AiMainlineDailySnapshot.trade_date.asc())
+            .all()
+        )
+    by_date: dict[date, list[Any]] = {}
+    for r in rows:
+        by_date.setdefault(r.trade_date, []).append(r)
+    out: list[dict[str, Any]] = []
+    for td in sorted(by_date):
+        best = None
+        for r in by_date[td]:
+            cand = {
+                "ret_1d": r.ret_1d,
+                "n_valid": r.n_valid,
+                "breadth": r.breadth,
+            }
+            if not _short_rotation_eligible(cand):
+                continue
+            if best is None or float(r.ret_1d) > float(best.ret_1d):
+                best = r
+        if not best:
+            out.append(_empty_short_rotation_day(td.isoformat()))
+            continue
+        out.append(
+            {
+                "trade_date": td.isoformat(),
+                "primary_key": best.theme_key,
+                "primary_name": names.get(best.theme_key, best.theme_key),
+                "status": "pulse",
+                "ret_1d": round(float(best.ret_1d), 2),
+                "breadth": best.breadth,
+                "n_valid": best.n_valid,
+            }
+        )
+    return out
+
+
+def _pulse_history_with_today(payload: dict[str, Any], *, days: int = 10) -> list[dict[str, Any]]:
+    """历史日快照短线 + 当日实时短线（须广度=1 且 1D≥2%；有则覆盖同日）。"""
+    hist = history_pulse_1d(days)
+    pulse = payload.get("pulse_1d") or {}
+    if payload.get("1d_pending") or not pulse.get("key"):
+        return hist
+    today_iso = _today_et().isoformat()
+    snap_td = str(payload.get("trade_date") or "")[:10]
+    # 盘中用美东今日；收盘后快照日与今日可能同一交易日
+    overlay_td = today_iso if _live_1d_active() else (snap_td or today_iso)
+    if _short_rotation_eligible(pulse):
+        row = {
+            "trade_date": overlay_td,
+            "primary_key": pulse.get("key"),
+            "primary_name": pulse.get("name") or pulse.get("key"),
+            "status": "pulse",
+            "ret_1d": pulse.get("ret_1d"),
+            "breadth": pulse.get("breadth"),
+            "n_valid": pulse.get("n_valid"),
+            "n_up": pulse.get("n_up"),
+        }
+    else:
+        row = _empty_short_rotation_day(overlay_td)
+    hist = [h for h in hist if str(h.get("trade_date") or "")[:10] != overlay_td]
+    hist.append(row)
+    hist.sort(key=lambda h: str(h.get("trade_date") or ""))
+    return hist

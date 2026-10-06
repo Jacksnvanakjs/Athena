@@ -1,11 +1,15 @@
 """主线展示：5D 确认 vs 1D 脉搏、近2周轮动压缩。"""
 
+from datetime import date
+
 from app.ai_mainline.pipeline import (
     _compute_pulse_1d,
     _display_summary,
     _finalize_payload,
     _is_1d_weak,
+    _pulse_history_with_today,
     _rotation_runs,
+    _short_rotation_eligible,
     _sync_primary_from_themes,
 )
 
@@ -23,6 +27,96 @@ def test_rotation_runs_compress_consecutive():
     assert runs[0]["name"] == "光通信" and runs[0]["days"] == 2 and runs[0]["status"] == "confirmed"
     assert runs[1]["name"] == "AI安全/身份" and runs[1]["days"] == 2
     assert runs[2]["key"] is None and runs[2]["name"] == "暂无明确主线"
+
+
+def test_pulse_history_overlays_today_1d(monkeypatch):
+    monkeypatch.setattr(
+        "app.ai_mainline.pipeline.history_pulse_1d",
+        lambda days=10: [
+            {
+                "trade_date": "2026-09-17",
+                "primary_key": "memory",
+                "primary_name": "存储/HBM链",
+                "status": "pulse",
+                "ret_1d": 1.2,
+            },
+            {
+                "trade_date": "2026-09-18",
+                "primary_key": "ai_sec",
+                "primary_name": "AI安全/身份",
+                "status": "pulse",
+                "ret_1d": 0.4,
+            },
+        ],
+    )
+    monkeypatch.setattr("app.ai_mainline.pipeline._today_et", lambda: date(2026, 9, 18))
+    monkeypatch.setattr("app.ai_mainline.pipeline._live_1d_active", lambda phase=None: True)
+    hist = _pulse_history_with_today(
+        {
+            "1d_pending": False,
+            "trade_date": "2026-09-17",
+            "pulse_1d": {
+                "key": "software",
+                "name": "软件",
+                "ret_1d": 2.7,
+                "n_valid": 8,
+                "n_up": 8,
+                "breadth": 1.0,
+            },
+        }
+    )
+    assert [h["primary_key"] for h in hist] == ["memory", "software"]
+    runs = _rotation_runs(hist)
+    assert runs[-1]["name"] == "软件"
+    assert runs[-1]["ret_1d"] == 2.7
+    assert runs[-1]["days"] == 1
+
+
+def test_short_rotation_requires_full_breadth_and_min_1d():
+    assert _short_rotation_eligible(
+        {"ret_1d": 2.0, "n_valid": 5, "n_up": 5, "breadth": 1.0}
+    )
+    assert not _short_rotation_eligible(
+        {"ret_1d": 3.5, "n_valid": 5, "n_up": 4, "breadth": 0.8}
+    )
+    assert not _short_rotation_eligible(
+        {"ret_1d": 1.9, "n_valid": 6, "n_up": 6, "breadth": 1.0}
+    )
+    assert not _short_rotation_eligible(
+        {"ret_1d": 4.0, "n_valid": 2, "n_up": 2, "breadth": 1.0}
+    )
+
+
+def test_pulse_history_skips_today_if_short_filter_fails(monkeypatch):
+    monkeypatch.setattr(
+        "app.ai_mainline.pipeline.history_pulse_1d",
+        lambda days=10: [
+            {
+                "trade_date": "2026-09-18",
+                "primary_key": "memory",
+                "primary_name": "存储/HBM链",
+                "status": "pulse",
+                "ret_1d": 2.4,
+            },
+        ],
+    )
+    monkeypatch.setattr("app.ai_mainline.pipeline._today_et", lambda: date(2026, 9, 18))
+    monkeypatch.setattr("app.ai_mainline.pipeline._live_1d_active", lambda phase=None: True)
+    hist = _pulse_history_with_today(
+        {
+            "1d_pending": False,
+            "pulse_1d": {
+                "key": "software",
+                "name": "软件",
+                "ret_1d": 3.1,
+                "n_valid": 8,
+                "n_up": 7,
+                "breadth": 0.875,
+            },
+        }
+    )
+    assert hist[-1]["primary_key"] is None
+    assert hist[-1]["primary_name"] == "暂无明确短线"
 
 
 def test_pulse_1d_and_weak_flag():
@@ -93,6 +187,27 @@ def test_finalize_sets_basis_without_db_crash(monkeypatch):
             }
         ],
     )
+    monkeypatch.setattr(
+        "app.ai_mainline.pipeline.history_pulse_1d",
+        lambda days=10: [
+            {
+                "trade_date": "2026-09-17",
+                "primary_key": "memory",
+                "primary_name": "存储/HBM链",
+                "status": "pulse",
+                "ret_1d": 1.2,
+                "n_valid": 4,
+            },
+            {
+                "trade_date": "2026-09-18",
+                "primary_key": "optical",
+                "primary_name": "光通信",
+                "status": "pulse",
+                "ret_1d": 2.0,
+                "n_valid": 5,
+            },
+        ],
+    )
     out = _finalize_payload(
         {
             "success": True,
@@ -118,6 +233,8 @@ def test_finalize_sets_basis_without_db_crash(monkeypatch):
     )
     assert out["mainline_basis"] == "rel_5d"
     assert out["rotation_14d"][0]["name"] == "AI安全/身份"
+    assert out.get("rotation_1d")
+    assert any(r.get("name") == "光通信" for r in out["rotation_1d"])
     if out.get("1d_pending") or out.get("live_1d") is False:
         # 盘中未叠加上今日报价时，不能沿用快照 1D
         assert out["themes"][0]["ret_1d"] is None

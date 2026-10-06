@@ -532,6 +532,16 @@
       background: #ecfdf5;
       border-color: #86efac;
     }
+    .ml-rotation-block + .ml-rotation-block { margin-top: 14px; }
+    .ml-rot-item.ml-rot-1d {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+    }
+    .ml-rot-item.ml-rot-1d.ml-rot-current {
+      background: #dbeafe;
+      border-color: #60a5fa;
+    }
+    .ml-rot-ret { font-weight: 600; margin-top: 2px; font-size: 0.75rem; }
     .ml-rot-date { color: var(--text-muted); font-size: 0.72rem; }
     .ml-rot-name { font-weight: 600; margin-top: 2px; color: var(--text); }
     .ml-rot-st { color: var(--text-muted); margin-top: 2px; font-size: 0.72rem; }
@@ -578,7 +588,7 @@
         <strong>AI财报</strong>、<strong>AI合作</strong>、<strong>黄仁勋</strong>。
       </p>
       <ul>
-        <li><strong>AI 主线</strong>：用各子板块相对 AI 综合基准的 <strong>5 日</strong>强弱判断资金偏向哪条链，<strong>不是</strong>软硬件互斥。「已确认」约需连续 3 个交易日排名靠前。表格里的 <strong>1D / 广度</strong>是当日脉搏，盘前/隔夜可能接近 0/N，<strong>不会单独改掉 5 日主线</strong>。</li>
+        <li><strong>AI 主线</strong>：用各子板块相对 AI 综合基准的 <strong>5 日</strong>强弱判断资金偏向哪条链，<strong>不是</strong>软硬件互斥。「已确认」约需连续 3 个交易日排名靠前。表格上方的 <strong>当日短线轮动</strong>只认广度=1 且 1D≥2% 的子线；<strong>近2周主线轮动</strong>仍按 5 日。表格里的 <strong>1D / 广度</strong>是当日脉搏，<strong>不会单独改掉 5 日主线</strong>。</li>
         <li><strong>合作 / 黄仁勋</strong>：事件驱动即时推送；入库 ≠ 一定推送。</li>
         <li><strong>财报日历</strong>：监控 AI 链相关标的（含 DELL 等）；可提前数周上网站；手机推送<strong>仅财报前 2 天</strong>且须过市值/评分门槛，同日多家合并一条。揭晓后展示 <strong>开盘·D1～D5</strong>（皆相对「财报前收」的累计涨跌，非日涨跌；评分异常主对照取 <strong>D2</strong>）。时点随<strong>财报发布时间</strong>不同：<strong>财报盘后发布</strong>时前收=财报日收盘、开盘/D1=次一交易日；<strong>财报盘前发布</strong>时前收=前一交易日收盘、开盘/D1=财报日当天。对不上的进<strong>评分异常区</strong>。行情/日线/市值均<strong>多源自动切换</strong>。</li>
         <li>仅供研究，非投资建议。</li>
@@ -630,11 +640,20 @@
       </div>
 
       <div class="ml-rotation" id="mlRotation" style="display:none">
-        <div class="ml-rotation-title">
-          近2周主线轮动
-          <span class="help" title="按交易日快照压缩：同一主线连续多日合并为一段。顺序从左到右为时间先后；最右侧为最近一段。主线判定按5日相对强弱，与当日1D脉搏可不同。">?</span>
+        <div class="ml-rotation-block" id="mlRotation1dBlock" style="display:none">
+          <div class="ml-rotation-title">
+            当日短线轮动
+            <span class="help" title="只统计广度=1（成分全上涨）且当日1D≥2%的子线，再取其中1D最强（有效成分≥3只）。左侧为近几日收盘短线、最右侧为今天（盘中随报价刷新）。与下方「近2周主线」按5日相对强弱确认，二者可以不同。">?</span>
+          </div>
+          <div class="ml-rotation-track" id="mlRotation1dTrack"></div>
         </div>
-        <div class="ml-rotation-track" id="mlRotationTrack"></div>
+        <div class="ml-rotation-block" id="mlRotation5dBlock" style="display:none">
+          <div class="ml-rotation-title">
+            近2周主线轮动
+            <span class="help" title="按交易日快照压缩：同一主线连续多日合并为一段。顺序从左到右为时间先后；最右侧为最近一段。主线判定按5日相对强弱，与当日1D短线可不同。">?</span>
+          </div>
+          <div class="ml-rotation-track" id="mlRotationTrack"></div>
+        </div>
       </div>
 
       <div class="lev-card" id="levCard">
@@ -1392,7 +1411,7 @@
       const themes = data.themes || [];
       if (!themes.length) {
         empty.style.display = 'block';
-        renderRotation([]);
+        renderRotations(data);
         return;
       }
       empty.style.display = 'none';
@@ -1447,38 +1466,88 @@
         `;
         tbody.appendChild(tr);
       }
-      renderRotation(data.rotation_14d || []);
+      renderRotations(data);
     }
 
-    function renderRotation(runs) {
-      const wrap = document.getElementById('mlRotation');
-      const track = document.getElementById('mlRotationTrack');
-      if (!wrap || !track) return;
+    function rotDateRange(r) {
+      const start = (r.start || '').slice(5);
+      const end = (r.end || '').slice(5);
+      return start && end && start !== end ? `${start}~${end}` : (start || end || '—');
+    }
+
+    function renderRotationTrack(track, runs, kind) {
+      if (!track) return;
       if (!runs || !runs.length) {
-        wrap.style.display = 'none';
         track.innerHTML = '';
         return;
       }
-      wrap.style.display = 'block';
       const parts = [];
       runs.forEach((r, i) => {
         if (i > 0) parts.push('<span class="ml-rot-arrow" aria-hidden="true">→</span>');
-        const st = r.status === 'confirmed' ? '已确认'
-          : (r.status === 'emerging' ? '观察中' : '—');
-        const start = (r.start || '').slice(5);
-        const end = (r.end || '').slice(5);
-        const range = start && end && start !== end ? `${start}~${end}` : (start || end || '—');
         const cur = i === runs.length - 1 ? ' ml-rot-current' : '';
+        const oneD = kind === '1d' ? ' ml-rot-1d' : '';
         const name = r.name || r.key || '—';
+        let st;
+        if (kind === '1d') {
+          if (r.pending) st = '1D拉取中';
+          else if (r.ret_1d != null && r.ret_1d !== '') {
+            const n = Number(r.ret_1d);
+            st = (n > 0 ? '+' : '') + n.toFixed(1) + '% · ' + (r.days || 1) + '日';
+          } else st = (r.days || 1) + '日';
+        } else {
+          const lab = r.status === 'confirmed' ? '已确认'
+            : (r.status === 'emerging' ? '观察中' : '—');
+          st = lab + ' · ' + (r.days || 1) + '日';
+        }
+        const range = rotDateRange(r);
+        const tip = (r.start || '') + ' → ' + (r.end || '') + ' · ' + name + ' · ' + st;
         parts.push(
-          `<div class="ml-rot-item${cur}" title="${escapeAttr((r.start || '') + ' → ' + (r.end || '') + ' · ' + name + ' · ' + st)}">` +
+          `<div class="ml-rot-item${oneD}${cur}" title="${escapeAttr(tip)}">` +
           `<div class="ml-rot-date">${range}</div>` +
           `<div class="ml-rot-name">${name}</div>` +
-          `<div class="ml-rot-st">${st} · ${r.days || 1}日</div>` +
+          `<div class="ml-rot-st">${st}</div>` +
           `</div>`
         );
       });
       track.innerHTML = parts.join('');
+    }
+
+    function renderRotations(data) {
+      const wrap = document.getElementById('mlRotation');
+      const shortTrack = document.getElementById('mlRotation1dTrack');
+      const longTrack = document.getElementById('mlRotationTrack');
+      const shortBlock = document.getElementById('mlRotation1dBlock');
+      const longBlock = document.getElementById('mlRotation5dBlock');
+      if (!wrap) return;
+      const longRuns = data.rotation_14d || [];
+      let shortRuns = (data.rotation_1d || []).slice();
+      if (data['1d_pending']) {
+        const last = shortRuns[shortRuns.length - 1];
+        const todayIso = (data.as_of || data.trade_date || '').slice(0, 10);
+        if (!last || last.pending !== true) {
+          shortRuns.push({
+            key: null,
+            name: '今日短线',
+            start: todayIso,
+            end: todayIso,
+            days: 1,
+            pending: true,
+          });
+        }
+      }
+      const hasShort = shortRuns.length > 0;
+      const hasLong = longRuns.length > 0;
+      if (!hasShort && !hasLong) {
+        wrap.style.display = 'none';
+        if (shortTrack) shortTrack.innerHTML = '';
+        if (longTrack) longTrack.innerHTML = '';
+        return;
+      }
+      wrap.style.display = 'block';
+      if (shortBlock) shortBlock.style.display = hasShort ? 'block' : 'none';
+      if (longBlock) longBlock.style.display = hasLong ? 'block' : 'none';
+      renderRotationTrack(shortTrack, shortRuns, '1d');
+      renderRotationTrack(longTrack, longRuns, '5d');
     }
 
     function fmtDualTime(bj, et) {
