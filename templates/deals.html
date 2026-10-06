@@ -1268,6 +1268,53 @@
       return `${Math.round(row.breadth * 100)}%`;
     }
 
+    function mergeHeldMainline1d(prev, next) {
+      if (!prev || !next) return next;
+      if (!next['1d_pending'] && !next['1d_hold']) return next;
+      if (next.trade_date && prev.trade_date && next.trade_date !== prev.trade_date) return next;
+      const nThemes = next.themes || [];
+      if (nThemes.some(t => t && t.ret_1d != null)) return next;
+      const prevMap = {};
+      for (const t of prev.themes || []) {
+        if (t && t.key) prevMap[t.key] = t;
+      }
+      const themes = nThemes.map(t => {
+        const p = prevMap[t.key];
+        if (!p || p.ret_1d == null) return t;
+        const row = Object.assign({}, t, {
+          ret_1d: p.ret_1d,
+          rel_1d: p.rel_1d != null ? p.rel_1d : t.rel_1d,
+          n_up: p.n_up,
+          breadth: p.breadth,
+          n_valid: p.n_valid != null ? p.n_valid : t.n_valid,
+        });
+        if (Array.isArray(p.members) && Array.isArray(t.members) && t.members.length) {
+          const mm = {};
+          for (const m of p.members) {
+            if (m && m.symbol) mm[m.symbol] = m;
+          }
+          row.members = t.members.map(m => {
+            const pm = mm[m.symbol];
+            if (!pm || pm.ret_1d == null) return m;
+            return Object.assign({}, m, {
+              ret_1d: pm.ret_1d,
+              quote_time: pm.quote_time,
+              quote_time_et: pm.quote_time_et,
+            });
+          });
+        } else if ((!t.members || !t.members.length) && p.members) {
+          row.members = p.members;
+        }
+        return row;
+      });
+      const out = Object.assign({}, next, { themes });
+      if (next.pulse_1d == null && prev.pulse_1d) out.pulse_1d = prev.pulse_1d;
+      if (next.bench && prev.bench && next.bench.ret_1d == null && prev.bench.ret_1d != null) {
+        out.bench = Object.assign({}, next.bench, { ret_1d: prev.bench.ret_1d });
+      }
+      return out;
+    }
+
     function showMainlineHardError(msg, note) {
       document.getElementById('mlTitle').textContent = msg || '主线加载失败（行情较慢或超时）';
       document.getElementById('mlEmpty').style.display = 'block';
@@ -1302,10 +1349,11 @@
               }
               return;
             }
-            mainlineCache = data;
+            const painted = mergeHeldMainline1d(mainlineCache, data);
+            mainlineCache = painted;
             mainlineHasData = true;
             if (shouldPaint()) {
-              renderMainline(data);
+              renderMainline(painted);
               setStaleHint('mlMetrics', '');
               loadStatus();
             }

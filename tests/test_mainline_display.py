@@ -238,5 +238,43 @@ def test_finalize_sets_basis_without_db_crash(monkeypatch):
     if out.get("1d_pending") or out.get("live_1d") is False:
         # 盘中未叠加上今日报价时，不能沿用快照 1D
         assert out["themes"][0]["ret_1d"] is None
+        assert not out.get("1d_hold")
     else:
         assert out["pulse_1d_weak"] is True
+
+
+def test_pending_refresh_keeps_last_live_1d(monkeypatch):
+    monkeypatch.setattr("app.ai_mainline.pipeline._live_1d_active", lambda phase=None: True)
+    monkeypatch.setattr("app.ai_mainline.pipeline._market_phase", lambda now=None: "rth")
+    monkeypatch.setattr("app.ai_mainline.pipeline.history_primary", lambda days=14: [])
+    monkeypatch.setattr("app.ai_mainline.pipeline.history_pulse_1d", lambda days=10: [])
+    from app.ai_mainline.pipeline import _finalize_payload, _mark_1d_pending
+
+    live = {
+        "success": True,
+        "status": "confirmed",
+        "live_1d": True,
+        "themes": [
+            {
+                "key": "memory",
+                "name": "存储/HBM链",
+                "ret_1d": 2.4,
+                "n_up": 4,
+                "n_valid": 4,
+                "breadth": 1.0,
+                "members": [{"symbol": "MU", "ret_1d": 3.1}],
+            }
+        ],
+        "primary": {"key": "memory", "name": "存储/HBM链", "status": "confirmed"},
+    }
+    pending = _mark_1d_pending(live, note="正在拉取最新1D")
+    assert pending["1d_pending"] is True
+    assert pending["live_1d"] is False
+    assert pending["1d_hold"] is True
+    assert pending["themes"][0]["ret_1d"] == 2.4
+    assert pending["themes"][0]["members"][0]["ret_1d"] == 3.1
+
+    out = _finalize_payload(pending)
+    assert out["themes"][0]["ret_1d"] == 2.4
+    assert out["1d_pending"] is True
+    assert out["1d_hold"] is True

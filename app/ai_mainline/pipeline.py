@@ -276,17 +276,24 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     # 安全网：任何路径都不得把滞后印记标成「最新1D」
     if _live_1d_active(phase):
         if out.get("live_1d") and _1d_lag_too_large(out, phase):
+            keep = _has_holdable_1d(out)
             out = _mark_1d_pending(
                 _strip_stale_1d_fields(out, phase=phase),
                 note="1D 印记滞后，正在拉取最新…",
+                keep_last_1d=keep,
             )
         elif out.get("1d_pending"):
+            keep = _has_holdable_1d(out) or bool(out.get("1d_hold"))
             out["1d_fresh"] = False
             out["live_1d"] = False
-            out = _clear_intraday_1d_metrics(out)
+            if keep:
+                out["1d_hold"] = True
+            else:
+                out = _clear_intraday_1d_metrics(out)
         elif out.get("live_1d"):
             out["1d_fresh"] = True
             out["1d_pending"] = False
+            out.pop("1d_hold", None)
         else:
             out["1d_fresh"] = False
             out["1d_pending"] = True
@@ -775,6 +782,17 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
     return lag > 60 * 60 * 6
 
 
+def _has_holdable_1d(payload: dict[str, Any] | None) -> bool:
+    """上一轮已叠过今日 1D，刷新等待时可继续展示，不必先打成「—」。"""
+    if not payload:
+        return False
+    if not (payload.get("live_1d") or payload.get("1d_hold")):
+        return False
+    return any(
+        (t or {}).get("ret_1d") is not None for t in (payload.get("themes") or [])
+    )
+
+
 def _clear_intraday_1d_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     """去掉昨收/快照上的 1D，避免盘中把上一日涨跌当成今日脉搏。"""
     out = dict(payload)
@@ -808,13 +826,19 @@ def _clear_intraday_1d_metrics(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mark_1d_pending(
-    payload: dict[str, Any], *, note: str | None = None
+    payload: dict[str, Any],
+    *,
+    note: str | None = None,
+    keep_last_1d: bool | None = None,
 ) -> dict[str, Any]:
     """出口态：不宣称 live，强制前端快轮询。
 
-    扩展/盘中时段清掉快照 1D 涨跌，只保留 5D/20D；数据时刻用日线收盘兜底。
+    从未叠过今日 1D 时清掉快照涨跌，避免把昨收当今日；
+    已有上一轮会话 1D 时保留数字作占位，只把状态标成拉取中。
     """
     out = dict(payload)
+    if keep_last_1d is None:
+        keep_last_1d = _has_holdable_1d(payload)
     if not out.get("prior_session_1d") and not payload.get("live_1d"):
         prior = _theme_1d_fingerprint(payload)
         if prior:
@@ -823,8 +847,11 @@ def _mark_1d_pending(
     out["1d_fresh"] = False
     out["1d_pending"] = True
     phase = _market_phase()
-    if _live_1d_active(phase):
+    if _live_1d_active(phase) and not keep_last_1d:
         out = _clear_intraday_1d_metrics(out)
+        out.pop("1d_hold", None)
+    elif keep_last_1d:
+        out["1d_hold"] = True
     if not out.get("data_time_daily_bj") and out.get("trade_date"):
         out.update(_daily_session_close_times(out.get("trade_date")))
     if not out.get("updated_bj"):
@@ -944,9 +971,12 @@ async def _overlay_live_1d(
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)
+        keep = _has_holdable_1d(payload)
         out = _strip_stale_1d_fields(dict(payload), phase=phase)
         out = _mark_1d_pending(
-            out, note=f"1D 即时行情暂未刷新（{type(exc).__name__}）"
+            out,
+            note=f"1D 即时行情暂未刷新（{type(exc).__name__}）",
+            keep_last_1d=keep,
         )
         base_note = (out.get("note") or "").strip()
         msg = out["live_1d_note"]
@@ -954,8 +984,11 @@ async def _overlay_live_1d(
             out["note"] = f"{base_note} {msg}".strip() if base_note else msg
         return out, False
     if not quotes:
+        keep = _has_holdable_1d(payload)
         out = _strip_stale_1d_fields(dict(payload), phase=phase)
-        out = _mark_1d_pending(out, note="1D 即时行情暂无返回，正在重试")
+        out = _mark_1d_pending(
+            out, note="1D 即时行情暂无返回，正在重试", keep_last_1d=keep
+        )
         base_note = (out.get("note") or "").strip()
         msg = out["live_1d_note"]
         if msg not in base_note:
@@ -974,7 +1007,7 @@ async def _overlay_live_1d(
             if qkind == "em_stale"
             else "1D 行情印记过期，已丢弃，待下一轮刷新"
         )
-        return _mark_1d_pending(out, note=msg), False
+        return _mark_1d_pending(out, note=msg, keep_last_1d=_has_holdable_1d(payload)), False
 
     out = dict(payload)
     themes_out: list[dict[str, Any]] = []
@@ -1056,6 +1089,7 @@ async def _overlay_live_1d(
     out["live_1d"] = True
     out["1d_fresh"] = True
     out["1d_pending"] = False
+    out.pop("1d_hold", None)
     # 源端印记仍滞后：不算成功，清掉假「最新」戳，留给重试
     if phase in ("pre_open", "rth", "settle") and _1d_lag_too_large(out, phase):
         logger.info(
@@ -1065,7 +1099,9 @@ async def _overlay_live_1d(
             out.get("data_time_1d_et"),
         )
         return (
-            _mark_1d_pending(out, note="行情源印记滞后，正在重拉最新1D…"),
+            _mark_1d_pending(
+                out, note="行情源印记滞后，正在重拉最新1D…", keep_last_1d=True
+            ),
             False,
         )
     if phase == "overnight":
@@ -1132,9 +1168,11 @@ async def _overlay_until_fresh(
         if i + 1 < attempts:
             await asyncio.sleep(0.4)
     if not last.get("1d_pending"):
+        keep = _has_holdable_1d(last)
         last = _mark_1d_pending(
             _strip_stale_1d_fields(dict(last), phase=phase),
             note=last.get("live_1d_note") or "1D 正在拉取最新报价…",
+            keep_last_1d=keep,
         )
     return last, False
 
