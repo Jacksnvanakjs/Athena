@@ -52,6 +52,23 @@ def test_cnbc_live_post_uses_extended():
     assert "2026-09-24 20:00" in (row.get("quote_time_et") or "")
 
 
+def test_ensure_display_fills_post_end_when_closed_no_stamp(monkeypatch):
+    """休市有1D数字但无印记（force超时常见）→ 回填20:00/08:00。"""
+    monkeypatch.setattr("app.ai_mainline.pipeline._market_phase", lambda now=None: "closed")
+    from app.ai_mainline.pipeline import _ensure_display_times
+
+    out = _ensure_display_times(
+        {
+            "trade_date": "2026-10-09",
+            "1d_hold": True,
+            "themes": [{"key": "t", "ret_1d": 1.2, "members": []}],
+        }
+    )
+    assert "08:00" in (out.get("data_time_1d_bj") or "")
+    assert "20:00" in (out.get("data_time_1d_et") or "")
+    assert out.get("data_time_1d_source") == "session_post_end"
+
+
 def test_post_mid_print_normalizes_to_session_end_when_closed():
     """休市后：盘后中段 05:33/17:33 规范为北京08:00 / 美东20:00，涨跌不变。"""
     from app.ai_mainline.pipeline import (

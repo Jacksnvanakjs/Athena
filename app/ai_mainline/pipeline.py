@@ -969,6 +969,37 @@ def _backfill_1d_times_from_members(payload: dict[str, Any]) -> dict[str, Any]:
 def _ensure_display_times(payload: dict[str, Any]) -> dict[str, Any]:
     """出口保证「数据时间」有可展示字段，避免页面只剩「—」。"""
     out = _backfill_1d_times_from_members(payload)
+    phase = _market_phase()
+    if phase in ("overnight", "closed"):
+        row = {
+            "quote_time": out.get("data_time_1d_bj"),
+            "quote_time_et": out.get("data_time_1d_et"),
+        }
+        if _is_incomplete_post_stamp(row):
+            norm = _normalize_completed_post_quote(row)
+            out["data_time_1d_bj"] = norm.get("quote_time")
+            out["data_time_1d_et"] = norm.get("quote_time_et")
+            if not out.get("data_time_1d_source"):
+                out["data_time_1d_source"] = "session_post_end"
+        elif not out.get("data_time_1d_bj") and not out.get("data_time_1d_et"):
+            # force/超时后常无成分印记：有可展示 1D 数字时用盘后结束戳，禁止空白「—」
+            has_num = any(
+                (t or {}).get("ret_1d") is not None for t in (out.get("themes") or [])
+            )
+            if has_num or out.get("1d_hold"):
+                filled = _completed_post_end_times(out.get("trade_date"))
+                post_dt = _parse_member_quote_dt(
+                    {
+                        "quote_time": filled.get("data_time_1d_bj"),
+                        "quote_time_et": filled.get("data_time_1d_et"),
+                    }
+                )
+                # 仅当该交易日盘后已结束
+                if post_dt is not None and datetime.now(ET) >= post_dt:
+                    out.update(filled)
+                    out["data_time_1d_source"] = (
+                        out.get("data_time_1d_source") or "session_post_end"
+                    )
     if not out.get("data_time_daily_bj") and out.get("trade_date"):
         out.update(_daily_session_close_times(out.get("trade_date")))
     if not out.get("updated_bj"):
@@ -1118,9 +1149,10 @@ async def _overlay_live_1d(
 
     phase = phase or _market_phase()
     try:
+        # 非盘中会话源：CNBC 单段可到 28s，总超时须盖住 CNBC+新浪，避免空转 TimeoutError
         quotes, src = await asyncio.wait_for(
             _quotes_for_1d_overlay(phase),
-            timeout=22.0 if phase != "rth" else 32.0,
+            timeout=52.0 if phase != "rth" else 32.0,
         )
     except Exception as exc:
         logger.info("mainline 1d overlay skipped: %s", exc)
@@ -1397,6 +1429,9 @@ def _has_ext_live_1d(payload: dict[str, Any] | None, phase: str) -> bool:
     }
     if _is_ext_phase(phase) and _quote_looks_like_rth_close(row):
         return False
+    # 盘后中段印记（如北京05:33）不算「已齐」，须重拉/规范到 20:00
+    if phase in ("overnight", "closed") and _is_incomplete_post_stamp(row):
+        return False
     return bool(payload.get("data_time_1d_bj") or payload.get("data_time_1d_et"))
 
 
@@ -1556,6 +1591,25 @@ def _daily_session_close_times(trade_date: date | str | None) -> dict[str, str |
     return {
         "data_time_daily_bj": dt_et.astimezone(bj).strftime("%Y-%m-%d %H:%M"),
         "data_time_daily_et": dt_et.strftime("%Y-%m-%d %H:%M %Z"),
+    }
+
+
+def _completed_post_end_times(trade_date: date | str | None) -> dict[str, str | None]:
+    """盘后会话结束时刻：美东 20:00 / 北京次日 08:00（非墙钟伪造，是会话边界）。"""
+    if trade_date is None:
+        return {"data_time_1d_bj": None, "data_time_1d_et": None}
+    if isinstance(trade_date, str):
+        try:
+            trade_date = date.fromisoformat(trade_date[:10])
+        except ValueError:
+            return {"data_time_1d_bj": None, "data_time_1d_et": None}
+    dt_et = datetime(
+        trade_date.year, trade_date.month, trade_date.day, 20, 0, tzinfo=ET
+    )
+    bj = ZoneInfo("Asia/Shanghai")
+    return {
+        "data_time_1d_bj": dt_et.astimezone(bj).strftime("%Y-%m-%d %H:%M:%S"),
+        "data_time_1d_et": dt_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
     }
 
 

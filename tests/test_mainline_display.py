@@ -311,6 +311,9 @@ def test_closed_finalize_holds_snapshot_1d(monkeypatch):
     assert out["themes"][0]["members"][0]["ret_1d"] == 2.0
     # 必须有可展示时间，不能只剩「—」
     assert out.get("data_time_daily_bj") or out.get("updated_bj")
+    # 休市+有1D数字：顶层应回填盘后结束戳（08:00/20:00），避免 force 超时后空白
+    assert out.get("data_time_1d_bj") and "08:00" in out["data_time_1d_bj"]
+    assert out.get("data_time_1d_et") and "20:00" in out["data_time_1d_et"]
 
 
 def test_backfill_1d_times_from_member_post_stamp(monkeypatch):
