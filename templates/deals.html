@@ -953,14 +953,15 @@
       // 1D 未就绪：快轮询，禁止长时间挂着陈旧「最新」印记
       if (data && data['1d_pending']) return 4000;
       if (data && data['1d_fresh'] === false && (data.session_phase === 'pre_open'
-          || data.session_phase === 'rth' || data.session_phase === 'settle')) {
+          || data.session_phase === 'rth' || data.session_phase === 'settle'
+          || data.session_phase === 'overnight')) {
         return 4000;
       }
       const phase = (data && data.session_phase) || '';
       // 前端配合后端：盘前/盘中更勤；切换窗口后端会 30s 重拉
       if (phase === 'pre_open' || phase === 'rth') return 45000;
       if (phase === 'settle') return 60000;
-      if (phase === 'overnight') return 90000;
+      if (phase === 'overnight') return 60000;
       return 120000;
     }
 

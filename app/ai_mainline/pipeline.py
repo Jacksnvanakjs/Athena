@@ -31,6 +31,17 @@ _OVERLAY_BG_STARTED = 0.0
 _FULL_BG = False
 # 后台叠加卡住超过此时长允许重新调度（避免 _OVERLAY_BG 永久挡住盘后刷新）
 _OVERLAY_BG_STALE_SEC = 75.0
+# 轮动/库快照内存缓存：Turso 慢时禁止每次 /api/ai-mainline 同步打库卡整表
+_ROT_CACHE: dict[str, Any] = {
+    "primary": [],
+    "pulse": [],
+    "primary_ts": 0.0,
+    "pulse_ts": 0.0,
+}
+_DB_SNAP_CACHE: dict[str, Any] = {"data": None, "ts": 0.0}
+_ROT_CACHE_TTL_SEC = 600.0
+_DB_SNAP_CACHE_TTL_SEC = 120.0
+_DB_QUERY_BUDGET_SEC = 4.0
 _COMPUTE_BUDGET_SEC = 110.0  # 报价 + 日K 软截止；超时回退库内快照（不编造）
 _PERIOD_BUDGET_SEC = 75.0
 _PERIOD_BUDGET_SETTLE_SEC = 180.0  # 收盘结算窗给足时间写全日 K
@@ -68,8 +79,10 @@ def _overlay_interval_sec(phase: str | None = None) -> float:
         return _QUOTE_OVERLAY_RTH_SEC
     if phase == "pre_open":
         return 45.0
-    if phase in {"settle", "overnight"}:
-        return 90.0
+    if phase == "settle":
+        return 60.0
+    if phase == "overnight":
+        return 60.0
     return _QUOTE_OVERLAY_SEC
 
 
@@ -314,13 +327,16 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     out["pulse_1d_weak"] = _is_1d_weak(out.get("primary"))
     out["mainline_basis"] = "rel_5d"
     out["summary"] = _display_summary(out)
+    # 轮动历史走内存缓存，禁止每次出口同步打 Turso（慢库曾把整表拖到数分钟）
     try:
-        out["rotation_14d"] = _rotation_runs(history_primary(14))
+        out["rotation_14d"] = _rotation_runs(_cached_history_primary(14))
     except Exception:
         logger.exception("ai_mainline rotation_14d failed")
         out.setdefault("rotation_14d", [])
     try:
-        out["rotation_1d"] = _rotation_runs(_pulse_history_with_today(out, days=10))
+        out["rotation_1d"] = _rotation_runs(
+            _pulse_history_with_today(out, days=10, use_cache=True)
+        )
     except Exception:
         logger.exception("ai_mainline rotation_1d failed")
         out.setdefault("rotation_1d", [])
@@ -1327,26 +1343,33 @@ def _schedule_overlay_bg(base: dict[str, Any], phase: str) -> None:
 
 
 async def _ensure_live_1d(
-    payload: dict[str, Any], phase: str, *, sync_timeout: float = 28.0
+    payload: dict[str, Any], phase: str, *, sync_timeout: float = 12.0
 ) -> dict[str, Any]:
-    """缺扩展 live 时先同步叠一层（限时），避免页面长期停在收盘04:00。"""
+    """缺扩展 live 时短同步叠一层；超时立刻 pending+后台，禁止把整表卡死。"""
     import asyncio
 
     if not _live_1d_active(phase):
         return payload
     if _has_ext_live_1d(payload, phase):
         return payload
+    # 已有后台在跑：勿再同步堵请求，先标 pending 让前端快轮询
+    if _overlay_bg_busy():
+        keep = _has_holdable_1d(payload)
+        return _mark_1d_pending(
+            _strip_stale_1d_fields(dict(payload), phase=phase),
+            note="1D 扩展行情后台拉取中…",
+            keep_last_1d=keep,
+        )
     try:
         overlaid, ok = await asyncio.wait_for(
-            _overlay_until_fresh(payload, phase=phase, attempts=2),
+            _overlay_until_fresh(payload, phase=phase, attempts=1),
             timeout=sync_timeout,
         )
         if ok:
             _CACHE["quote_ts"] = time.time()
-        else:
-            _CACHE["quote_ts"] = 0.0
-            # 同步未成再挂后台重试
-            _schedule_overlay_bg(overlaid, phase)
+            return overlaid
+        _CACHE["quote_ts"] = 0.0
+        _schedule_overlay_bg(overlaid, phase)
         return overlaid
     except Exception as exc:
         logger.info("ai_mainline sync 1d overlay: %s", type(exc).__name__)
@@ -1462,12 +1485,8 @@ def _basket_members(theme_key: str) -> list[dict[str, Any]]:
     return out
 
 
-def _payload_from_db_snapshots() -> dict[str, Any] | None:
-    """用库内已落库的主线日快照组装页面（真实历史，非估算）。
-
-    历史行只存了涨跌指标、未存 members；组装时从篮子补齐成分，
-    避免页面「成分」列空白（超时回退快照时尤其明显）。
-    """
+def _payload_from_db_snapshots_uncached() -> dict[str, Any] | None:
+    """用库内已落库的主线日快照组装页面（真实历史，非估算）。"""
     from app.database import AiMainlineDailySnapshot, SessionLocal
 
     try:
@@ -1608,6 +1627,23 @@ def _payload_from_db_snapshots() -> dict[str, Any] | None:
     return payload
 
 
+def _payload_from_db_snapshots() -> dict[str, Any] | None:
+    """带 TTL + 超时的库快照；慢库时回退上一份缓存，勿拖死整表。"""
+    now = time.time()
+    age = now - float(_DB_SNAP_CACHE.get("ts") or 0)
+    cached = _DB_SNAP_CACHE.get("data")
+    if cached is not None and age < _DB_SNAP_CACHE_TTL_SEC:
+        return cached
+    fresh = _run_db_budget(
+        _payload_from_db_snapshots_uncached, label="db_snapshots"
+    )
+    if fresh is not None:
+        _DB_SNAP_CACHE["data"] = fresh
+        _DB_SNAP_CACHE["ts"] = now
+        return fresh
+    return cached
+
+
 async def _compute_mainline_fresh(
     *,
     period_budget: float | None = _PERIOD_BUDGET_SEC,
@@ -1710,15 +1746,12 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
     now = time.time()
     phase = _market_phase()
     cached = _CACHE.get("data")
-    db_payload = _payload_from_db_snapshots()
-    base = _pick_best_base(cached, db_payload)
 
     if not force:
-        ttl = _cache_ttl_sec(phase, cached if cached else base)
+        ttl = _cache_ttl_sec(phase, cached)
         cache_age = now - float(_CACHE.get("ts") or 0)
-        needs_full = _needs_full_refresh(base)
-
-        if not needs_full and cached and cache_age < ttl:
+        # 热路径：有内存缓存时绝不先打 Turso（慢库曾把每次轮询拖到数分钟）
+        if cached and cache_age < ttl and not _needs_full_refresh(cached):
             quote_age = now - float(_CACHE.get("quote_ts") or 0)
             need_overlay, reason = _needs_1d_refresh(
                 cached, phase, quote_age=quote_age
@@ -1731,7 +1764,6 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                     reason,
                     quote_age,
                 )
-                # 缺扩展 live（常见：库快照停在北京04:00）→ 同步叠盘后，勿只丢后台
                 if not _has_ext_live_1d(cached, phase):
                     out = await _ensure_live_1d(cached, phase)
                     _CACHE["data"] = out
@@ -1739,6 +1771,10 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                 else:
                     _schedule_overlay_bg(cached, phase)
             return _finalize_payload(out)
+
+        db_payload = _payload_from_db_snapshots()
+        base = _pick_best_base(cached, db_payload)
+        needs_full = _needs_full_refresh(base)
 
         if not needs_full and base is not None:
             out = base
@@ -1775,6 +1811,9 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
             _CACHE["ts"] = now
             _CACHE["phase"] = phase
             return _finalize_payload(out)
+    else:
+        db_payload = _payload_from_db_snapshots()
+        base = _pick_best_base(cached, db_payload)
 
     period_budget = (
         _PERIOD_BUDGET_SETTLE_SEC
@@ -2107,6 +2146,21 @@ async def run_ai_mainline_daily(force: bool = False) -> dict[str, Any]:
     }
 
 
+def _run_db_budget(fn, *, budget: float = _DB_QUERY_BUDGET_SEC, label: str = "db"):
+    """限时跑同步 DB；超时返回 None，避免卡住 API。"""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(fn).result(timeout=budget)
+    except FuturesTimeout:
+        logger.warning("ai_mainline %s timed out after %.1fs", label, budget)
+        return None
+    except Exception:
+        logger.exception("ai_mainline %s failed", label)
+        return None
+
+
 def history_primary(days: int = 30) -> list[dict[str, Any]]:
     from app.database import AiMainlineDailySnapshot, SessionLocal
 
@@ -2190,9 +2244,41 @@ def history_pulse_1d(days: int = 10) -> list[dict[str, Any]]:
     return out
 
 
-def _pulse_history_with_today(payload: dict[str, Any], *, days: int = 10) -> list[dict[str, Any]]:
+def _cached_history_primary(days: int = 14) -> list[dict[str, Any]]:
+    now = time.time()
+    age = now - float(_ROT_CACHE.get("primary_ts") or 0)
+    cached = list(_ROT_CACHE.get("primary") or [])
+    if cached and age < _ROT_CACHE_TTL_SEC:
+        return cached
+    fresh = _run_db_budget(lambda: history_primary(days), label="history_primary")
+    if fresh is not None:
+        _ROT_CACHE["primary"] = fresh
+        _ROT_CACHE["primary_ts"] = now
+        return fresh
+    return cached
+
+
+def _cached_history_pulse_1d(days: int = 10) -> list[dict[str, Any]]:
+    now = time.time()
+    age = now - float(_ROT_CACHE.get("pulse_ts") or 0)
+    cached = list(_ROT_CACHE.get("pulse") or [])
+    if cached and age < _ROT_CACHE_TTL_SEC:
+        return cached
+    fresh = _run_db_budget(lambda: history_pulse_1d(days), label="history_pulse_1d")
+    if fresh is not None:
+        _ROT_CACHE["pulse"] = fresh
+        _ROT_CACHE["pulse_ts"] = now
+        return fresh
+    return cached
+
+
+def _pulse_history_with_today(
+    payload: dict[str, Any], *, days: int = 10, use_cache: bool = False
+) -> list[dict[str, Any]]:
     """历史日快照短线 + 当日实时短线（须广度=1 且 1D≥2%；有则覆盖同日）。"""
-    hist = history_pulse_1d(days)
+    hist = (
+        _cached_history_pulse_1d(days) if use_cache else history_pulse_1d(days)
+    )
     pulse = payload.get("pulse_1d") or {}
     if payload.get("1d_pending") or not pulse.get("key"):
         return hist
