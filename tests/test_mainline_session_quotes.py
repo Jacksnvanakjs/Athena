@@ -137,6 +137,70 @@ def test_overnight_keeps_rth_holes_when_session_partial():
     assert kind in ("session+rth_holes", "session")
 
 
+def test_overnight_rejects_unstamped_alt_as_session():
+    """无真实印记的备用源不得充当夜盘会话价（曾用墙钟冒充北京15:xx）。"""
+    from app.ai_mainline.pipeline import _filter_quotes_for_1d
+
+    quotes = {
+        "CRWD": {
+            "change_pct": 2.1,
+            "quote_source": "alt",
+            # 故意无 quote_time：模拟 TradingView/Finviz 补洞
+        },
+        "GLW": {
+            "change_pct": 5.8,
+            "quote_source": "cnbc",
+            "quote_time_et": "2026-10-06 19:59:00 EDT",
+            "quote_time": "2026-10-07 07:59:00",
+        },
+    }
+    use, kind = _filter_quotes_for_1d(quotes, "overnight")
+    assert "GLW" in use
+    assert "CRWD" not in use
+    assert kind == "session"
+
+    only_alt, kind2 = _filter_quotes_for_1d(
+        {"CRWD": quotes["CRWD"]}, "overnight"
+    )
+    assert only_alt == {}
+    assert kind2 == "no_ext"
+
+
+def test_overlay_refuses_unstamped_alt_as_live_1d(monkeypatch):
+    """无真实印记时不得标 live_1d，也不得写入 overlay_refresh 墙钟。"""
+    import asyncio
+
+    import app.ai_mainline.pipeline as pipe
+
+    payload = {
+        "success": True,
+        "enabled": True,
+        "trade_date": "2026-10-06",
+        "themes": [
+            {
+                "key": "ai_power",
+                "name": "AI电力",
+                "members": [{"symbol": "VST", "ret_1d": None}],
+            }
+        ],
+        "bench": {},
+        "source": "snapshot",
+    }
+
+    async def fake_quotes(phase: str):
+        return (
+            {"VST": {"change_pct": 1.2, "quote_source": "alt"}},
+            "TradingView",
+        )
+
+    monkeypatch.setattr(pipe, "_quotes_for_1d_overlay", fake_quotes)
+    out, ok = asyncio.run(pipe._overlay_live_1d(payload, phase="overnight"))
+    assert ok is False
+    assert out.get("live_1d") is False
+    assert out.get("1d_pending") is True
+    assert out.get("data_time_1d_source") != "overlay_refresh"
+
+
 def test_settle_and_overnight_lag_tolerates_sparse_ext_quotes():
     """盘后/夜盘印记不能按盘中 2–3 分钟判死，否则会反复 pending 回退 04:00。"""
     from datetime import datetime, timedelta

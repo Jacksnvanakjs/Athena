@@ -48,18 +48,24 @@ def _quote_dict(
     change_pct: float,
     volume: float = 0.0,
     name: str | None = None,
+    quote_time: str | None = None,
+    quote_time_et: str | None = None,
 ) -> dict[str, Any]:
-    from app.heatmap import _BJ_TZ, _US_TZ, _quote_row
+    """组装备用源报价行。
 
-    now_et = datetime.now(_US_TZ)
+    禁止用抓取墙钟伪造成交印记：无源端真实时间就留空，
+    由上层按无戳处理，绝不当「最新1D」展示时刻。
+    """
+    from app.heatmap import _quote_row
+
     return _quote_row(
         symbol,
         name=name or symbol,
         price=price,
         change_pct=change_pct,
         volume=volume,
-        quote_time=now_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-        quote_time_et=now_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        quote_time=quote_time,
+        quote_time_et=quote_time_et,
         quote_source="alt",
     )
 
@@ -220,7 +226,30 @@ async def fetch_alpha_vantage_quote(symbol: str) -> dict[str, dict[str, Any]]:
         return {}
     if (chg is None) and prev and prev > 0:
         chg = round((price - prev) / prev * 100, 2)
-    return {sym: _quote_dict(sym, price=price, change_pct=float(chg or 0.0), volume=vol)}
+    # AV 只给 latest trading day（日线级），用该日美东 16:00 作印记，不用抓取时刻
+    quote_time = None
+    quote_time_et = None
+    ltd = str(q.get("07. latest trading day") or "").strip()[:10]
+    if re.match(r"\d{4}-\d{2}-\d{2}$", ltd):
+        try:
+            from app.heatmap import _BJ_TZ, _US_TZ
+
+            d = date.fromisoformat(ltd)
+            close_et = datetime(d.year, d.month, d.day, 16, 0, 0, tzinfo=_US_TZ)
+            quote_time_et = close_et.strftime("%Y-%m-%d %H:%M:%S %Z")
+            quote_time = close_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    return {
+        sym: _quote_dict(
+            sym,
+            price=price,
+            change_pct=float(chg or 0.0),
+            volume=vol,
+            quote_time=quote_time,
+            quote_time_et=quote_time_et,
+        )
+    }
 
 
 async def fetch_alpha_vantage_daily_closes(

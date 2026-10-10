@@ -556,14 +556,14 @@ _RTH_DAILY_BAR_SOURCES = frozenset({"tushare", "akshare"})
 
 
 def _rth_quote_trusted(row: dict[str, Any] | None) -> bool:
-    """盘中可信报价：会话印记已在外层过滤；此处拦日线源与无戳东财。"""
+    """盘中可信报价：会话印记已在外层过滤；此处拦日线源与无戳东财/备用源。"""
     if not row or row.get("change_pct") is None:
         return False
     src = str(row.get("quote_source") or "").strip().lower()
     if src in _RTH_DAILY_BAR_SOURCES:
         return False
-    if src == "eastmoney":
-        # 必须有解析得到的成交印记（f124）；无戳的昨收涨跌不要
+    if src in ("eastmoney", "alt"):
+        # 东财/备用源无真实成交印记不可信（alt 曾用墙钟伪造时间）
         return _parse_member_quote_dt(row) is not None
     return True
 
@@ -613,36 +613,50 @@ def _filter_quotes_for_1d(
     from app.heatmap import _quote_looks_like_rth_close
 
     now = datetime.now(ET)
-    fresh = {
+    # live 只认可解析的真实成交印记；无戳行（TradingView/Finviz 等）不得进入 fresh，
+    # 否则会占坑并把仍有效的会话印记挤掉，或用抓取墙钟冒充「最新1D」。
+    stamped = {
         k: v
         for k, v in quotes.items()
-        if v and v.get("change_pct") is not None and not _quote_stamp_too_old(v, now=now)
+        if v
+        and v.get("change_pct") is not None
+        and _parse_member_quote_dt(v) is not None
+        and not _quote_stamp_too_old(v, now=now)
     }
-    if not fresh:
-        fresh = {k: v for k, v in quotes.items() if v and v.get("change_pct") is not None}
+    if not stamped:
+        # 周末夜盘：60h 边界上的真实印记仍可回退；依然拒绝无戳
+        stamped = {
+            k: v
+            for k, v in quotes.items()
+            if v
+            and v.get("change_pct") is not None
+            and _parse_member_quote_dt(v) is not None
+        }
     if phase == "rth":
         live = {
             k: v
-            for k, v in fresh.items()
+            for k, v in stamped.items()
             if v and _quote_dt_in_current_session(v, "rth")
         }
         trusted = {k: v for k, v in live.items() if _rth_quote_trusted(v)}
         if trusted:
             return trusted, "rth"
         if live:
-            # 有今日印记但全是日线源/无戳 → 仍待可靠源
+            # 有今日印记但全是日线源 → 仍待可靠源
             return {}, "em_stale"
         return {}, "no_rth"
     if phase not in ("pre_open", "settle", "overnight"):
-        return fresh, "rth"
+        return stamped, "rth"
     non_rth = {
-        k: v for k, v in fresh.items() if v and not _quote_looks_like_rth_close(v)
+        k: v
+        for k, v in stamped.items()
+        if v and not _quote_looks_like_rth_close(v)
     }
     if non_rth:
         # 夜盘/盘后：缺扩展价的票用最近收盘补洞，避免 CNBC 漏票整只灰掉
         if phase in ("overnight", "settle"):
             out = dict(non_rth)
-            for k, v in fresh.items():
+            for k, v in stamped.items():
                 if k not in out:
                     out[k] = v
             kind = "session+rth_holes" if len(out) > len(non_rth) else "session"
@@ -651,10 +665,10 @@ def _filter_quotes_for_1d(
     # 盘前：宁可失败重试，也不把北京 04:00 常规收盘标成盘前 live
     if phase == "pre_open":
         return {}, "no_ext"
-    # 盘后刚开始扩展源未齐时，允许短暂回退收盘价，避免整表 pending→页面只剩 04:00
+    # 盘后刚开始扩展源未齐时，允许短暂回退收盘价（须有真实印记）
     if phase == "settle":
-        return fresh, "rth_fallback"
-    return fresh, "rth_fallback"
+        return stamped, "rth_fallback" if stamped else "no_ext"
+    return stamped, "rth_fallback" if stamped else "no_ext"
 
 
 def _quote_dt_in_current_session(
@@ -1105,13 +1119,19 @@ async def _overlay_live_1d(
     qtimes = _quote_data_times(use_quotes)
     out.update(qtimes)
     out.update(_daily_session_close_times(out.get("trade_date")))
-    # 有成交印记就用印记；没有才用刷新时刻（勿回落几天前的缓存戳）
+    # 第一原则：无源端真实成交印记 → 禁止用墙钟/刷新时刻伪造「最新1D」时间
     if not out.get("data_time_1d_bj") and not out.get("data_time_1d_et"):
-        out["data_time_1d_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M:%S")
-        out["data_time_1d_et"] = datetime.now(ET).strftime("%Y-%m-%d %H:%M:%S %Z")
-        out["data_time_1d_source"] = "overlay_refresh"
-    else:
-        out["data_time_1d_source"] = "live_quote"
+        keep = _has_holdable_1d(payload)
+        stripped = _strip_stale_1d_fields(out, phase=phase)
+        return (
+            _mark_1d_pending(
+                stripped,
+                note="行情无真实成交印记，拒绝用抓取时刻冒充1D时间",
+                keep_last_1d=keep,
+            ),
+            False,
+        )
+    out["data_time_1d_source"] = "live_quote"
     out["live_1d"] = True
     out["1d_fresh"] = True
     out["1d_pending"] = False

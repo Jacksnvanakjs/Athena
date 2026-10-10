@@ -71,13 +71,16 @@ def test_unstamped_eastmoney_still_counts_as_hole():
     )
 
 
-def test_alt_quote_carries_session_stamp():
+def test_alt_quote_does_not_fabricate_wall_clock_stamp():
+    """备用源无源端时间时禁止用抓取墙钟伪造成交印记。"""
+    from app.heatmap import _quote_lacks_session_stamp
     from app.market_data.alt_sources import _quote_dict
 
     q = _quote_dict("CRWD", price=100.0, change_pct=1.5, volume=1e6)
     assert q["quote_source"] == "alt"
-    assert q.get("quote_time")
-    assert q.get("quote_time_et")
+    assert not q.get("quote_time")
+    assert not q.get("quote_time_et")
+    assert _quote_lacks_session_stamp(q)
 
 
 def test_premarket_uses_extended_price():
