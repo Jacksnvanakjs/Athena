@@ -208,6 +208,8 @@ def test_finalize_sets_basis_without_db_crash(monkeypatch):
             },
         ],
     )
+    monkeypatch.setattr("app.ai_mainline.pipeline._market_phase", lambda now=None: "rth")
+    monkeypatch.setattr("app.ai_mainline.pipeline._live_1d_active", lambda phase=None: True)
     out = _finalize_payload(
         {
             "success": True,
@@ -235,12 +237,10 @@ def test_finalize_sets_basis_without_db_crash(monkeypatch):
     assert out["rotation_14d"][0]["name"] == "AI安全/身份"
     assert out.get("rotation_1d")
     assert any(r.get("name") == "光通信" for r in out["rotation_1d"])
-    if out.get("1d_pending") or out.get("live_1d") is False:
-        # 盘中未叠加上今日报价时，不能沿用快照 1D
-        assert out["themes"][0]["ret_1d"] is None
-        assert not out.get("1d_hold")
-    else:
-        assert out["pulse_1d_weak"] is True
+    # 盘中未叠加上今日报价时，不能沿用快照 1D
+    assert out.get("1d_pending") is True
+    assert out["themes"][0]["ret_1d"] is None
+    assert not out.get("1d_hold")
 
 
 def test_pending_refresh_keeps_last_live_1d(monkeypatch):
@@ -278,3 +278,34 @@ def test_pending_refresh_keeps_last_live_1d(monkeypatch):
     assert out["themes"][0]["ret_1d"] == 2.4
     assert out["1d_pending"] is True
     assert out["1d_hold"] is True
+
+
+def test_closed_finalize_holds_snapshot_1d(monkeypatch):
+    """休市未叠 live 时保留快照 1D，禁止整列「—」。"""
+    monkeypatch.setattr("app.ai_mainline.pipeline._live_1d_active", lambda phase=None: True)
+    monkeypatch.setattr("app.ai_mainline.pipeline._market_phase", lambda now=None: "closed")
+    monkeypatch.setattr("app.ai_mainline.pipeline.history_primary", lambda days=14: [])
+    monkeypatch.setattr("app.ai_mainline.pipeline.history_pulse_1d", lambda days=10: [])
+    from app.ai_mainline.pipeline import _finalize_payload
+
+    out = _finalize_payload(
+        {
+            "success": True,
+            "status": "emerging",
+            "live_1d": False,
+            "trade_date": "2026-10-09",
+            "themes": [
+                {
+                    "key": "memory",
+                    "name": "存储/HBM链",
+                    "ret_1d": 1.5,
+                    "members": [{"symbol": "MU", "ret_1d": 2.0}],
+                }
+            ],
+            "primary": {"key": "memory", "name": "存储/HBM链"},
+        }
+    )
+    assert out["1d_pending"] is True
+    assert out["1d_hold"] is True
+    assert out["themes"][0]["ret_1d"] == 1.5
+    assert out["themes"][0]["members"][0]["ret_1d"] == 2.0

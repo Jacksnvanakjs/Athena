@@ -1329,7 +1329,8 @@
     async function loadMainline() {
       const { ctrl, isLatest, shouldPaint } = beginTabLoad('mainline');
       if (!mainlineHasData && shouldPaint()) showLoading('mlEmpty', '主线加载中…');
-      const timer = setTimeout(() => ctrl.abort(), 20000);
+      // 首屏给足时间叠 1D；Turso 慢时后端已限时，勿过早 Abort 导致整表空白
+      const timer = setTimeout(() => ctrl.abort(), mainlineHasData ? 25000 : 45000);
       try {
         for (let attempt = 0; attempt < 2; attempt++) {
           try {

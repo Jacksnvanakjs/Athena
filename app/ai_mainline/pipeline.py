@@ -289,7 +289,7 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         out.update(_daily_session_close_times(out.get("trade_date")))
     if not out.get("updated_bj"):
         out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
-    # 安全网：任何路径都不得把滞后/收盘印记标成「最新1D」
+    # 安全网：不得把滞后/收盘印记标成「最新1D」；非盘中 pending 时保留数字占位
     if _live_1d_active(phase):
         bad_live = bool(out.get("live_1d")) and (
             _1d_lag_too_large(out, phase) or not _has_ext_live_1d(out, phase)
@@ -314,9 +314,13 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
             out["1d_pending"] = False
             out.pop("1d_hold", None)
         else:
+            # 尚未 live：标 pending；非盘中保留快照 1D 占位，盘中才清空防昨收冒充
             out["1d_fresh"] = False
             out["1d_pending"] = True
-            out = _clear_intraday_1d_metrics(out)
+            if _has_holdable_1d(out):
+                out["1d_hold"] = True
+            else:
+                out = _clear_intraday_1d_metrics(out)
             if not out.get("live_1d_note"):
                 out["live_1d_note"] = "1D 正在拉取最新报价…"
     else:
@@ -849,14 +853,23 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
 
 
 def _has_holdable_1d(payload: dict[str, Any] | None) -> bool:
-    """上一轮已叠过今日 1D，刷新等待时可继续展示，不必先打成「—」。"""
+    """刷新等待时可继续展示的 1D 数字（不必先打成「—」）。
+
+    - 已 live / 1d_hold：保留。
+    - 非盘中（盘后/夜盘/休市/盘前）：库快照上的 ret_1d 也可占位，
+      避免 overlay 未完成时整列「—」（盘中仍禁止把昨收快照当今日）。
+    """
     if not payload:
         return False
-    if not (payload.get("live_1d") or payload.get("1d_hold")):
-        return False
-    return any(
+    has_num = any(
         (t or {}).get("ret_1d") is not None for t in (payload.get("themes") or [])
     )
+    if not has_num:
+        return False
+    if payload.get("live_1d") or payload.get("1d_hold"):
+        return True
+    phase = _market_phase()
+    return phase != "rth"
 
 
 def _clear_intraday_1d_metrics(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1681,11 +1694,14 @@ async def _compute_mainline_fresh(
 
     today = _today_et()
     prior_streak: dict[str, int] = {}
-    try:
+
+    def _streak_job() -> dict[str, int]:
         with SessionLocal() as db:
-            prior_streak = _load_streak_before_today(db, today)
-    except Exception as exc:
-        logger.warning("load streak failed: %s", exc)
+            return _load_streak_before_today(db, today)
+
+    loaded = _run_db_budget(_streak_job, budget=3.0, label="streak")
+    if loaded is not None:
+        prior_streak = loaded
 
     streak = _streak_including_today(ranked, prior_streak)
     judged = judge_mainline(ranked, streak)
@@ -1823,6 +1839,23 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
             _CACHE["ts"] = now
             _CACHE["phase"] = phase
             return _finalize_payload(out)
+        if not force and base is None and cached is None:
+            # Turso 超时且无内存缓存：禁止掉进 100s+ 全量重算把整表卡死
+            logger.warning("ai_mainline no snapshot (db slow); defer full compute to background")
+            _schedule_full_refresh_bg()
+            return {
+                "success": False,
+                "enabled": True,
+                "as_of": _as_of_iso(),
+                "themes": [],
+                "primary": None,
+                "secondary": None,
+                "status": "error",
+                "summary": "主线快照库暂慢/不可用，已后台重试，请稍后刷新。",
+                "note": "db_timeout",
+                "1d_pending": True,
+                "session_phase": phase,
+            }
     else:
         db_payload = _payload_from_db_snapshots()
         base = _pick_best_base(cached, db_payload)
@@ -2159,18 +2192,24 @@ async def run_ai_mainline_daily(force: bool = False) -> dict[str, Any]:
 
 
 def _run_db_budget(fn, *, budget: float = _DB_QUERY_BUDGET_SEC, label: str = "db"):
-    """限时跑同步 DB；超时返回 None，避免卡住 API。"""
+    """限时跑同步 DB；超时返回 None，避免卡住 API。
+
+    注意：不可用 ``with ThreadPoolExecutor`` 默认 shutdown(wait=True)，
+    否则 Turso 挂起时「4s 超时」仍会再等线程结束，整表卡数分钟。
+    """
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
+    pool = ThreadPoolExecutor(max_workers=1)
     try:
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(fn).result(timeout=budget)
+        return pool.submit(fn).result(timeout=budget)
     except FuturesTimeout:
         logger.warning("ai_mainline %s timed out after %.1fs", label, budget)
         return None
     except Exception:
         logger.exception("ai_mainline %s failed", label)
         return None
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def history_primary(days: int = 30) -> list[dict[str, Any]]:
