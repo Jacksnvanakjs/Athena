@@ -344,7 +344,7 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         logger.exception("ai_mainline rotation_1d failed")
         out.setdefault("rotation_1d", [])
-    return out
+    return _ensure_display_times(out)
 
 
 def _market_phase(now: datetime | None = None) -> str:
@@ -904,6 +904,42 @@ def _clear_intraday_1d_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _backfill_1d_times_from_members(payload: dict[str, Any]) -> dict[str, Any]:
+    """顶层 1D 时刻被清空时，从成分印记回填（优先非收盘扩展戳）。"""
+    from app.heatmap import _quote_looks_like_rth_close
+
+    out = dict(payload)
+    if out.get("data_time_1d_bj") or out.get("data_time_1d_et"):
+        return out
+    rows: dict[str, dict[str, Any]] = {}
+    for theme in out.get("themes") or []:
+        for m in theme.get("members") or []:
+            sym = (m.get("symbol") or "").upper()
+            if not sym:
+                continue
+            if m.get("quote_time") or m.get("quote_time_et"):
+                rows[sym] = m
+    if not rows:
+        return out
+    ext = {k: v for k, v in rows.items() if not _quote_looks_like_rth_close(v)}
+    times = _quote_data_times(ext or rows)
+    if times.get("data_time_1d_bj") or times.get("data_time_1d_et"):
+        out.update(times)
+        if not out.get("data_time_1d_source"):
+            out["data_time_1d_source"] = "member_quote"
+    return out
+
+
+def _ensure_display_times(payload: dict[str, Any]) -> dict[str, Any]:
+    """出口保证「数据时间」有可展示字段，避免页面只剩「—」。"""
+    out = _backfill_1d_times_from_members(payload)
+    if not out.get("data_time_daily_bj") and out.get("trade_date"):
+        out.update(_daily_session_close_times(out.get("trade_date")))
+    if not out.get("updated_bj"):
+        out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
+    return out
+
+
 def _mark_1d_pending(
     payload: dict[str, Any],
     *,
@@ -931,10 +967,7 @@ def _mark_1d_pending(
         out.pop("1d_hold", None)
     elif keep_last_1d:
         out["1d_hold"] = True
-    if not out.get("data_time_daily_bj") and out.get("trade_date"):
-        out.update(_daily_session_close_times(out.get("trade_date")))
-    if not out.get("updated_bj"):
-        out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
+    out = _ensure_display_times(out)
     msg = (note or out.get("live_1d_note") or "1D 正在拉取最新报价…").strip()
     out["live_1d_note"] = msg
     return out

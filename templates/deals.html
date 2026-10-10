@@ -1195,9 +1195,23 @@
       const src = data.data_time_1d_source || '';
       const live = !!data.live_1d;
       const pending = !!data['1d_pending'];
+      const hold = !!data['1d_hold'];
       const phase = data.session_phase || '';
-      const d1bj = data.data_time_1d_bj || '';
-      const d1et = data.data_time_1d_et || '';
+      let d1bj = data.data_time_1d_bj || '';
+      let d1et = data.data_time_1d_et || '';
+      // 顶层时刻被清空时，从成分印记回填
+      if (!d1bj && !d1et) {
+        for (const row of data.themes || []) {
+          for (const mem of row.members || []) {
+            if (mem && (mem.quote_time || mem.quote_time_et)) {
+              d1bj = mem.quote_time || d1bj;
+              d1et = mem.quote_time_et || d1et;
+              break;
+            }
+          }
+          if (d1bj || d1et) break;
+        }
+      }
       const dDbj = data.data_time_daily_bj || '';
       const dDet = data.data_time_daily_et || '';
       const updatedBj = data.updated_bj || '';
@@ -1235,22 +1249,29 @@
         return null;
       }
 
-      // 有效最新 1D：有 live 且非收盘假戳、非 pending
-      if (live && d1bj && !closeLike && !pending) {
+      // 非收盘 1D 印记（含 hold 的最近盘后）：必须显示具体时间，禁止「—」
+      if (d1bj && !rthCloseStamp) {
+        const tag = (live && !pending) ? '最新1D' : '最近盘后';
         return {
-          label: `最新1D：北京 ${d1bj}${d1et ? ' · ' + d1et : ''}`,
-          tip: dataTimeTip(d1bj, d1et, '1d', src || 'live_quote'),
+          label: `${tag}：北京 ${d1bj}${d1et ? ' · ' + d1et : ''}`,
+          tip: dataTimeTip(d1bj, d1et, '1d', src || (live ? 'live_quote' : 'member_quote')),
         };
       }
 
       const daily = dailySnapshotLabel();
       // 1D 拉取中：仍展示日线/更新时刻，禁止只剩「—」
-      if (pending || (extPhase && (!live || rthCloseStamp || closeLike))) {
+      if (pending || hold || (extPhase && (!live || rthCloseStamp || closeLike))) {
         const note = (data.live_1d_note || '').trim();
         if (daily) {
           return {
             label: `最新1D拉取中 · ${daily.label}`,
             tip: [note || '正在重拉会话价', daily.tip].filter(Boolean).join('\n'),
+          };
+        }
+        if (updatedBj) {
+          return {
+            label: note ? `最新1D拉取中 · 更新：北京 ${updatedBj}` : `最新1D拉取中 · 更新：北京 ${updatedBj}`,
+            tip: note || '正在重拉会话价',
           };
         }
         return {
@@ -1260,7 +1281,16 @@
       }
 
       if (daily) return daily;
-      return { label: '数据时间：—', tip: '暂无数据时间' };
+      if (updatedBj) {
+        return { label: `更新：北京 ${updatedBj}`, tip: '页面/快照刷新时刻（北京）' };
+      }
+      if (asOf) {
+        return {
+          label: `收盘快照：美东 ${asOf} 16:00`,
+          tip: '日线收盘快照',
+        };
+      }
+      return { label: '数据时间：暂无', tip: '暂无数据时间' };
     }
 
     function fmtBreadth(row) {

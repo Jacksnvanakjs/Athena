@@ -309,3 +309,36 @@ def test_closed_finalize_holds_snapshot_1d(monkeypatch):
     assert out["1d_hold"] is True
     assert out["themes"][0]["ret_1d"] == 1.5
     assert out["themes"][0]["members"][0]["ret_1d"] == 2.0
+    # 必须有可展示时间，不能只剩「—」
+    assert out.get("data_time_daily_bj") or out.get("updated_bj")
+
+
+def test_backfill_1d_times_from_member_post_stamp(monkeypatch):
+    monkeypatch.setattr("app.ai_mainline.pipeline._market_phase", lambda now=None: "closed")
+    from app.ai_mainline.pipeline import _backfill_1d_times_from_members, _ensure_display_times
+
+    out = _ensure_display_times(
+        _backfill_1d_times_from_members(
+            {
+                "trade_date": "2026-10-09",
+                "data_time_1d_bj": None,
+                "data_time_1d_et": None,
+                "themes": [
+                    {
+                        "key": "t",
+                        "members": [
+                            {
+                                "symbol": "NVDA",
+                                "ret_1d": -0.5,
+                                "quote_time": "2026-10-10 08:00:00",
+                                "quote_time_et": "2026-10-09 20:00:00 EDT",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    assert out["data_time_1d_bj"] == "2026-10-10 08:00:00"
+    assert "20:00" in (out.get("data_time_1d_et") or "")
+    assert out.get("data_time_daily_bj")
