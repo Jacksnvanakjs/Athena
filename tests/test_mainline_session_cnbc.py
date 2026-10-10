@@ -63,6 +63,20 @@ def test_rth_stamp_detector():
     assert not _quote_looks_like_rth_close(
         {"quote_time": "2026-09-25 16:10:00", "quote_time_et": "2026-09-25 04:10:00 EDT"}
     )
+    # 北京 08:04:00 含子串 04:00，不得误判为收盘（新浪盘后常见）
+    assert not _quote_looks_like_rth_close(
+        {"quote_time": "2026-10-07 08:04:00", "quote_time_et": "Oct 06 08:04PM EDT"}
+    )
+    assert not _quote_looks_like_rth_close(
+        {
+            "quote_time": "2026-10-07 08:04:00",
+            "quote_time_et": "2026-10-06 20:04:00 EDT",
+        }
+    )
+    # 新浪 04:00PM = 美东 16:00 收盘
+    assert _quote_looks_like_rth_close(
+        {"quote_time": "2026-10-07 04:00:00", "quote_time_et": "Oct 06 04:00PM EDT"}
+    )
 
 
 def test_filter_quotes_refuses_rth_in_pre_open():

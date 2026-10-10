@@ -39,7 +39,7 @@
         {"symbol": "MU", "name": "美光", "weight": 1.0},
         {"symbol": "WDC", "name": "西部数据", "weight": 1.0},
         {"symbol": "STX", "name": "希捷", "weight": 1.0},
-        {"symbol": "PSTG", "name": "Pure Storage", "weight": 1.0}
+        {"symbol": "P", "name": "Everpure(原Pure Storage)", "weight": 1.0}
       ]
     },
     {

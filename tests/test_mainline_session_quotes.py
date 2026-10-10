@@ -114,6 +114,60 @@ def test_live_1d_active_phases():
     assert reason.startswith("phase_switch") or reason == "stamp_mismatch"
 
 
+def test_overnight_keeps_rth_holes_when_session_partial():
+    from app.ai_mainline.pipeline import _filter_quotes_for_1d
+
+    quotes = {
+        "GLW": {
+            "change_pct": 5.8,
+            "quote_source": "cnbc",
+            "quote_time_et": "2026-10-06 19:59:00 EDT",
+            "quote_time": "2026-10-07 07:59:00",
+        },
+        "ORCL": {
+            "change_pct": 1.6,
+            "quote_source": "eastmoney",
+            "quote_time_et": "2026-10-06 16:00:00 EDT",
+            "quote_time": "2026-10-07 04:00:00",
+        },
+    }
+    use, kind = _filter_quotes_for_1d(quotes, "overnight")
+    assert "GLW" in use
+    assert "ORCL" in use
+    assert kind in ("session+rth_holes", "session")
+
+
+def test_settle_and_overnight_lag_tolerates_sparse_ext_quotes():
+    """盘后/夜盘印记不能按盘中 2–3 分钟判死，否则会反复 pending 回退 04:00。"""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from app.ai_mainline.pipeline import _1d_lag_too_large
+
+    et = ZoneInfo("America/New_York")
+    now = datetime.now(et)
+    settle_stamp = now - timedelta(minutes=12)
+    payload = {
+        "live_1d": True,
+        "data_time_1d_bj": settle_stamp.astimezone(ZoneInfo("Asia/Shanghai")).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "data_time_1d_et": settle_stamp.strftime("%Y-%m-%d %H:%M:%S %Z"),
+    }
+    assert _1d_lag_too_large(payload, "settle") is False
+    assert _1d_lag_too_large(payload, "rth") is True  # 盘中仍严
+    # 夜盘：周五盘后戳在周末凌晨仍应可用（<36h）
+    fri_post = now - timedelta(hours=10)
+    overnight = {
+        "live_1d": True,
+        "data_time_1d_bj": fri_post.astimezone(ZoneInfo("Asia/Shanghai")).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+        "data_time_1d_et": fri_post.strftime("%Y-%m-%d %H:%M:%S %Z"),
+    }
+    assert _1d_lag_too_large(overnight, "overnight") is False
+
+
 def test_rth_rejects_prior_close_quotes_and_clears_snapshot_1d():
     from datetime import datetime
     from zoneinfo import ZoneInfo

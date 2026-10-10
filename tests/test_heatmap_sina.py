@@ -112,4 +112,7 @@ def test_overnight_window_falls_back_to_post_extended():
     assert q is not None
     assert q["price"] == 223.82
     assert q["change_pct"] == round((223.82 - 225.50) / 225.50 * 100, 2)
-    assert q.get("quote_time_et") and "07:59" in q["quote_time_et"]
+    assert q.get("quote_time_et") and "19:59" in q["quote_time_et"]
+    from app.heatmap import _quote_looks_like_rth_close
+
+    assert not _quote_looks_like_rth_close(q)

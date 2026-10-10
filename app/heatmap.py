@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -217,7 +217,7 @@ THEMES: list[dict[str, Any]] = [
     {"key": "cpo", "name": "CPO/光模块",
      "tickers": [("LITE", "Lumentum"), ("COHR", "Coherent"), ("CIEN", "Ciena"), ("FN", "Fabrinet"), ("AAOI", "Applied Opto"), ("GLW", "康宁"), ("MTSI", "MACOM"), ("AVGO", "博通")]},
     {"key": "storage", "name": "存储",
-     "tickers": [("MU", "美光"), ("WDC", "西部数据"), ("STX", "希捷"), ("PSTG", "Pure Storage"), ("NTAP", "NetApp")]},
+     "tickers": [("MU", "美光"), ("WDC", "西部数据"), ("STX", "希捷"), ("P", "Everpure"), ("NTAP", "NetApp")]},
     {"key": "datacenter", "name": "数据中心/IDC", "etf": "SRVR",
      "tickers": [("EQIX", "Equinix"), ("DLR", "Digital Realty"), ("AMT", "美国电塔"), ("VRT", "Vertiv"), ("ANET", "Arista"), ("CRWV", "CoreWeave")]},
     {"key": "cloud_saas", "name": "云计算/SaaS", "etf": "SKYY",
@@ -449,6 +449,50 @@ def _quote_lacks_session_stamp(row: dict[str, Any] | None) -> bool:
     return not row.get("quote_time") and not row.get("quote_time_et")
 
 
+def _parse_quote_stamp_dt(row: dict[str, Any] | None) -> datetime | None:
+    """解析报价印记为美东时间；供过期判断。"""
+    if not row:
+        return None
+    et = str(row.get("quote_time_et") or "").strip()
+    bj = str(row.get("quote_time") or "").strip()
+    for text, tz in ((et, _US_TZ), (bj, _BJ_TZ)):
+        if not text:
+            continue
+        # 2026-10-06 16:00:00 EDT
+        m = re.match(
+            r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?",
+            text,
+        )
+        if m:
+            try:
+                return datetime(
+                    int(m.group(1)),
+                    int(m.group(2)),
+                    int(m.group(3)),
+                    int(m.group(4)),
+                    int(m.group(5)),
+                    int(m.group(6) or 0),
+                    tzinfo=tz,
+                ).astimezone(_US_TZ)
+            except ValueError:
+                continue
+        parsed = _parse_sina_et_time(text)
+        if parsed:
+            return parsed
+    return None
+
+
+def _quote_stamp_stale(
+    row: dict[str, Any] | None, *, now: datetime | None = None, max_hours: float = 60.0
+) -> bool:
+    """印记超过约 2.5 天视为过期（Finnhub 偶发钉死旧 t）。"""
+    dt = _parse_quote_stamp_dt(row)
+    if dt is None:
+        return False
+    now = now or datetime.now(_US_TZ)
+    return (now - dt).total_seconds() > max_hours * 3600
+
+
 _US_TZ = ZoneInfo("America/New_York")
 _BJ_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -580,6 +624,10 @@ def _parse_sina_row(
     quote_time = (
         et_dt.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S") if et_dt else None
     )
+    # 统一写成 24h 美东戳，避免 "08:04PM" 被收盘检测误伤
+    quote_time_et = (
+        et_dt.strftime("%Y-%m-%d %H:%M:%S %Z") if et_dt else (et_raw or None)
+    )
     return _quote_row(
         sym,
         name=parts[0] or sym,
@@ -587,7 +635,7 @@ def _parse_sina_row(
         change_pct=change_pct,
         volume=volume,
         quote_time=quote_time,
-        quote_time_et=et_raw or None,
+        quote_time_et=quote_time_et,
         quote_source="sina",
     )
 
@@ -1174,12 +1222,16 @@ async def _fill_quote_holes(
     快路径：新浪 hq → Yahoo → CNBC。不做全表慢补。
     """
     have = existing or {}
+    now_et = datetime.now(_US_TZ)
     missing = [
         s.upper().strip()
         for s in symbols
         if s
         and str(s).strip()
-        and _quote_lacks_session_stamp(have.get(s.upper().strip()))
+        and (
+            _quote_lacks_session_stamp(have.get(s.upper().strip()))
+            or _quote_stamp_stale(have.get(s.upper().strip()), now=now_et)
+        )
     ]
     if not missing:
         return {}, "none"
@@ -1225,6 +1277,20 @@ async def _fill_quote_holes(
         if cnbc:
             added.update(cnbc)
             used.append(f"CNBC:{len(cnbc)}")
+    still = [s for s in missing if s not in added]
+    # 少数漏票：AKShare 新浪日线（PSTG 等东财/CNBC 无代码）
+    if still and len(still) <= 12:
+        try:
+            ak = await asyncio.wait_for(
+                _fetch_akshare_sina_daily(still),
+                timeout=min(24.0, max(8.0, timeout + 8.0)),
+            )
+        except Exception as exc:
+            logger.warning("hole fill akshare daily failed: %s", exc)
+            ak = {}
+        if ak:
+            added.update(ak)
+            used.append(f"AkSinaDaily:{len(ak)}")
     return added, "+".join(used) if used else "none"
 
 
@@ -1288,19 +1354,28 @@ async def _fetch_cnbc_session_quotes(symbols: list[str]) -> dict[str, dict[str, 
 def _quote_looks_like_rth_close(row: dict[str, Any] | None) -> bool:
     """常规收盘印记：美东 16:00 / 北京次日 04:00（夏令）或 05:00（冬令）。
 
-    注意：盘前也是美东 04:xx，不能只凭「04:」判断；必须是整点收盘换算。
+    注意：
+    - 盘前也是美东 04:xx，不能只凭「04:」判断；必须是整点收盘换算。
+    - 北京 ``08:04:00`` 含子串 ``04:00``，匹配小时必须贴在空白后，禁止误杀盘后戳。
     """
     if not row:
         return False
     et = str(row.get("quote_time_et") or "")
     bj = str(row.get("quote_time") or "")
-    # 美东正规收盘
-    if re.search(r"\b16:0\d", et):
+    # 新浪式 "Oct 06 04:00PM EDT" = 美东 16:00
+    if re.search(r"\b0?4:0\d\s*PM\b", et, re.I):
         return True
-    # 北京次日凌晨整点（由 16:00 ET 换算），排除盘前 16:xx
-    if re.search(r"\b0[45]:00(?::00)?\b", bj) and not re.search(r"\b0[45]:0[1-9]", bj):
-        # 若美东戳是盘前 04:xx，则不是收盘
-        if re.search(r"\b0[45]:\d{2}", et) and not re.search(r"\b16:0\d", et):
+    # 美东正规收盘（24h）
+    if re.search(r"(?:^|[\sT])16:0\d", et):
+        return True
+    # 北京次日凌晨整点（由 16:00 ET 换算）：空白后的 04:00/05:00，勿匹配 08:04:00
+    if re.search(r"(?:^|[\sT])0[45]:00(?::00)?(?:\s|$)", bj):
+        # 若美东戳是盘前 04:xx（非 04:00PM），则不是收盘
+        if re.search(r"\b0?4:\d{2}\s*AM\b", et, re.I):
+            return False
+        if re.search(r"(?:^|[\sT])0[45]:\d{2}", et) and not re.search(
+            r"(?:^|[\sT])16:0\d", et
+        ):
             return False
         return True
     return False
@@ -1494,12 +1569,33 @@ def _akshare_sina_daily_one(symbol: str) -> dict[str, Any] | None:
         prev = _to_float(df.iloc[-2].get("close"))
         if prev and prev > 0:
             change_pct = round((price - prev) / prev * 100, 2)
+    quote_time = None
+    quote_time_et = None
+    # 日线收盘戳：东财/CNBC 漏票时供夜盘 rth 补洞（盘中仍会被日线源过滤）
+    raw_d = last.get("date") if hasattr(last, "get") else None
+    if raw_d is None and len(df.index):
+        raw_d = df.index[-1]
+    try:
+        if isinstance(raw_d, datetime):
+            d = raw_d.date()
+        elif isinstance(raw_d, date):
+            d = raw_d
+        else:
+            d = date.fromisoformat(str(raw_d)[:10])
+        close_et = datetime(d.year, d.month, d.day, 16, 0, 0, tzinfo=_US_TZ)
+        quote_time_et = close_et.strftime("%Y-%m-%d %H:%M:%S %Z")
+        quote_time = close_et.astimezone(_BJ_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        quote_time = None
+        quote_time_et = None
     return _quote_row(
         symbol,
         name=symbol,
         price=price,
         change_pct=change_pct,
         volume=volume,
+        quote_time=quote_time,
+        quote_time_et=quote_time_et,
         quote_source="akshare",
     )
 
@@ -1929,6 +2025,31 @@ async def get_quotes_session_aware(
             if added:
                 sources_used.append(f"Binance:{added}")
 
+    now_et = datetime.now(_US_TZ)
+    # 过期印记当缺口（如 Finnhub PSTG 钉在数周前），交给日线补
+    for sym in list(merged):
+        if _quote_stamp_stale(merged[sym], now=now_et):
+            merged.pop(sym, None)
+    missing = [
+        s
+        for s in uniq
+        if s not in merged or _quote_lacks_session_stamp(merged.get(s))
+    ]
+    if missing and len(missing) <= 12:
+        try:
+            ak = await asyncio.wait_for(_fetch_akshare_sina_daily(missing), timeout=24.0)
+        except Exception as exc:
+            logger.warning("session-aware akshare daily failed: %s", exc)
+            ak = {}
+        if ak:
+            n = 0
+            for sym, row in ak.items():
+                prev = merged.get(sym)
+                if prev is None or _quote_stamp_stale(prev, now=now_et) or _quote_lacks_session_stamp(prev):
+                    merged[sym] = row
+                    n += 1
+            if n:
+                sources_used.append(f"AkSinaDaily:{n}")
     missing = [s for s in uniq if s not in merged]
     if missing:
         try:

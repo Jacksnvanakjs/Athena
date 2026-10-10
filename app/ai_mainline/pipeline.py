@@ -639,10 +639,21 @@ def _filter_quotes_for_1d(
         k: v for k, v in fresh.items() if v and not _quote_looks_like_rth_close(v)
     }
     if non_rth:
+        # 夜盘/盘后：缺扩展价的票用最近收盘补洞，避免 CNBC 漏票整只灰掉
+        if phase in ("overnight", "settle"):
+            out = dict(non_rth)
+            for k, v in fresh.items():
+                if k not in out:
+                    out[k] = v
+            kind = "session+rth_holes" if len(out) > len(non_rth) else "session"
+            return out, kind
         return non_rth, "session"
-    # 盘前/盘后：宁可失败重试，也不把北京 04:00 常规收盘标成盘前 live
-    if phase in ("pre_open", "settle"):
+    # 盘前：宁可失败重试，也不把北京 04:00 常规收盘标成盘前 live
+    if phase == "pre_open":
         return {}, "no_ext"
+    # 盘后刚开始扩展源未齐时，允许短暂回退收盘价，避免整表 pending→页面只剩 04:00
+    if phase == "settle":
+        return fresh, "rth_fallback"
     return fresh, "rth_fallback"
 
 
@@ -755,7 +766,11 @@ def _1d_stamp_mismatch_phase(payload: dict[str, Any] | None, phase: str) -> bool
 
 
 def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
-    """相对「此刻」印记过旧则重拉（盘前/盘中更严）。"""
+    """相对「此刻」印记过旧则重拉。
+
+    注意：盘后/夜盘成交稀疏，阈值不能按盘中秒级套。过严会反复 pending，
+    页面回退展示北京 04:00 常规收盘戳，看起来像「1D 不更新」。
+    """
     if not payload:
         return True
     dt = _parse_member_quote_dt(
@@ -773,13 +788,14 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
     if lag < 0:
         return False
     if phase == "pre_open":
-        return lag > 90  # 盘前 90 秒未刷新视为旧，配合自动检测重拉
+        return lag > 15 * 60  # 盘前稀疏，15 分钟内的扩展价仍算有效
     if phase == "rth":
         return lag > 120
     if phase == "settle":
-        return lag > 180
-    # overnight：夜盘无连续成交时印记可停数小时，但仍拦「半日以上」陈旧缓存
-    return lag > 60 * 60 * 6
+        # 盘后 16:00–20:00：成交不如盘中密，20 分钟内扩展价可展示
+        return lag > 20 * 60
+    # overnight：公共源无 ATS，周五盘后戳要撑过周末；拦「跨过一个完整交易日」的陈旧缓存
+    return lag > 60 * 60 * 36
 
 
 def _has_holdable_1d(payload: dict[str, Any] | None) -> bool:
@@ -1035,9 +1051,19 @@ async def _overlay_live_1d(
                 if chg > 0:
                     up += 1
             else:
-                mem["ret_1d"] = None
-                mem.pop("quote_time", None)
-                mem.pop("quote_time_et", None)
+                # 本轮漏票：保留上一轮成员 1D，避免局部成功把灰票打穿
+                if mem.get("ret_1d") is not None:
+                    try:
+                        chg = round(float(mem["ret_1d"]), 2)
+                        ret_1d_list.append(chg)
+                        if chg > 0:
+                            up += 1
+                    except (TypeError, ValueError):
+                        mem["ret_1d"] = None
+                else:
+                    mem["ret_1d"] = None
+                    mem.pop("quote_time", None)
+                    mem.pop("quote_time_et", None)
             members.append(mem)
         row["members"] = members
         if ret_1d_list:
