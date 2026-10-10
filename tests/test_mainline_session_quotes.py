@@ -67,14 +67,12 @@ def test_live_1d_active_phases():
         _overlay_interval_sec,
     )
 
-    assert _live_1d_active("pre_open")
-    assert _live_1d_active("rth")
-    assert _live_1d_active("settle")
-    assert _live_1d_active("overnight")
-    assert not _live_1d_active("closed")
+    # 盘前/盘中/盘后有数必拉；休市也要拉最近盘后（与星期无关）
+    for ph in ("pre_open", "rth", "settle", "overnight", "closed"):
+        assert _live_1d_active(ph)
     assert _overlay_interval_sec("rth") == 45.0 or _near_phase_switch()
     assert _overlay_interval_sec("pre_open") in (30.0, 45.0)
-    assert _overlay_interval_sec("overnight") in (30.0, 90.0)
+    assert _overlay_interval_sec("overnight") in (30.0, 60.0, 90.0)
 
     et = ZoneInfo("America/New_York")
     # 周日 20:00 ET → 夜盘
@@ -181,6 +179,10 @@ def test_overnight_rejects_pure_rth_close_as_live():
     use, kind = _filter_quotes_for_1d(only_rth, "overnight")
     assert use == {}
     assert kind == "no_ext"
+    # 周末 closed 同样不能停在收盘快照
+    use_c, kind_c = _filter_quotes_for_1d(only_rth, "closed")
+    assert use_c == {}
+    assert kind_c == "no_ext"
 
     assert (
         _has_ext_live_1d(
@@ -202,10 +204,17 @@ def test_overnight_rejects_pure_rth_close_as_live():
                 "data_time_1d_et": "2026-10-09 20:00:00 EDT",
                 "data_time_1d_source": "live_quote",
             },
-            "overnight",
+            "closed",
         )
         is True
     )
+
+
+def test_closed_weekend_live_1d_active():
+    from app.ai_mainline.pipeline import _live_1d_active, _is_ext_phase
+
+    assert _live_1d_active("closed") is True
+    assert _is_ext_phase("closed") is True
 
 
 def test_overlay_refuses_unstamped_alt_as_live_1d(monkeypatch):

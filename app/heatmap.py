@@ -1903,13 +1903,13 @@ async def get_quotes_for_symbols(
 async def get_quotes_session_aware(
     symbols: list[str],
 ) -> tuple[dict[str, dict[str, Any]], str]:
-    """扩展时段优先会话价：CNBC → 新浪 hq →（冷却中则跳过）Yahoo → Finnhub/常规。
+    """会话价（盘前/盘后优先）：CNBC → 新浪 hq → Yahoo → Finnhub/常规。
 
-    说明：
-    - 盘前/盘后：用扩展价；夜盘窗(20:00–04:00)无免费 ATS 源，回退最近盘后价。
-    - 新浪 hq 国内可达，可覆盖 CNBC 不可达时的 RTH 收盘印记。
-    - 本路径**忽略** HEATMAP_SKIP_YAHOO，但尊重 Yahoo 429 冷却，避免轮询打爆。
-    - 会话源已覆盖大半时不再打 Yahoo，只补缺口。
+    口径：
+    - 盘前/盘后：免费源有扩展价就必须拉（周末休市同样拉「最近一档盘后」）。
+    - 夜盘 ATS(20:00–04:00)无免费源：不编造 ATS，回退源端仍提供的最近盘后价。
+    - 新浪 hq 国内可达；可覆盖 CNBC 失败后的缺口（跳过纯 RTH 收盘印记优先用扩展）。
+    - 忽略 HEATMAP_SKIP_YAHOO，但尊重 Yahoo 429 冷却。
     """
     uniq = list(dict.fromkeys(s.upper().strip() for s in symbols if s and str(s).strip()))
     if not uniq:

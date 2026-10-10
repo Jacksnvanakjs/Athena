@@ -475,20 +475,30 @@ def _pick_best_base(
 
 
 def _live_1d_active(phase: str | None = None) -> bool:
-    """1D 即时叠加：交易日全时段 + 周日晚隔夜；周六全日休市不拉。"""
-    phase = phase or _market_phase()
-    return phase in {"pre_open", "rth", "settle", "overnight"}
+    """是否应叠加 1D 即时报价。
+
+    口径（与日历无关）：
+    - 盘前 / 盘中 / 盘后：免费源有数就必须拉并展示（含周末休市展示上周五盘后）。
+    - 夜盘 ATS：无免费源则不硬拉付费 ATS，回退「最近盘后」；禁止停在常规收盘 04:00。
+    """
+    _ = phase  # 各时段均尝试；具体用哪档价由过滤/源决定
+    return True
+
+
+def _is_ext_phase(phase: str) -> bool:
+    """非盘中：需要扩展印记（盘前/盘后），拒绝把常规收盘04:00当最新。"""
+    return phase in {"pre_open", "settle", "overnight", "closed"}
 
 
 def _session_tip(phase: str) -> str:
     if phase == "pre_open":
-        return "已刷新最新1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
+        return "已刷新盘前1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
     if phase == "settle":
-        return "已刷新最新1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
-    if phase == "overnight":
-        return "夜盘无免费 ATS 源，1D 用当前能拿到的最新盘后价；5D/20D 与主线判定沿用日线快照。"
+        return "已刷新盘后1D（相对昨收）；5D/20D 与主线判定沿用日线快照。"
+    if phase in ("overnight", "closed"):
+        return "夜盘ATS无免费源，已用最近盘后1D；5D/20D 与主线判定沿用日线快照。"
     if phase == "rth":
-        return "已刷新最新1D 报价；5D/20D 与主线判定沿用日线快照。"
+        return "已刷新盘中1D；5D/20D 与主线判定沿用日线快照。"
     return "5D/20D 与主线判定沿用日线快照。"
 
 
@@ -667,7 +677,7 @@ def _filter_quotes_for_1d(
             # 有今日印记但全是日线源 → 仍待可靠源
             return {}, "em_stale"
         return {}, "no_rth"
-    if phase not in ("pre_open", "settle", "overnight"):
+    if not _is_ext_phase(phase):
         return stamped, "rth"
     non_rth = {
         k: v
@@ -675,8 +685,8 @@ def _filter_quotes_for_1d(
         if v and not _quote_looks_like_rth_close(v)
     }
     if non_rth:
-        # 夜盘/盘后：缺扩展价的票用最近收盘补洞，避免 CNBC 漏票整只灰掉
-        if phase in ("overnight", "settle"):
+        # 夜盘/盘后/休市：缺扩展价的票用最近收盘补洞，避免 CNBC 漏票整只灰掉
+        if phase in ("overnight", "settle", "closed"):
             out = dict(non_rth)
             for k, v in stamped.items():
                 if k not in out:
@@ -684,9 +694,8 @@ def _filter_quotes_for_1d(
             kind = "session+rth_holes" if len(out) > len(non_rth) else "session"
             return out, kind
         return non_rth, "session"
-    # 盘前/夜盘：无扩展印记就失败重试，禁止把北京 04:00 常规收盘标成「最新1D」
-    # （夜盘曾用 rth_fallback 成功返回 → 页面长期停在 10.x 04:00，盘后价被机制抹掉）
-    if phase in ("pre_open", "overnight"):
+    # 盘前/夜盘/休市：无扩展印记就失败重试，禁止把北京 04:00 常规收盘标成「最新1D」
+    if phase in ("pre_open", "overnight", "closed"):
         return {}, "no_ext"
     # 盘后刚开始扩展源未齐时，允许短暂回退收盘价（须有真实印记）；仍标 rth_fallback 供上层慎用
     if phase == "settle":
@@ -728,8 +737,8 @@ def _strip_stale_1d_fields(
         "quote_time_et": out.get("data_time_1d_et"),
     }
     clear = _quote_stamp_too_old(stamp, now=now)
-    # 盘前/盘后/夜盘：常规收盘印记一律清掉（勿继续展示为当前 live 1D）
-    if phase in ("pre_open", "settle", "overnight") and _quote_looks_like_rth_close(stamp):
+    # 扩展时段/休市：常规收盘印记一律清掉（勿继续展示为当前 live 1D）
+    if phase and _is_ext_phase(phase) and _quote_looks_like_rth_close(stamp):
         clear = True
     # 印记相对当前时段已滞后：禁止继续展示为「最新1D」
     if phase and phase in ("pre_open", "rth", "settle") and _1d_lag_too_large(out, phase):
@@ -753,9 +762,7 @@ def _strip_stale_1d_fields(
         for m in theme.get("members") or []:
             mem = dict(m)
             drop = _quote_stamp_too_old(mem, now=now)
-            if phase in ("pre_open", "settle", "overnight") and _quote_looks_like_rth_close(
-                mem
-            ):
+            if phase and _is_ext_phase(phase) and _quote_looks_like_rth_close(mem):
                 drop = True
             if drop:
                 mem.pop("quote_time", None)
@@ -798,8 +805,8 @@ def _1d_stamp_mismatch_phase(payload: dict[str, Any] | None, phase: str) -> bool
     if phase == "settle":
         # 盘后：不应还停在常规收盘 16:00
         return _quote_looks_like_rth_close(row)
-    if phase == "overnight":
-        # 夜盘：收盘印记/快照一律视为不符（须换成盘后扩展戳，禁止停在北京04:00）
+    if phase in ("overnight", "closed"):
+        # 夜盘/休市：收盘印记/快照一律视为不符（须换成盘后扩展戳，禁止停在北京04:00）
         if _quote_looks_like_rth_close(row):
             return True
         if (payload.get("data_time_1d_source") or "") == "session_close":
@@ -837,7 +844,7 @@ def _1d_lag_too_large(payload: dict[str, Any] | None, phase: str) -> bool:
     if phase == "settle":
         # 盘后 16:00–20:00：成交不如盘中密，20 分钟内扩展价可展示
         return lag > 20 * 60
-    # overnight：公共源无 ATS，周五盘后戳要撑过周末；拦「跨过一个完整交易日」的陈旧缓存
+    # overnight/closed：公共源无 ATS，周五盘后戳要撑过周末；拦「跨过一个完整交易日」的陈旧缓存
     return lag > 60 * 60 * 36
 
 
@@ -956,13 +963,18 @@ def _needs_1d_refresh(
 
 
 async def _quotes_for_1d_overlay(phase: str) -> tuple[dict[str, Any], str]:
-    """盘中用多源快路；扩展时段优先会话价，避免东财停在常规收盘涨跌。
+    """按时段拉 1D 报价（有数必拉；与是否周末无关）。
 
-    盘中若 Finnhub 限流、东财缺票，再短超时补会话源，保证 1D 覆盖。
+    数据源：
+    - 盘中 rth：东财/Finnhub 快路，缺口再补会话源。
+    - 盘前/盘后/夜盘/休市：``get_quotes_session_aware``
+      （CNBC 扩展价 → 新浪 → Yahoo → Finnhub…）。
+      夜盘 ATS 无免费源时，CNBC/新浪返回的是**最近盘后**，不是付费 ATS。
     """
     from app.heatmap import get_quotes_for_symbols, get_quotes_session_aware
 
     symbols = all_symbols()
+    # 非盘中（含周末 closed）：一律走会话源，确保盘前/盘后有数就拉到
     if phase != "rth":
         return await get_quotes_session_aware(symbols)
 
@@ -1160,10 +1172,10 @@ async def _overlay_live_1d(
             ),
             False,
         )
-    # 夜盘/盘后：禁止用 rth_fallback（常规收盘）冒充成功 live
+    # 夜盘/盘前/休市：禁止用 rth_fallback（常规收盘）冒充成功 live
     from app.heatmap import _quote_looks_like_rth_close as _rth_close
 
-    if phase in ("overnight", "pre_open") and (
+    if phase in ("overnight", "pre_open", "closed") and (
         qkind == "rth_fallback"
         or _rth_close(
             {
@@ -1200,11 +1212,11 @@ async def _overlay_live_1d(
             ),
             False,
         )
-    if phase == "overnight":
+    if phase in ("overnight", "closed"):
         out["live_1d_note"] = (
-            "夜盘无免费 ATS，已用夜盘前最新盘后价"
+            "休市/夜盘无免费 ATS，已用最近盘后价"
             if qkind in ("session", "session+rth_holes")
-            else "夜盘暂无扩展价，正在重拉"
+            else "暂无扩展价，正在重拉"
         )
     elif "rth_stamp_heavy" in str(src) and phase in ("pre_open", "settle"):
         out["live_1d_note"] = "扩展时段会话源偏弱，部分报价仍可能停在常规收盘"
@@ -1301,7 +1313,7 @@ def _has_ext_live_1d(payload: dict[str, Any] | None, phase: str) -> bool:
         "quote_time": payload.get("data_time_1d_bj"),
         "quote_time_et": payload.get("data_time_1d_et"),
     }
-    if phase in ("pre_open", "settle", "overnight") and _quote_looks_like_rth_close(row):
+    if _is_ext_phase(phase) and _quote_looks_like_rth_close(row):
         return False
     return bool(payload.get("data_time_1d_bj") or payload.get("data_time_1d_et"))
 
