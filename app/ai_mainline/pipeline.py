@@ -27,7 +27,10 @@ ET = ZoneInfo("America/New_York")
 
 _CACHE: dict[str, Any] = {"ts": 0.0, "quote_ts": 0.0, "data": None, "phase": None}
 _OVERLAY_BG = False
+_OVERLAY_BG_STARTED = 0.0
 _FULL_BG = False
+# 后台叠加卡住超过此时长允许重新调度（避免 _OVERLAY_BG 永久挡住盘后刷新）
+_OVERLAY_BG_STALE_SEC = 75.0
 _COMPUTE_BUDGET_SEC = 110.0  # 报价 + 日K 软截止；超时回退库内快照（不编造）
 _PERIOD_BUDGET_SEC = 75.0
 _PERIOD_BUDGET_SETTLE_SEC = 180.0  # 收盘结算窗给足时间写全日 K
@@ -273,13 +276,16 @@ def _finalize_payload(payload: dict[str, Any]) -> dict[str, Any]:
         out.update(_daily_session_close_times(out.get("trade_date")))
     if not out.get("updated_bj"):
         out["updated_bj"] = now_beijing().strftime("%Y-%m-%d %H:%M")
-    # 安全网：任何路径都不得把滞后印记标成「最新1D」
+    # 安全网：任何路径都不得把滞后/收盘印记标成「最新1D」
     if _live_1d_active(phase):
-        if out.get("live_1d") and _1d_lag_too_large(out, phase):
+        bad_live = bool(out.get("live_1d")) and (
+            _1d_lag_too_large(out, phase) or not _has_ext_live_1d(out, phase)
+        )
+        if bad_live:
             keep = _has_holdable_1d(out)
             out = _mark_1d_pending(
                 _strip_stale_1d_fields(out, phase=phase),
-                note="1D 印记滞后，正在拉取最新…",
+                note="1D 印记非扩展最新，正在拉取盘后/会话价…",
                 keep_last_1d=keep,
             )
         elif out.get("1d_pending"):
@@ -662,10 +668,11 @@ def _filter_quotes_for_1d(
             kind = "session+rth_holes" if len(out) > len(non_rth) else "session"
             return out, kind
         return non_rth, "session"
-    # 盘前：宁可失败重试，也不把北京 04:00 常规收盘标成盘前 live
-    if phase == "pre_open":
+    # 盘前/夜盘：无扩展印记就失败重试，禁止把北京 04:00 常规收盘标成「最新1D」
+    # （夜盘曾用 rth_fallback 成功返回 → 页面长期停在 10.x 04:00，盘后价被机制抹掉）
+    if phase in ("pre_open", "overnight"):
         return {}, "no_ext"
-    # 盘后刚开始扩展源未齐时，允许短暂回退收盘价（须有真实印记）
+    # 盘后刚开始扩展源未齐时，允许短暂回退收盘价（须有真实印记）；仍标 rth_fallback 供上层慎用
     if phase == "settle":
         return stamped, "rth_fallback" if stamped else "no_ext"
     return stamped, "rth_fallback" if stamped else "no_ext"
@@ -705,8 +712,8 @@ def _strip_stale_1d_fields(
         "quote_time_et": out.get("data_time_1d_et"),
     }
     clear = _quote_stamp_too_old(stamp, now=now)
-    # 盘前/盘后：常规收盘印记一律清掉（勿继续展示为当前 1D）
-    if phase in ("pre_open", "settle") and _quote_looks_like_rth_close(stamp):
+    # 盘前/盘后/夜盘：常规收盘印记一律清掉（勿继续展示为当前 live 1D）
+    if phase in ("pre_open", "settle", "overnight") and _quote_looks_like_rth_close(stamp):
         clear = True
     # 印记相对当前时段已滞后：禁止继续展示为「最新1D」
     if phase and phase in ("pre_open", "rth", "settle") and _1d_lag_too_large(out, phase):
@@ -730,7 +737,9 @@ def _strip_stale_1d_fields(
         for m in theme.get("members") or []:
             mem = dict(m)
             drop = _quote_stamp_too_old(mem, now=now)
-            if phase in ("pre_open", "settle") and _quote_looks_like_rth_close(mem):
+            if phase in ("pre_open", "settle", "overnight") and _quote_looks_like_rth_close(
+                mem
+            ):
                 drop = True
             if drop:
                 mem.pop("quote_time", None)
@@ -774,8 +783,12 @@ def _1d_stamp_mismatch_phase(payload: dict[str, Any] | None, phase: str) -> bool
         # 盘后：不应还停在常规收盘 16:00
         return _quote_looks_like_rth_close(row)
     if phase == "overnight":
-        # 夜盘：宣称 live 却仍是收盘印记 → 重拉盘后回退价
-        return bool(payload.get("live_1d")) and _quote_looks_like_rth_close(row)
+        # 夜盘：收盘印记/快照一律视为不符（须换成盘后扩展戳，禁止停在北京04:00）
+        if _quote_looks_like_rth_close(row):
+            return True
+        if (payload.get("data_time_1d_source") or "") == "session_close":
+            return True
+        return not bool(payload.get("live_1d"))
     return False
 
 
@@ -1131,6 +1144,27 @@ async def _overlay_live_1d(
             ),
             False,
         )
+    # 夜盘/盘后：禁止用 rth_fallback（常规收盘）冒充成功 live
+    from app.heatmap import _quote_looks_like_rth_close as _rth_close
+
+    if phase in ("overnight", "pre_open") and (
+        qkind == "rth_fallback"
+        or _rth_close(
+            {
+                "quote_time": out.get("data_time_1d_bj"),
+                "quote_time_et": out.get("data_time_1d_et"),
+            }
+        )
+    ):
+        keep = _has_holdable_1d(payload)
+        return (
+            _mark_1d_pending(
+                _strip_stale_1d_fields(out, phase=phase),
+                note="暂无盘后/盘前扩展印记，已拒绝常规收盘04:00冒充最新1D",
+                keep_last_1d=keep,
+            ),
+            False,
+        )
     out["data_time_1d_source"] = "live_quote"
     out["live_1d"] = True
     out["1d_fresh"] = True
@@ -1153,8 +1187,8 @@ async def _overlay_live_1d(
     if phase == "overnight":
         out["live_1d_note"] = (
             "夜盘无免费 ATS，已用夜盘前最新盘后价"
-            if qkind == "session"
-            else "夜盘无扩展价，暂用常规收盘回退"
+            if qkind in ("session", "session+rth_holes")
+            else "夜盘暂无扩展价，正在重拉"
         )
     elif "rth_stamp_heavy" in str(src) and phase in ("pre_open", "settle"):
         out["live_1d_note"] = "扩展时段会话源偏弱，部分报价仍可能停在常规收盘"
@@ -1223,12 +1257,45 @@ async def _overlay_until_fresh(
     return last, False
 
 
+def _overlay_bg_busy() -> bool:
+    """后台叠加是否仍在跑；超时视为卡死，允许重新调度。"""
+    global _OVERLAY_BG, _OVERLAY_BG_STARTED
+    if not _OVERLAY_BG:
+        return False
+    age = time.time() - float(_OVERLAY_BG_STARTED or 0)
+    if age > _OVERLAY_BG_STALE_SEC:
+        logger.warning(
+            "ai_mainline overlay bg stale after %.0fs; allow reschedule", age
+        )
+        _OVERLAY_BG = False
+        _OVERLAY_BG_STARTED = 0.0
+        return False
+    return True
+
+
+def _has_ext_live_1d(payload: dict[str, Any] | None, phase: str) -> bool:
+    """是否已有可展示的扩展时段 live 1D（非收盘快照/非04:00）。"""
+    if not payload or not payload.get("live_1d") or payload.get("1d_pending"):
+        return False
+    if (payload.get("data_time_1d_source") or "") == "session_close":
+        return False
+    from app.heatmap import _quote_looks_like_rth_close
+
+    row = {
+        "quote_time": payload.get("data_time_1d_bj"),
+        "quote_time_et": payload.get("data_time_1d_et"),
+    }
+    if phase in ("pre_open", "settle", "overnight") and _quote_looks_like_rth_close(row):
+        return False
+    return bool(payload.get("data_time_1d_bj") or payload.get("data_time_1d_et"))
+
+
 def _schedule_overlay_bg(base: dict[str, Any], phase: str) -> None:
     """1D 叠加放到后台，避免 /api/ai-mainline 卡在慢源上。"""
     import asyncio
 
-    global _OVERLAY_BG
-    if _OVERLAY_BG or not base:
+    global _OVERLAY_BG, _OVERLAY_BG_STARTED
+    if not base or _overlay_bg_busy():
         return
     try:
         loop = asyncio.get_running_loop()
@@ -1236,20 +1303,62 @@ def _schedule_overlay_bg(base: dict[str, Any], phase: str) -> None:
         return
 
     async def _run() -> None:
-        global _OVERLAY_BG
+        global _OVERLAY_BG, _OVERLAY_BG_STARTED
         try:
-            overlaid, ok = await _overlay_until_fresh(base, phase=phase, attempts=1)
+            overlaid, ok = await asyncio.wait_for(
+                _overlay_until_fresh(base, phase=phase, attempts=2),
+                timeout=55.0,
+            )
             _CACHE["data"] = overlaid
             _CACHE["phase"] = phase
             if ok:
                 _CACHE["quote_ts"] = time.time()
+            else:
+                _CACHE["quote_ts"] = 0.0
         except Exception:
             logger.exception("ai_mainline overlay background failed")
         finally:
             _OVERLAY_BG = False
+            _OVERLAY_BG_STARTED = 0.0
 
     _OVERLAY_BG = True
+    _OVERLAY_BG_STARTED = time.time()
     loop.create_task(_run())
+
+
+async def _ensure_live_1d(
+    payload: dict[str, Any], phase: str, *, sync_timeout: float = 28.0
+) -> dict[str, Any]:
+    """缺扩展 live 时先同步叠一层（限时），避免页面长期停在收盘04:00。"""
+    import asyncio
+
+    if not _live_1d_active(phase):
+        return payload
+    if _has_ext_live_1d(payload, phase):
+        return payload
+    try:
+        overlaid, ok = await asyncio.wait_for(
+            _overlay_until_fresh(payload, phase=phase, attempts=2),
+            timeout=sync_timeout,
+        )
+        if ok:
+            _CACHE["quote_ts"] = time.time()
+        else:
+            _CACHE["quote_ts"] = 0.0
+            # 同步未成再挂后台重试
+            _schedule_overlay_bg(overlaid, phase)
+        return overlaid
+    except Exception as exc:
+        logger.info("ai_mainline sync 1d overlay: %s", type(exc).__name__)
+        keep = _has_holdable_1d(payload)
+        pending = _mark_1d_pending(
+            _strip_stale_1d_fields(dict(payload), phase=phase),
+            note="1D 扩展行情拉取超时，正在后台重试",
+            keep_last_1d=keep,
+        )
+        _CACHE["quote_ts"] = 0.0
+        _schedule_overlay_bg(pending, phase)
+        return pending
 
 
 def _schedule_full_refresh_bg() -> None:
@@ -1614,15 +1723,22 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
             need_overlay, reason = _needs_1d_refresh(
                 cached, phase, quote_age=quote_age
             )
+            out = cached
             if need_overlay:
                 logger.info(
-                    "ai_mainline 1d refresh bg phase=%s reason=%s quote_age=%.0fs",
+                    "ai_mainline 1d refresh phase=%s reason=%s quote_age=%.0fs",
                     phase,
                     reason,
                     quote_age,
                 )
-                _schedule_overlay_bg(cached, phase)
-            return _finalize_payload(cached)
+                # 缺扩展 live（常见：库快照停在北京04:00）→ 同步叠盘后，勿只丢后台
+                if not _has_ext_live_1d(cached, phase):
+                    out = await _ensure_live_1d(cached, phase)
+                    _CACHE["data"] = out
+                    _CACHE["phase"] = phase
+                else:
+                    _schedule_overlay_bg(cached, phase)
+            return _finalize_payload(out)
 
         if not needs_full and base is not None:
             out = base
@@ -1630,11 +1746,11 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
                 need, reason = _needs_1d_refresh(base, phase, quote_age=1e9)
                 if need:
                     logger.info(
-                        "ai_mainline 1d refresh from base bg phase=%s reason=%s",
+                        "ai_mainline 1d refresh from base phase=%s reason=%s",
                         phase,
                         reason,
                     )
-                    _schedule_overlay_bg(base, phase)
+                    out = await _ensure_live_1d(base, phase)
             elif out is db_payload and out is not None:
                 out = dict(out)
                 out["note"] = (out.get("note") or "") or (
@@ -1652,13 +1768,13 @@ async def compute_mainline(force: bool = False) -> dict[str, Any]:
         )
         if not force and base and _period_coverage(base) >= _COV_OK:
             _schedule_full_refresh_bg()
+            out = base
             if _live_1d_active(phase):
-                _schedule_overlay_bg(base, phase)
-            if not _CACHE.get("data"):
-                _CACHE["data"] = base
+                out = await _ensure_live_1d(base, phase)
+            _CACHE["data"] = out
             _CACHE["ts"] = now
             _CACHE["phase"] = phase
-            return _finalize_payload(base)
+            return _finalize_payload(out)
 
     period_budget = (
         _PERIOD_BUDGET_SETTLE_SEC

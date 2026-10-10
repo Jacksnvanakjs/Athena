@@ -166,6 +166,48 @@ def test_overnight_rejects_unstamped_alt_as_session():
     assert kind2 == "no_ext"
 
 
+def test_overnight_rejects_pure_rth_close_as_live():
+    """夜盘仅有北京04:00/美东16:00时必须 no_ext，禁止 rth_fallback 冒充最新。"""
+    from app.ai_mainline.pipeline import _filter_quotes_for_1d, _has_ext_live_1d
+
+    only_rth = {
+        "NVDA": {
+            "change_pct": -0.5,
+            "quote_source": "sina",
+            "quote_time_et": "2026-10-09 16:00:00 EDT",
+            "quote_time": "2026-10-10 04:00:00",
+        }
+    }
+    use, kind = _filter_quotes_for_1d(only_rth, "overnight")
+    assert use == {}
+    assert kind == "no_ext"
+
+    assert (
+        _has_ext_live_1d(
+            {
+                "live_1d": True,
+                "data_time_1d_bj": "2026-10-10 04:00:00",
+                "data_time_1d_et": "2026-10-09 16:00:00 EDT",
+                "data_time_1d_source": "live_quote",
+            },
+            "overnight",
+        )
+        is False
+    )
+    assert (
+        _has_ext_live_1d(
+            {
+                "live_1d": True,
+                "data_time_1d_bj": "2026-10-10 08:00:00",
+                "data_time_1d_et": "2026-10-09 20:00:00 EDT",
+                "data_time_1d_source": "live_quote",
+            },
+            "overnight",
+        )
+        is True
+    )
+
+
 def test_overlay_refuses_unstamped_alt_as_live_1d(monkeypatch):
     """无真实印记时不得标 live_1d，也不得写入 overlay_refresh 墙钟。"""
     import asyncio
