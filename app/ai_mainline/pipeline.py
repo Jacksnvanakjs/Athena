@@ -695,6 +695,9 @@ def _filter_quotes_for_1d(
             for k, v in stamped.items():
                 if k not in out:
                     out[k] = v
+            # 休市/夜盘：盘后中段印记规范为 20:00（北京08:00），避免长期停在 05:33
+            if phase in ("overnight", "closed"):
+                out = {k: _normalize_completed_post_quote(v) for k, v in out.items()}
             kind = "session+rth_holes" if len(out) > len(non_rth) else "session"
             return out, kind
         return non_rth, "session"
@@ -778,6 +781,36 @@ def _strip_stale_1d_fields(
     return out
 
 
+def _is_incomplete_post_stamp(
+    row: dict[str, Any] | None, *, now: datetime | None = None
+) -> bool:
+    """盘后会话已结束后仍停在 16:00–20:00 内的「最后一笔」(如北京05:33)。"""
+    dt = _parse_member_quote_dt(row)
+    if dt is None:
+        return False
+    mins = dt.hour * 60 + dt.minute
+    if mins < 16 * 60 or mins >= 20 * 60:
+        return False
+    now = now or datetime.now(ET)
+    post_end = dt.replace(hour=20, minute=0, second=0, microsecond=0)
+    return now >= post_end
+
+
+def _normalize_completed_post_quote(row: dict[str, Any]) -> dict[str, Any]:
+    """盘后已结束后：印记规范为当日美东 20:00（北京次日 08:00），价格不变。"""
+    if not _is_incomplete_post_stamp(row):
+        return row
+    dt = _parse_member_quote_dt(row)
+    if dt is None:
+        return row
+    post_end = dt.replace(hour=20, minute=0, second=0, microsecond=0)
+    out = dict(row)
+    bj = ZoneInfo("Asia/Shanghai")
+    out["quote_time_et"] = post_end.strftime("%Y-%m-%d %H:%M:%S %Z")
+    out["quote_time"] = post_end.astimezone(bj).strftime("%Y-%m-%d %H:%M:%S")
+    return out
+
+
 def _1d_stamp_mismatch_phase(payload: dict[str, Any] | None, phase: str) -> bool:
     """缓存 1D 印记与当前时段不符 → 必须重拉（避免盘前还挂昨收 04:00）。"""
     if not payload:
@@ -814,6 +847,9 @@ def _1d_stamp_mismatch_phase(payload: dict[str, Any] | None, phase: str) -> bool
         if _quote_looks_like_rth_close(row):
             return True
         if (payload.get("data_time_1d_source") or "") == "session_close":
+            return True
+        # 停在盘后中段 17:33/北京05:33 → 重拉并规范到 20:00/北京08:00
+        if _is_incomplete_post_stamp(row):
             return True
         return not bool(payload.get("live_1d"))
     return False

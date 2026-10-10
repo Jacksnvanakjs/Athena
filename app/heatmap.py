@@ -1046,11 +1046,22 @@ def _cnbc_quote_times(ext: dict[str, Any], status: str) -> tuple[str | None, str
         else:
             hour = 16
 
+    # 盘后会话已结束：勿用盘中最后一笔 17:33 冒充「最新盘后」；规范为当日 20:00
+    # （北京次日 08:00）。盘后进行中（未到 20:00）仍保留真实最后成交时刻。
+    st_u = (status or str(ext.get("type") or "")).upper()
+    now_et = datetime.now(_US_TZ)
+    if ("POST" in st_u or "CLOSED" in st_u) and 16 <= hour < 20:
+        post_end = datetime(
+            et_date.year, et_date.month, et_date.day, 20, 0, 0, tzinfo=_US_TZ
+        )
+        if now_et >= post_end:
+            hour, minute = 20, 0
+
     dt_et = datetime(
         et_date.year, et_date.month, et_date.day, hour, minute, 0, tzinfo=_US_TZ
     )
     # 过旧会话价不当作「实时」：超过 2 个自然日则丢弃时间戳
-    age_days = (datetime.now(_US_TZ).date() - et_date).days
+    age_days = (now_et.date() - et_date).days
     if age_days > 2:
         return None, None
     return (

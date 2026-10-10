@@ -52,6 +52,39 @@ def test_cnbc_live_post_uses_extended():
     assert "2026-09-24 20:00" in (row.get("quote_time_et") or "")
 
 
+def test_post_mid_print_normalizes_to_session_end_when_closed():
+    """休市后：盘后中段 05:33/17:33 规范为北京08:00 / 美东20:00，涨跌不变。"""
+    from app.ai_mainline.pipeline import (
+        _1d_stamp_mismatch_phase,
+        _filter_quotes_for_1d,
+        _normalize_completed_post_quote,
+    )
+
+    mid = {
+        "change_pct": -0.5,
+        "quote_time": "2026-10-10 05:33:00",
+        "quote_time_et": "2026-10-09 17:33:00 EDT",
+    }
+    norm = _normalize_completed_post_quote(mid)
+    assert "20:00" in (norm.get("quote_time_et") or "")
+    assert "08:00" in (norm.get("quote_time") or "")
+    assert norm["change_pct"] == -0.5
+
+    assert _1d_stamp_mismatch_phase(
+        {
+            "live_1d": True,
+            "data_time_1d_bj": mid["quote_time"],
+            "data_time_1d_et": mid["quote_time_et"],
+        },
+        "closed",
+    )
+
+    use, kind = _filter_quotes_for_1d({"NVDA": mid}, "closed")
+    assert kind == "session"
+    assert "08:00" in use["NVDA"]["quote_time"]
+    assert use["NVDA"]["change_pct"] == -0.5
+
+
 def test_rth_stamp_detector():
     assert _quote_looks_like_rth_close(
         {"quote_time": "2026-09-25 04:00:00", "quote_time_et": "2026-09-24 16:00:00 EDT"}
